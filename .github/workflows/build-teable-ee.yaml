@@ -14,12 +14,12 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [db-migrate]
+        target: [app, db-migrate]
         arch: [amd64, arm64]
         include:
-          # - target: app
-          #   file: Dockerfile
-          #   image: teable-ee
+          - target: app
+            file: Dockerfile
+            image: teable-ee
           - target: db-migrate
             file: Dockerfile.db-migrate
             image: teable-db-migrate-ee
@@ -91,10 +91,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [db-migrate]
+        target: [app, db-migrate]
         include:
-          # - target: app
-          #   image: teable-ee
+          - target: app
+            image: teable-ee
           - target: db-migrate
             image: teable-db-migrate-ee
 
