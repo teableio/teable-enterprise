@@ -1,0 +1,146 @@
+name: Build teable EE
+
+concurrency: 
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [build-ee]
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [db-migrate]
+        arch: [amd64, arm64]
+        include:
+          # - target: app
+          #   file: Dockerfile
+          #   image: teable-ee
+          - target: db-migrate
+            file: Dockerfile.db-migrate
+            image: teable-db-migrate-ee
+
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          submodules: 'true'
+
+      - name: Get teable-ee SHA
+        id: get_sha
+        run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - name: Login to Docker Hub registry
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKER_HUB_NAME }}
+          password: ${{ secrets.DOCKER_HUB_AK }}
+
+      - name: Login to Ali container registry
+        uses: docker/login-action@v3
+        with:
+          registry: registry.cn-shenzhen.aliyuncs.com
+          username: ${{ vars.ALI_DOCKER_USERNAME }}
+          password: ${{ secrets.ALI_DOCKER_PASSWORD }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.9.0
+      - name: ⚙️ Install zx
+        run: npm install -g zx
+
+      - name: ⚙️ Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            registry.cn-shenzhen.aliyuncs.com/teable/${{ matrix.image }}
+            ghcr.io/teableio/${{ matrix.image }}
+            docker.io/teableio/${{ matrix.image }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ steps.get_sha.outputs.sha }}
+
+      - name: ⚙️ Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: 📦 Build and push
+        run: |
+          zx scripts/build-image.mjs --file=dockers/teable/${{ matrix.file }} \
+              --build-arg="ENABLE_CSP=false" \
+              --build-arg="NEXT_BUILD_ENV_EDITION=EE" \
+              --tag="${{ steps.meta.outputs.tags }}" \
+              --platform="linux/${{ matrix.arch }}" \
+              --push
+
+  create-manifest:
+    needs: build-push
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [db-migrate]
+        include:
+          # - target: app
+          #   image: teable-ee
+          - target: db-migrate
+            image: teable-db-migrate-ee
+
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          submodules: 'true'
+
+      - name: Get teable-ee SHA
+        id: get_sha
+        run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - name: Login to Docker Hub registry
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKER_HUB_NAME }}
+          password: ${{ secrets.DOCKER_HUB_AK }}
+
+      - name: Login to Ali container registry
+        uses: docker/login-action@v3
+        with:
+          registry: registry.cn-shenzhen.aliyuncs.com
+          username: ${{ vars.ALI_DOCKER_USERNAME }}
+          password: ${{ secrets.ALI_DOCKER_PASSWORD }}
+
+      - name: Create and push manifest
+        run: |
+          REGISTRIES=("registry.cn-shenzhen.aliyuncs.com/teable" "ghcr.io/teableio" "docker.io/teableio")
+          TAGS=("latest" "${{ steps.get_sha.outputs.sha }}")
+          
+          for REGISTRY in "${REGISTRIES[@]}"; do
+            for TAG in "${TAGS[@]}"; do
+              docker manifest create $REGISTRY/${{ matrix.image }}:$TAG \
+                $REGISTRY/${{ matrix.image }}:${TAG}-amd64 \
+                $REGISTRY/${{ matrix.image }}:${TAG}-arm64
+              
+              docker manifest push $REGISTRY/${{ matrix.image }}:$TAG
+            done
+          done
