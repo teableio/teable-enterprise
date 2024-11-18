@@ -1,0 +1,165 @@
+# name: Trigger Docker Build
+
+# on:
+#   pull_request:
+#     types: [closed]
+
+# jobs:
+#   trigger:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Trigger public repo workflow (build-cloud)
+#         run: |
+#           curl -X POST \
+#             -H "Authorization: token ${{ secrets.PACKAGES_KEY }}" \
+#             -H "Accept: application/vnd.github.v3+json" \
+#             https://api.github.com/repos/teableio/teable-enterprise/dispatches \
+#             -d '{
+#               "event_type": "preview-cloud",
+#               "client_payload": {
+#                 "pr_number": ${{ github.event.pull_request.number }}
+#               }
+#             }'
+
+
+name: Preview PR
+
+on:
+  repository_dispatch:
+    types: [preview-cloud]
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - image: teable-cloud
+            file: Dockerfile
+          - image: teable-db-migrate-cloud
+            file: Dockerfile.db-migrate
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          submodules: 'true'
+
+      - name: Get teable-ee SHA
+        id: get_sha
+        run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Login to Ali container registry
+        uses: docker/login-action@v3
+        with:
+          registry: registry.cn-shenzhen.aliyuncs.com
+          username: ${{ secrets.ALI_DOCKER_USERNAME }}
+          password: ${{ secrets.ALI_DOCKER_PASSWORD }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.9.0
+      - name: ⚙️ Install zx
+        run: npm install -g zx
+
+      - name: ⚙️ Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            registry.cn-shenzhen.aliyuncs.com/teable/${{ matrix.image }}
+          tags: |
+            type=raw,value=alpha-pr-${{ github.event.client_payload.pr_number }}
+            type=raw,value=${{ steps.get_sha.outputs.sha }}
+      - name: ⚙️ Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: 📦 Build and push
+        run: |
+          zx scripts/build-image.mjs --file=dockers/teable/${{ matrix.file }} \
+              --build-arg="ENABLE_CSP=false" \
+              --build-arg="NEXT_BUILD_ENV_EDITION=CLOUD" \
+              --tag="${{ steps.meta.outputs.tags }}" \
+              --platform="linux/amd64" \
+              --push
+
+  deploy:
+    needs: [build-push]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout private repository
+      uses: actions/checkout@v4
+      with:
+        repository: teableio/teable-ee
+        token: ${{ secrets.PACKAGES_KEY }}
+        submodules: 'true'
+
+    - name: Get teable-ee SHA
+      id: get_sha
+      run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+    - name: Create deployment YAML
+      env:
+        INSTANCE_NAME: pr-cloud-${{ github.event.client_payload.pr_number }}
+        INSTANCE_DOMAIN: pr-cloud-${{ github.event.client_payload.pr_number }}
+        DISPLAY_NAME: "teable-pr-cloud-${{ github.event.client_payload.pr_number }}"
+        MAIN_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud
+        DB_MIGRATE_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-db-migrate-cloud
+        IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}-amd64
+      run: |
+        cp .github/workflows/templates/preview-template.yaml deploy.yaml
+        sed -i "s#__INSTANCE_NAME__#${{ env.INSTANCE_NAME }}#g" deploy.yaml
+        sed -i "s#__INSTANCE_DOMAIN__#${{ env.INSTANCE_DOMAIN }}#g" deploy.yaml
+        sed -i "s#__MAIN_IMAGE_REPOSITORY__#${{ env.MAIN_IMAGE_REPOSITORY }}#g" deploy.yaml
+        sed -i "s#__DB_MIGRATE_IMAGE_REPOSITORY__#${{ env.DB_MIGRATE_IMAGE_REPOSITORY }}#g" deploy.yaml
+        sed -i "s#__IMAGE_TAG__#${{ env.IMAGE_TAG }}#g" deploy.yaml
+        sed -i "s#__DISPLAY_NAME__#${{ env.DISPLAY_NAME }}#g" deploy.yaml
+
+    - name: Apply deploy job
+      uses: actions-hub/kubectl@master
+      env:
+        KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+      with:
+        args: apply -f deploy.yaml
+
+    - name: Rollout status
+      uses: actions-hub/kubectl@master
+      env:
+        KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+      with:
+        args: rollout status deployment/teable-${{ env.INSTANCE_NAME }} --timeout=300s
+
+    - name: Wait for application health check
+      uses: actions-hub/kubectl@master
+      env:
+        KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+      with:
+        args: exec deployment/teable-${{ env.INSTANCE_NAME }} -- curl -f --retry 30 --retry-delay 5 --retry-connrefused http://localhost:3000/health
+
+    - name: Create deployment status comment
+      if: always()
+      env:
+        INSTANCE_DOMAIN: pr-cloud-${{ github.event.client_payload.pr_number }}
+        JOB_STATUS: ${{ job.status }}
+        GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const success = process.env.JOB_STATUS === 'success';
+          const deploymentUrl = `https://${process.env.INSTANCE_DOMAIN}.sealosgzg.site`;
+          const status = success ? '✅ Success' : '❌ Failed';
+          console.log(process.env.JOB_STATUS);
+
+          const commentBody = `**Deployment Status: ${status}**
+          ${success ? `🔗 Preview URL: ${deploymentUrl}` : ''}`;
+
+          await github.rest.issues.createComment({
+            owner: 'teableio',
+            repo: 'teable-ee',
+            issue_number: context.payload.client_payload.pr_number,
+            body: commentBody,
+            headers: {
+              authorization: `token ${process.env.GH_TOKEN}`
+            }
+          });

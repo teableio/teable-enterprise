@@ -120,7 +120,7 @@ jobs:
               containers:
                 - name: teable
                   image: "registry.cn-shenzhen.aliyuncs.com/teable/teable-db-migrate-cloud:${{ steps.get_sha.outputs.sha }}-amd64"
-                  imagePullPolicy: Always
+                  imagePullPolicy: IfNotPresent
                   env:
                     - name: "PRISMA_DATABASE_URL"
                       value: "${{ secrets.PRISMA_DATABASE_URL }}"
