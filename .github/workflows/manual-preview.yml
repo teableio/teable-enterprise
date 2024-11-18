@@ -130,12 +130,14 @@ jobs:
           const commentBody = `**Deployment Status: ${status}**
           ${success ? `🔗 Preview URL: ${deploymentUrl}` : ''}`;
 
-          await github.rest.issues.createComment({
+          const { Octokit } = require("@octokit/rest")
+          const customOctokit = new Octokit({
+            auth: process.env.GH_TOKEN
+          })
+          
+          await customOctokit.rest.issues.createComment({
             owner: 'teableio',
             repo: 'teable-ee',
             issue_number: context.payload.client_payload.pr_number,
-            body: commentBody,
-            headers: {
-              authorization: `token ${process.env.GH_TOKEN}`
-            }
+            body: commentBody
           });

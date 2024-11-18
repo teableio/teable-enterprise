@@ -45,6 +45,11 @@ jobs:
         uses: actions/github-script@v6
         with:
           script: |
+            const { Octokit } = require("@octokit/rest")
+            const customOctokit = new Octokit({
+              auth: process.env.GH_TOKEN
+            })
+            
             const prNumber = context.payload.pull_request.number;
             const mergeStatus = context.payload.pull_request.merged ? 'Merged' : 'Closed';
             
@@ -53,12 +58,9 @@ jobs:
             * Cloud preview environment has been deleted
             * Cleanup time: ${new Date().toISOString()}`;
 
-            await github.rest.issues.createComment({
+            await customOctokit.rest.issues.createComment({
               owner: 'teableio',
               repo: 'teable-ee',
               issue_number: prNumber,
-              body: commentBody,
-              headers: {
-                authorization: `token ${process.env.GH_TOKEN}`
-              }
+              body: commentBody
             });
