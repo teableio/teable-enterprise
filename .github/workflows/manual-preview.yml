@@ -64,6 +64,10 @@ jobs:
   deploy:
     needs: [build-push]
     runs-on: ubuntu-latest
+    env:
+      INSTANCE_NAME: pr-cloud-${{ github.event.client_payload.pr_number }}
+      INSTANCE_DOMAIN: pr-cloud-${{ github.event.client_payload.pr_number }}
+      DISPLAY_NAME: "teable-pr-cloud-${{ github.event.client_payload.pr_number }}"
     steps:
     - name: Checkout private repository
       uses: actions/checkout@v4
@@ -79,9 +83,6 @@ jobs:
 
     - name: Create deployment YAML
       env:
-        INSTANCE_NAME: pr-cloud-${{ github.event.client_payload.pr_number }}
-        INSTANCE_DOMAIN: pr-cloud-${{ github.event.client_payload.pr_number }}
-        DISPLAY_NAME: "teable-pr-cloud-${{ github.event.client_payload.pr_number }}"
         MAIN_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud
         DB_MIGRATE_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-db-migrate-cloud
         IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}-amd64
@@ -117,29 +118,21 @@ jobs:
 
     - name: Create deployment status comment
       if: always()
-      env:
-        INSTANCE_DOMAIN: pr-cloud-${{ github.event.client_payload.pr_number }}
-        JOB_STATUS: ${{ job.status }}
-        GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-      uses: actions/github-script@v6
-      with:
-        script: |
-          const success = process.env.JOB_STATUS === 'success';
-          const deploymentUrl = `https://${process.env.INSTANCE_DOMAIN}.sealosgzg.site`;
-          const status = success ? '✅ Success' : '❌ Failed';
-          console.log(process.env.JOB_STATUS);
+      run: |
+        SUCCESS="${{ job.status == 'success' }}"
+        DOMAIN="pr-cloud-${{ github.event.client_payload.pr_number }}"
+        URL="https://${DOMAIN}.sealosgzg.site"
+        
+        if [ "$SUCCESS" = "true" ]; then
+          STATUS="✅ Success"
+          BODY="**Deployment Status: ${STATUS}**%0A🔗 Preview URL: ${URL}"
+        else
+          STATUS="❌ Failed"
+          BODY="**Deployment Status: ${STATUS}**"
+        fi
 
-          const commentBody = `**Deployment Status: ${status}**
-          ${success ? `🔗 Preview URL: ${deploymentUrl}` : ''}`;
-
-          const { Octokit } = require("@octokit/rest")
-          const customOctokit = new Octokit({
-            auth: process.env.GH_TOKEN
-          })
-          
-          await customOctokit.rest.issues.createComment({
-            owner: 'teableio',
-            repo: 'teable-ee',
-            issue_number: context.payload.client_payload.pr_number,
-            body: commentBody
-          });
+        curl -X POST \
+          -H "Authorization: token ${{ secrets.PACKAGES_KEY }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "https://api.github.com/repos/teableio/teable-ee/issues/${{ github.event.client_payload.pr_number }}/comments" \
+          -d "{\"body\":\"${BODY}\"}"

@@ -18,9 +18,9 @@ jobs:
 
       - name: Create deployment YAML
         env:
-          INSTANCE_NAME: pr-cloud-${{ github.event.pull_request.number }}
-          INSTANCE_DOMAIN: pr-cloud-${{ github.event.pull_request.number }}
-          DISPLAY_NAME: "teable-pr-cloud-${{ github.event.pull_request.number }}"
+          INSTANCE_NAME: pr-cloud-${{ github.event.client_payload.pr_number }}
+          INSTANCE_DOMAIN: pr-cloud-${{ github.event.client_payload.pr_number }}
+          DISPLAY_NAME: "teable-pr-cloud-${{ github.event.client_payload.pr_number }}"
           MAIN_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud
           DB_MIGRATE_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-db-migrate-cloud
           IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}-amd64
@@ -41,27 +41,14 @@ jobs:
           args: delete -f deploy.yaml --ignore-not-found=true
 
       - name: Create cleanup status comment
-        env:
-          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const { Octokit } = require("@octokit/rest")
-            const customOctokit = new Octokit({
-              auth: process.env.GH_TOKEN
-            })
-            
-            const prNumber = context.payload.pull_request.number;
-            const mergeStatus = context.payload.pull_request.merged ? 'Merged' : 'Closed';
-            
-            const commentBody = `## 🧹 Preview Environment Cleanup
-            * PR #${prNumber} has been ${mergeStatus}
-            * Cloud preview environment has been deleted
-            * Cleanup time: ${new Date().toISOString()}`;
+        if: always()
+        run: |
+          PR_NUMBER="${{ github.event.client_payload.pr_number }}"
+          MERGE_STATUS="${{ github.event.client_payload.merged && 'Merged' || 'Closed' }}"
+          BODY="## 🧹 Preview Environment Cleanup%0A* PR #${PR_NUMBER} has been ${MERGE_STATUS}%0A* Cloud preview environment has been deleted%0A* Cleanup time: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
-            await customOctokit.rest.issues.createComment({
-              owner: 'teableio',
-              repo: 'teable-ee',
-              issue_number: prNumber,
-              body: commentBody
-            });
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.PACKAGES_KEY }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/teableio/teable-ee/issues/${PR_NUMBER}/comments" \
+            -d "{\"body\":\"${BODY}\"}"
