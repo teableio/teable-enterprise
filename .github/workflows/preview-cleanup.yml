@@ -1,4 +1,4 @@
-name: Cleanup Preview Environment
+name: Cleanup PR
 
 on:
   repository_dispatch:
