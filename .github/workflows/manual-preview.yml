@@ -125,7 +125,7 @@ jobs:
         
         if [ "$SUCCESS" = "true" ]; then
           STATUS="✅ Success"
-          BODY="**Deployment Status: ${STATUS}**%0A🔗 Preview URL: ${URL}"
+          BODY="**Deployment Status: ${STATUS}** 🔗 Preview URL: ${URL}"
         else
           STATUS="❌ Failed"
           BODY="**Deployment Status: ${STATUS}**"
