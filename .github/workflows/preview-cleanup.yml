@@ -16,6 +16,10 @@ jobs:
           submodules: 'true'
           ref: ${{ github.event.client_payload.ref }}
 
+      - name: Get teable-ee SHA
+        id: get_sha
+        run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
       - name: Create deployment YAML
         env:
           INSTANCE_NAME: pr-cloud-${{ github.event.client_payload.pr_number }}
@@ -41,7 +45,6 @@ jobs:
           args: delete -f deploy.yaml --ignore-not-found=true
 
       - name: Create cleanup status comment
-        if: always()
         run: |
           PR_NUMBER="${{ github.event.client_payload.pr_number }}"
           MERGE_STATUS="${{ github.event.client_payload.merged && 'Merged' || 'Closed' }}"
