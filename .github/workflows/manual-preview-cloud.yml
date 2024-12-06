@@ -1,4 +1,4 @@
-name: Preview PR
+name: Preview Cloud PR
 
 on:
   repository_dispatch:

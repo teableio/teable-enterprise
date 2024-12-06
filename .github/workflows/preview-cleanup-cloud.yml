@@ -1,4 +1,4 @@
-name: Cleanup PR
+name: Cleanup Cloud PR
 
 on:
   repository_dispatch:

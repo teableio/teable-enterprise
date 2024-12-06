@@ -1,8 +1,8 @@
-name: Cleanup PR
+name: Cleanup EE PR
 
 on:
   repository_dispatch:
-    types: [cleanup-cloud]
+    types: [cleanup-ee]
 
 jobs:
   check-pr:
@@ -69,7 +69,7 @@ jobs:
         run: |
           PR_NUMBER="${{ github.event.client_payload.pr_number }}"
           MERGE_STATUS="${{ github.event.client_payload.merged && 'Merged' || 'Closed' }}"
-          BODY="** 🧹 Preview Environment Cleanup ** * PR #${PR_NUMBER} has been ${MERGE_STATUS} * Cloud preview environment has been deleted * Cleanup time: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          BODY="** 🧹 Preview Environment Cleanup ** * PR #${PR_NUMBER} has been ${MERGE_STATUS} * EE preview environment has been deleted * Cleanup time: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
           curl -X POST \
             -H "Authorization: token ${{ secrets.PACKAGES_KEY }}" \

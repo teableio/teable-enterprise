@@ -1,4 +1,4 @@
-name: Preview PR
+name: Preview EE PR
 
 on:
   repository_dispatch:
