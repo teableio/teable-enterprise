@@ -2,32 +2,10 @@ name: Cleanup EE PR
 
 on:
   repository_dispatch:
-    types: [cleanup-ee]
+    types: [cleanup]
 
 jobs:
-  check-pr:
-    runs-on: ubuntu-latest
-    outputs:
-      should_cleanup: ${{ steps.check.outputs.should_cleanup }}
-    steps:
-      - name: Check PR labels
-        id: check
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const prNumber = context.payload.client_payload.pr_number;
-            const { data: pr } = await github.rest.pulls.get({
-              owner: 'teableio',
-              repo: 'teable-ee',
-              pull_number: prNumber
-            });
-            const hasPreviewLabel = pr.labels.some(label => label.name === 'preview-ee');
-            console.log('Has preview label:', hasPreviewLabel);
-            core.setOutput('should_cleanup', hasPreviewLabel.toString());
-
   cleanup:
-    needs: check-pr
-    if: needs.check-pr.outputs.should_cleanup == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout private repository
