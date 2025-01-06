@@ -65,6 +65,7 @@ jobs:
     needs: [build-push]
     runs-on: ubuntu-latest
     env:
+      NAMESPACE: ns-38puz7wo
       INSTANCE_NAME: pr-cloud-${{ github.event.client_payload.pr_number }}
       INSTANCE_DOMAIN: pr-cloud-${{ github.event.client_payload.pr_number }}
       DISPLAY_NAME: "teable-pr-cloud-${{ github.event.client_payload.pr_number }}"
@@ -88,6 +89,7 @@ jobs:
         IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}-amd64
       run: |
         cp .github/workflows/templates/preview-template.yaml deploy.yaml
+        sed -i "s#__NAMESPACE__#${{ env.NAMESPACE }}#g" deploy.yaml
         sed -i "s#__INSTANCE_NAME__#${{ env.INSTANCE_NAME }}#g" deploy.yaml
         sed -i "s#__INSTANCE_DOMAIN__#${{ env.INSTANCE_DOMAIN }}#g" deploy.yaml
         sed -i "s#__MAIN_IMAGE_REPOSITORY__#${{ env.MAIN_IMAGE_REPOSITORY }}#g" deploy.yaml
