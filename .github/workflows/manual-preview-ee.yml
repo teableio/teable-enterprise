@@ -65,7 +65,7 @@ jobs:
     needs: [build-push]
     runs-on: ubuntu-latest
     env:
-      NAMESPACE: ns-38puz7wo
+      NAMESPACE: 38puz7wo
       INSTANCE_NAME: pr-ee-${{ github.event.client_payload.pr_number }}
       INSTANCE_DOMAIN: pr-ee-${{ github.event.client_payload.pr_number }}
       DISPLAY_NAME: "teable-pr-ee-${{ github.event.client_payload.pr_number }}"
