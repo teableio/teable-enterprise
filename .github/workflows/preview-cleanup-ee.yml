@@ -26,7 +26,6 @@ jobs:
           INSTANCE_DOMAIN: pr-ee-${{ github.event.client_payload.pr_number }}
           DISPLAY_NAME: "teable-pr-ee-${{ github.event.client_payload.pr_number }}"
           MAIN_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-ee
-          DB_MIGRATE_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-db-migrate-ee
           IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}-amd64
         run: |
           cp .github/workflows/templates/preview-template.yaml deploy.yaml
