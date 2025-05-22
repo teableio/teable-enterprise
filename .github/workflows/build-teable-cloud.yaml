@@ -143,7 +143,7 @@ jobs:
       env:
         KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
       with:
-        args: wait --for=condition=complete job/teable-migration-${{ steps.get_sha.outputs.sha }} --timeout=600s
+        args: wait --for=condition=complete job/teable-migration-${{ steps.get_sha.outputs.sha }} --timeout=3600s
 
     - name: Update application deployment
       uses: actions-hub/kubectl@master
