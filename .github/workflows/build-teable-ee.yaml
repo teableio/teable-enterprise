@@ -20,9 +20,15 @@ jobs:
           - target: app
             file: Dockerfile
             image: teable-ee
+          - target: app
+            file: Dockerfile
+            image: teable
           - target: db-migrate
             file: Dockerfile.db-migrate
             image: teable-db-migrate-ee
+          - target: db-migrate
+            file: Dockerfile.db-migrate
+            image: teable-db-migrate
 
     steps:
       - name: Checkout private repository
@@ -95,8 +101,12 @@ jobs:
         include:
           - target: app
             image: teable-ee
+          - target: app
+            image: teable
           - target: db-migrate
             image: teable-db-migrate-ee
+          - target: db-migrate
+            image: teable-db-migrate
 
     steps:
       - name: Checkout private repository
