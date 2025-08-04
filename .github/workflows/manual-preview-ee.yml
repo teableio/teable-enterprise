@@ -10,10 +10,8 @@ jobs:
     strategy:
       matrix:
         include:
-          - image: teable-ee
+          - image: teable-ee-preview
             file: Dockerfile
-          - image: teable-db-migrate-ee
-            file: Dockerfile.db-migrate
     steps:
       - name: Checkout private repository
         uses: actions/checkout@v4
@@ -84,7 +82,7 @@ jobs:
 
     - name: Create deployment YAML
       env:
-        MAIN_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-ee
+        MAIN_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-ee-preview
         IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}-amd64
       run: |
         cp .github/workflows/templates/preview-template.yaml deploy.yaml

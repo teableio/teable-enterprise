@@ -10,10 +10,8 @@ jobs:
     strategy:
       matrix:
         include:
-          - image: teable-cloud
+          - image: teable-cloud-preview
             file: Dockerfile
-          - image: teable-db-migrate-cloud
-            file: Dockerfile.db-migrate
     steps:
       - name: Checkout private repository
         uses: actions/checkout@v4
@@ -53,7 +51,7 @@ jobs:
         with:
           images: |
             registry.cn-shenzhen.aliyuncs.com/teable/${{ matrix.image }}
-            ghcr.io/teableio/${{ matrix.image }}-preview
+            ghcr.io/teableio/${{ matrix.image }}
           tags: |
             type=raw,value=alpha-pr-${{ github.event.client_payload.pr_number }}
             type=raw,value=${{ steps.get_sha.outputs.sha }}
@@ -68,14 +66,6 @@ jobs:
               --tag="${{ steps.meta.outputs.tags }}" \
               --platform="linux/amd64" \
               --push
-
-      - name: Set package visibility to internal
-        run: |
-          curl -X PATCH \
-            -H "Authorization: token ${{ secrets.PACKAGES_KEY }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/orgs/teableio/packages/container/${{ matrix.image }}-preview" \
-            -d '{"visibility":"internal"}'
 
   deploy:
     needs: [build-push]
@@ -100,7 +90,7 @@ jobs:
 
     - name: Create deployment YAML
       env:
-        MAIN_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud
+        MAIN_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud-preview
         IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}-amd64
       run: |
         cp .github/workflows/templates/preview-template.yaml deploy.yaml
