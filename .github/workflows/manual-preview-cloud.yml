@@ -100,7 +100,7 @@ jobs:
         sed -i "s#__MAIN_IMAGE_REPOSITORY__#${{ env.MAIN_IMAGE_REPOSITORY }}#g" deploy.yaml
         sed -i "s#__IMAGE_TAG__#${{ env.IMAGE_TAG }}#g" deploy.yaml
         sed -i "s#__DISPLAY_NAME__#${{ env.DISPLAY_NAME }}#g" deploy.yaml
-        sed -i "s#__NEXT_BUILD_ENV_ASSET_PREFIX__#${{ secrets.OBJECTSTORAGE_ENDPOINT }}/${{ env.NAMESPACE }}-teable-${{ env.INSTANCE_NAME }}-public#g" deploy.yaml
+        sed -i "s#__NEXT_BUILD_ENV_ASSET_PREFIX__#${{ secrets.SEALOS_OBJECTSTORAGE_ENDPOINT }}/${{ env.NAMESPACE }}-teable-${{ env.INSTANCE_NAME }}-public#g" deploy.yaml
 
     - name: Apply deploy job
       uses: actions-hub/kubectl@master
@@ -128,7 +128,7 @@ jobs:
       env:
         KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
       with:
-        args: exec deployment/teable-${{ env.INSTANCE_NAME }} -- zx scripts/upload-assets.mjs --endpoint="${{ secrets.OBJECTSTORAGE_ENDPOINT }}" --access-key="${{ secrets.OBJECTSTORAGE_ACCESS_KEY }}" --secret-key="${{ secrets.OBJECTSTORAGE_SECRET_KEY }}" --bucket="${{ env.NAMESPACE }}-teable-${{ env.INSTANCE_NAME }}-public"  
+        args: exec deployment/teable-${{ env.INSTANCE_NAME }} -- zx scripts/upload-assets.mjs --endpoint="${{ secrets.SEALOS_OBJECTSTORAGE_ENDPOINT }}" --access-key="${{ secrets.SEALOS_OBJECTSTORAGE_ACCESS_KEY }}" --secret-key="${{ secrets.SEALOS_OBJECTSTORAGE_SECRET_KEY }}" --bucket="${{ env.NAMESPACE }}-teable-${{ env.INSTANCE_NAME }}-public"  
   
     - name: Create deployment status comment
       if: always()
