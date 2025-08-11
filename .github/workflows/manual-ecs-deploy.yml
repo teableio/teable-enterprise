@@ -1,0 +1,52 @@
+name: Manual ECS Deploy (Verify)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Docker image tag (e.g., 0.3.0-alpha-1.9.0-build.302-amd64)'
+        required: true
+
+jobs:
+  deploy:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition teable \
+            --query taskDefinition > task-definition-raw.json
+
+      - name: Clean task definition for registration
+        run: |
+          # Remove system-managed fields that cannot be used for new task definition registration
+          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy, .enableFaultInjection, .faultInjectionPolicy)' \
+            task-definition-raw.json > task-definition.json
+
+      - name: Render task definition with new image
+        id: render-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: teable
+          image: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-cloud:${{ inputs.image_tag }}
+
+      - name: Deploy to ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.render-task-def.outputs.task-definition }}
+          service: teable-service-1
+          cluster: teable
+          wait-for-service-stability: true
