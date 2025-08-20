@@ -162,18 +162,18 @@ jobs:
       env:
         KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
       with:
-        args: set image deployment/teable teable=registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud:${{ steps.get_sha.outputs.sha }}-amd64
+        args: set image deployment/teable-cloud teable=registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud:${{ steps.get_sha.outputs.sha }}-amd64
 
     - name: Update deployment annotations
       uses: actions-hub/kubectl@master
       env:
         KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
       with:
-        args: annotate deployment/teable originImageName="registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud:${{ steps.get_sha.outputs.sha }}-amd64" --overwrite
+        args: annotate deployment/teable-cloud originImageName="registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud:${{ steps.get_sha.outputs.sha }}-amd64" --overwrite
 
     - name: Rollout status
       uses: actions-hub/kubectl@master
       env:
         KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
       with:
-        args: rollout status deployment/teable
+        args: rollout status deployment/teable-cloud
