@@ -4,6 +4,12 @@ on:
   repository_dispatch:
     types: [preview-cloud]
 
+env:
+  NAMESPACE: 38puz7wo
+  INSTANCE_NAME: pr-cloud-${{ github.event.client_payload.pr_number }}
+  INSTANCE_DOMAIN: pr-cloud-${{ github.event.client_payload.pr_number }}
+  DISPLAY_NAME: "teable-pr-cloud-${{ github.event.client_payload.pr_number }}"
+
 jobs:
   build-push:
     runs-on: ubuntu-latest
@@ -65,16 +71,12 @@ jobs:
               --build-arg="NEXT_BUILD_ENV_EDITION=CLOUD" \
               --tag="${{ steps.meta.outputs.tags }}" \
               --platform="linux/amd64" \
+              --upload-assets-list='[["sealos-objectstorage","${{ secrets.SEALOS_OBJECTSTORAGE_ENDPOINT }}","${{ secrets.SEALOS_OBJECTSTORAGE_ACCESS_KEY }}","${{ secrets.SEALOS_OBJECTSTORAGE_SECRET_KEY }}","${{ env.NAMESPACE }}-teable-${{ env.INSTANCE_NAME }}-public"]]' \
               --push
 
   deploy:
     needs: [build-push]
     runs-on: ubuntu-latest
-    env:
-      NAMESPACE: 38puz7wo
-      INSTANCE_NAME: pr-cloud-${{ github.event.client_payload.pr_number }}
-      INSTANCE_DOMAIN: pr-cloud-${{ github.event.client_payload.pr_number }}
-      DISPLAY_NAME: "teable-pr-cloud-${{ github.event.client_payload.pr_number }}"
     steps:
     - name: Checkout private repository
       uses: actions/checkout@v4
@@ -100,6 +102,7 @@ jobs:
         sed -i "s#__MAIN_IMAGE_REPOSITORY__#${{ env.MAIN_IMAGE_REPOSITORY }}#g" deploy.yaml
         sed -i "s#__IMAGE_TAG__#${{ env.IMAGE_TAG }}#g" deploy.yaml
         sed -i "s#__DISPLAY_NAME__#${{ env.DISPLAY_NAME }}#g" deploy.yaml
+        sed -i "s#__NEXT_BUILD_ENV_ASSET_PREFIX__#${{ secrets.SEALOS_OBJECTSTORAGE_ENDPOINT }}/${{ env.NAMESPACE }}-teable-${{ env.INSTANCE_NAME }}-public#g" deploy.yaml
 
     - name: Apply deploy job
       uses: actions-hub/kubectl@master
