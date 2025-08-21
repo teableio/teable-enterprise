@@ -90,6 +90,6 @@ jobs:
               --tag="${{ steps.meta.outputs.tags }}" \
               --platform="linux/amd64" \
               --upload-assets-list='[["aws-objectstorage","","","","teable-next-asset"]]' \ 
-              --push
+              --push="true"
                           
           
