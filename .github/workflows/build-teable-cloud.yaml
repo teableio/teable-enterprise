@@ -8,6 +8,8 @@ on:
   workflow_dispatch:
   repository_dispatch:
     types: [build-cloud]
+env:
+  TEST: "test"
 
 jobs:
   build-push:
