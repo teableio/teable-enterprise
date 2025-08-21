@@ -17,11 +17,9 @@ jobs:
 
     strategy:
       matrix:
-        target: [app, db-migrate]
+        target: [db-migrate]
         include:
-          - target: app
-            file: Dockerfile
-            image: teable-cloud
+ 
           - target: db-migrate
             file: Dockerfile.db-migrate
             image: teable-db-migrate-cloud
