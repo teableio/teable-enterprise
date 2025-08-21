@@ -31,7 +31,7 @@ jobs:
           repository: teableio/teable-ee
           token: ${{ secrets.PACKAGES_KEY }}
           submodules: 'true'
-          ref: 'test/build-cloud'
+          ref: 'test/build-image'
 
       - name: Get teable-ee SHA
         id: get_sha
