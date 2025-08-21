@@ -88,8 +88,8 @@ jobs:
               --build-arg="NEXT_BUILD_ENV_EDITION=CLOUD" \
               --tag="${{ steps.meta.outputs.tags }}" \
               --platform="linux/amd64" \
-              --upload-assets-list='[["aws-objectstorage","https://s3.us-west-2.amazonaws.com","${{ secrets.AWS_ACCESS_KEY_ID }}","${{ secrets.AWS_SECRET_ACCESS_KEY }}","teable-next-asset"]]' \              
-              --push
+              --push \
+              --upload-assets-list='[["aws-objectstorage","https://s3.us-west-2.amazonaws.com","${{ secrets.AWS_ACCESS_KEY_ID }}","${{ secrets.AWS_SECRET_ACCESS_KEY }}","teable-next-asset"]]'              
 
   deploy:
     needs: build-push
