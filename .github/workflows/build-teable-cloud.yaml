@@ -89,7 +89,7 @@ jobs:
               --build-arg="NEXT_BUILD_ENV_EDITION=CLOUD" \
               --tag="${{ steps.meta.outputs.tags }}" \
               --platform="linux/amd64" \
-              --push \
-              --upload-assets-list='[["aws-objectstorage","","","","teable-next-asset"]]' 
+              --upload-assets-list='[["aws-objectstorage","","","","teable-next-asset"]]' \ 
+              --push
                           
           
