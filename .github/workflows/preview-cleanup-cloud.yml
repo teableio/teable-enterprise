@@ -13,7 +13,7 @@ jobs:
         with:
           repository: teableio/teable-ee
           token: ${{ secrets.PACKAGES_KEY }}
-          submodules: 'true'
+          submodules: "true"
 
       - name: Get teable-ee SHA
         id: get_sha
@@ -26,6 +26,7 @@ jobs:
           INSTANCE_DOMAIN: pr-cloud-${{ github.event.client_payload.pr_number }}
           DISPLAY_NAME: "teable-pr-cloud-${{ github.event.client_payload.pr_number }}"
           MAIN_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud
+          SANDBOX_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-cloud
           IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}-amd64
         run: |
           cp .github/workflows/templates/preview-template.yaml deploy.yaml
@@ -33,6 +34,7 @@ jobs:
           sed -i "s#__INSTANCE_NAME__#${{ env.INSTANCE_NAME }}#g" deploy.yaml
           sed -i "s#__INSTANCE_DOMAIN__#${{ env.INSTANCE_DOMAIN }}#g" deploy.yaml
           sed -i "s#__MAIN_IMAGE_REPOSITORY__#${{ env.MAIN_IMAGE_REPOSITORY }}#g" deploy.yaml
+          sed -i "s#__SANDBOX_IMAGE_REPOSITORY__#${{ env.SANDBOX_IMAGE_REPOSITORY }}#g" deploy.yaml
           sed -i "s#__IMAGE_TAG__#${{ env.IMAGE_TAG }}#g" deploy.yaml
           sed -i "s#__DISPLAY_NAME__#${{ env.DISPLAY_NAME }}#g" deploy.yaml
 
