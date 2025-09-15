@@ -54,6 +54,7 @@ jobs:
           images: |
             registry.cn-shenzhen.aliyuncs.com/teable/${{ matrix.image }}
             ghcr.io/teableio/${{ matrix.image }}
+            649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/${{ matrix.image }}
           tags: |
             type=raw,value=alpha-pr-${{ github.event.client_payload.pr_number }}
             type=raw,value=${{ steps.get_sha.outputs.sha }}
