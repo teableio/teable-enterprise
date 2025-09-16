@@ -77,12 +77,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ env.REGISTRY_ALI }}/${{ matrix.image }}${{ matrix.target == 'sandbox' && env.EE_IMAGE_SUFFIX || env.CE_IMAGE_SUFFIX }}
-            ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}${{ matrix.target == 'sandbox' && env.EE_IMAGE_SUFFIX || env.CE_IMAGE_SUFFIX }}
-            ${{ env.REGISTRY_DOCKERHUB }}/${{ matrix.image }}${{ matrix.target == 'sandbox' && env.EE_IMAGE_SUFFIX || env.CE_IMAGE_SUFFIX }}
-            ${{ matrix.target != 'sandbox' && format('{0}/{1}{2}', env.REGISTRY_ALI, matrix.image, env.EE_IMAGE_SUFFIX) || '' }}
-            ${{ matrix.target != 'sandbox' && format('{0}/{1}{2}', env.REGISTRY_GITHUB, matrix.image, env.EE_IMAGE_SUFFIX) || '' }}
-            ${{ matrix.target != 'sandbox' && format('{0}/{1}{2}', env.REGISTRY_DOCKERHUB, matrix.image, env.EE_IMAGE_SUFFIX) || '' }}
+            ${{ env.REGISTRY_ALI }}/${{ matrix.image }}${{ env.CE_IMAGE_SUFFIX }}
+            ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}${{ env.CE_IMAGE_SUFFIX }}
+            ${{ env.REGISTRY_DOCKERHUB }}/${{ matrix.image }}${{ env.CE_IMAGE_SUFFIX }}
+            ${{ env.REGISTRY_ALI }}/${{ matrix.image }}${{ env.EE_IMAGE_SUFFIX }}
+            ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}${{ env.EE_IMAGE_SUFFIX }}
+            ${{ env.REGISTRY_DOCKERHUB }}/${{ matrix.image }}${{ env.EE_IMAGE_SUFFIX }}
           tags: |
             type=raw,value=latest
             type=raw,value=${{ steps.get_sha.outputs.sha }}
@@ -149,12 +149,7 @@ jobs:
         run: |
           REGISTRIES=("${{ env.REGISTRY_ALI }}" "${{ env.REGISTRY_GITHUB }}" "${{ env.REGISTRY_DOCKERHUB }}")
           TAGS=("latest" "${{ steps.get_sha.outputs.sha }}")
-
-          if [ "${{ matrix.target }}" = "sandbox" ]; then
-            SUFFIXES=("${{ env.EE_IMAGE_SUFFIX }}")
-          else
-            SUFFIXES=("${{ env.CE_IMAGE_SUFFIX }}" "${{ env.EE_IMAGE_SUFFIX }}")
-          fi
+          SUFFIXES=("${{ env.CE_IMAGE_SUFFIX }}" "${{ env.EE_IMAGE_SUFFIX }}")
 
           for REGISTRY in "${REGISTRIES[@]}"; do
             for TAG in "${TAGS[@]}"; do
