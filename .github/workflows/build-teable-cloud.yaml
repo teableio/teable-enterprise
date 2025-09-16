@@ -1,6 +1,6 @@
 name: Build teable cloud
 
-concurrency: 
+concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
@@ -15,7 +15,7 @@ jobs:
 
     strategy:
       matrix:
-        target: [app, db-migrate]
+        target: [app, db-migrate, sandbox]
         include:
           - target: app
             file: Dockerfile
@@ -23,6 +23,9 @@ jobs:
           - target: db-migrate
             file: Dockerfile.db-migrate
             image: teable-db-migrate-cloud
+          - target: sandbox
+            file: Dockerfile.sandbox
+            image: teable-sandbox-cloud
 
     steps:
       - name: Checkout private repository
@@ -30,7 +33,7 @@ jobs:
         with:
           repository: teableio/teable-ee
           token: ${{ secrets.PACKAGES_KEY }}
-          submodules: 'true'
+          submodules: "true"
 
       - name: Get teable-ee SHA
         id: get_sha
@@ -89,7 +92,7 @@ jobs:
               --tag="${{ steps.meta.outputs.tags }}" \
               --platform="linux/amd64" \
               --push \
-              --upload-assets-list='[["aws-objectstorage","https://s3.us-west-2.amazonaws.com","${{ secrets.AWS_ACCESS_KEY_ID }}","${{ secrets.AWS_SECRET_ACCESS_KEY }}","teable-next-asset"]]'              
+              --upload-assets-list='[["aws-objectstorage","https://s3.us-west-2.amazonaws.com","${{ secrets.AWS_ACCESS_KEY_ID }}","${{ secrets.AWS_SECRET_ACCESS_KEY }}","teable-next-asset"]]'
 
   # deploy:
   #   needs: build-push
