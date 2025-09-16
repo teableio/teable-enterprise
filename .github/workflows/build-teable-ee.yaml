@@ -1,6 +1,6 @@
 name: Build teable EE
 
-concurrency: 
+concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
@@ -8,9 +8,9 @@ env:
   REGISTRY_GITHUB: ghcr.io/teableio
   REGISTRY_DOCKERHUB: docker.io/teableio
   REGISTRY_ALI: registry.cn-shenzhen.aliyuncs.com/teable
-  CE_IMAGE_SUFFIX: ''
-  EE_IMAGE_SUFFIX: '-ee'
- 
+  CE_IMAGE_SUFFIX: ""
+  EE_IMAGE_SUFFIX: "-ee"
+
 on:
   workflow_dispatch:
   repository_dispatch:
@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [app, db-migrate]
+        target: [app, db-migrate, sandbox]
         arch: [amd64, arm64]
         include:
           - target: app
@@ -30,6 +30,9 @@ jobs:
           - target: db-migrate
             file: Dockerfile.db-migrate
             image: teable-db-migrate
+          - target: sandbox
+            file: Dockerfile.sandbox
+            image: teable-sandbox
 
     steps:
       - name: Checkout private repository
@@ -37,7 +40,7 @@ jobs:
         with:
           repository: teableio/teable-ee
           token: ${{ secrets.PACKAGES_KEY }}
-          submodules: 'true'
+          submodules: "true"
 
       - name: Get teable-ee SHA
         id: get_sha
@@ -101,12 +104,14 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [app, db-migrate]
+        target: [app, db-migrate, sandbox]
         include:
           - target: app
             image: teable
           - target: db-migrate
             image: teable-db-migrate
+          - target: sandbox
+            image: teable-sandbox
 
     steps:
       - name: Checkout private repository
@@ -114,7 +119,7 @@ jobs:
         with:
           repository: teableio/teable-ee
           token: ${{ secrets.PACKAGES_KEY }}
-          submodules: 'true'
+          submodules: "true"
 
       - name: Get teable-ee SHA
         id: get_sha
@@ -145,7 +150,7 @@ jobs:
           REGISTRIES=("${{ env.REGISTRY_ALI }}" "${{ env.REGISTRY_GITHUB }}" "${{ env.REGISTRY_DOCKERHUB }}")
           TAGS=("latest" "${{ steps.get_sha.outputs.sha }}")
           SUFFIXES=("${{ env.CE_IMAGE_SUFFIX }}" "${{ env.EE_IMAGE_SUFFIX }}")
-          
+
           for REGISTRY in "${REGISTRIES[@]}"; do
             for TAG in "${TAGS[@]}"; do
               for SUFFIX in "${SUFFIXES[@]}"; do
