@@ -109,45 +109,12 @@ jobs:
         id: get_sha
         run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
-      - name: Create or update sandbox deployment
+      - name: Update sandbox deployment
         uses: actions-hub/kubectl@master
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         with:
-          args: |
-            apply -f - <<EOF
-            apiVersion: apps/v1
-            kind: Deployment
-            metadata:
-              name: teable-sandbox-cloud
-              labels:
-                app: teable-sandbox-cloud
-            spec:
-              replicas: 1
-              selector:
-                matchLabels:
-                  app: teable-sandbox-cloud
-              template:
-                metadata:
-                  labels:
-                    app: teable-sandbox-cloud
-                spec:
-                  imagePullSecrets:
-                    - name: teable
-                  containers:
-                    - name: teable-sandbox-cloud
-                      image: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-cloud:${{ steps.get_sha.outputs.sha }}-amd64
-                      imagePullPolicy: IfNotPresent
-                      ports:
-                        - containerPort: 3000
-                      resources:
-                        limits:
-                          memory: 512Mi
-                          cpu: 500m
-                        requests:
-                          memory: 256Mi
-                          cpu: 100m
-            EOF
+          args: set image deployment/teable-sandbox-cloud teable-sandbox-cloud=registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-cloud:${{ steps.get_sha.outputs.sha }}-amd64
 
       - name: Update sandbox deployment annotations
         uses: actions-hub/kubectl@master
