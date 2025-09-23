@@ -92,7 +92,7 @@ jobs:
               --tag="${{ steps.meta.outputs.tags }}" \
               --platform="linux/amd64" \
               --push \
-              --upload-assets-list='[["aws-objectstorage","https://s3.us-west-2.amazonaws.com","${{ secrets.AWS_ACCESS_KEY_ID }}","${{ secrets.AWS_SECRET_ACCESS_KEY }}","teable-next-asset"]]'
+              --upload-assets-list='[["aws-objectstorage","https://s3.us-west-2.amazonaws.com","${{ secrets.AWS_ACCESS_KEY_ID }}","${{ secrets.AWS_SECRET_ACCESS_KEY }}","teable-next-asset"],["sealos-objectstorage","https://objectstorageapi.hzh.sealos.run","${{ secrets.SEALOS_OBJECTSTORAGE_ACCESS_KEY }}","${{ secrets.SEALOS_OBJECTSTORAGE_SECRET_KEY }}","38puz7wo-teable-public"]]'              
 
   # deploy:
   #   needs: build-push
