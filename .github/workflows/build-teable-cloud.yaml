@@ -147,7 +147,7 @@ jobs:
               spec:
                 restartPolicy: Never
                 imagePullSecrets:
-                  - name: teable
+                  - name: teable-cloud
                 containers:
                   - name: teable
                     image: "registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud:${{ steps.get_sha.outputs.sha }}-amd64"
