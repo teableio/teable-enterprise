@@ -102,6 +102,14 @@ jobs:
   create-manifest:
     needs: build-push
     runs-on: ubuntu-latest
+    outputs:
+      start_time: ${{ steps.start_time.outputs.start }}
+      main_commit_sha: ${{ steps.get_sha.outputs.sha }}
+      main_commit_author: ${{ steps.get_main_commit_info.outputs.author }}
+      main_commit_message: ${{ steps.get_main_commit_info.outputs.message }}
+      submodule_commit_sha: ${{ steps.get_submodule_commit.outputs.submodule_sha }}
+      submodule_commit_author: ${{ steps.get_submodule_commit.outputs.submodule_author }}
+      submodule_commit_message: ${{ steps.get_submodule_commit.outputs.submodule_message }}
     strategy:
       matrix:
         target: [app, db-migrate, sandbox]
@@ -114,6 +122,10 @@ jobs:
             image: teable-sandbox
 
     steps:
+      - name: Record start time
+        id: start_time
+        run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
+
       - name: Checkout private repository
         uses: actions/checkout@v4
         with:
@@ -162,3 +174,36 @@ jobs:
               done
             done
           done
+
+      - name: Get community submodule commit info
+        if: matrix.target == 'app'  # Only run once
+        id: get_submodule_commit
+        run: |
+          cd community
+          echo "submodule_sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          echo "submodule_message=$(git log -1 --pretty=format:'%s')" >> $GITHUB_OUTPUT
+          echo "submodule_author=$(git log -1 --pretty=format:'%an')" >> $GITHUB_OUTPUT
+
+      - name: Get main commit info
+        if: matrix.target == 'app'  # Only run once
+        id: get_main_commit_info
+        run: |
+          echo "message=$(git log -1 --pretty=format:'%s')" >> $GITHUB_OUTPUT
+          echo "author=$(git log -1 --pretty=format:'%an')" >> $GITHUB_OUTPUT
+
+  notify:
+    needs: create-manifest
+    if: always()
+    uses: ./.github/workflows/notify-feishu.yaml
+    with:
+      workflow_name: "Teable EE"
+      workflow_status: ${{ needs.create-manifest.result }}
+      start_time: ${{ needs.create-manifest.outputs.start_time }}
+      main_commit_sha: ${{ needs.create-manifest.outputs.main_commit_sha }}
+      main_commit_author: ${{ needs.create-manifest.outputs.main_commit_author }}
+      main_commit_message: ${{ needs.create-manifest.outputs.main_commit_message }}
+      submodule_commit_sha: ${{ needs.create-manifest.outputs.submodule_commit_sha }}
+      submodule_commit_author: ${{ needs.create-manifest.outputs.submodule_commit_author }}
+      submodule_commit_message: ${{ needs.create-manifest.outputs.submodule_commit_message }}
+    secrets:
+      LARK_BOT_URL: ${{ secrets.LARK_BOT_URL }}

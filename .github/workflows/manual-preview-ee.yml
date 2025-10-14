@@ -7,6 +7,11 @@ on:
 jobs:
   build-push:
     runs-on: ubuntu-latest
+    outputs:
+      start_time: ${{ steps.start_time.outputs.start }}
+      pr_number: ${{ github.event.client_payload.pr_number }}
+      ref: ${{ github.event.client_payload.ref }}
+      main_commit_sha: ${{ steps.get_sha.outputs.sha }}
     strategy:
       matrix:
         include:
@@ -15,6 +20,10 @@ jobs:
           - image: teable-sandbox-ee-preview
             file: Dockerfile.sandbox
     steps:
+      - name: Record start time
+        id: start_time
+        run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
+
       - name: Checkout private repository
         uses: actions/checkout@v4
         with:
@@ -149,3 +158,16 @@ jobs:
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/teableio/teable-ee/issues/${{ github.event.client_payload.pr_number }}/comments" \
             -d "{\"body\":\"${BODY}\"}"
+
+  notify:
+    needs: build-push
+    if: always()
+    uses: ./.github/workflows/notify-feishu.yaml
+    with:
+      workflow_name: "Preview EE"
+      workflow_status: ${{ needs.build-push.result }}
+      start_time: ${{ needs.build-push.outputs.start_time }}
+      main_commit_sha: ${{ needs.build-push.outputs.main_commit_sha }}
+      main_commit_message: "Preview deployment for PR #${{ needs.build-push.outputs.pr_number }} (ref: ${{ needs.build-push.outputs.ref }})"
+    secrets:
+      LARK_BOT_URL: ${{ secrets.LARK_BOT_URL }}

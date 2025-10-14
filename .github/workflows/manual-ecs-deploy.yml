@@ -11,8 +11,15 @@ jobs:
   deploy:
     name: Deploy to ECS
     runs-on: ubuntu-latest
+    outputs:
+      start_time: ${{ steps.start_time.outputs.start }}
+      image_tag: ${{ inputs.image_tag }}
     
     steps:
+      - name: Record start time
+        id: start_time
+        run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -50,3 +57,15 @@ jobs:
           service: teable-service-1
           cluster: teable
           wait-for-service-stability: true
+
+  notify:
+    needs: deploy
+    if: always()
+    uses: ./.github/workflows/notify-feishu.yaml
+    with:
+      workflow_name: "Manual ECS Deploy"
+      workflow_status: ${{ needs.deploy.result }}
+      start_time: ${{ needs.deploy.outputs.start_time }}
+      main_commit_message: "Manual deployment with image tag: ${{ needs.deploy.outputs.image_tag }}"
+    secrets:
+      LARK_BOT_URL: ${{ secrets.LARK_BOT_URL }}
