@@ -245,7 +245,7 @@ jobs:
       start_time: ${{ needs.deploy.outputs.start_time }}
       main_commit_sha: ${{ needs.deploy.outputs.main_commit_sha }}
       main_commit_author: ${{ needs.deploy.outputs.main_commit_author }}
-      main_commit_message: ${{ needs.deploy.outputs.main_commit_message }}
+      main_commit_message: "${{ needs.deploy.outputs.main_commit_message }} - Image Tag: ${{ needs.deploy.outputs.main_commit_sha }}-amd64"
       submodule_commit_sha: ${{ needs.deploy.outputs.submodule_commit_sha }}
       submodule_commit_author: ${{ needs.deploy.outputs.submodule_commit_author }}
       submodule_commit_message: ${{ needs.deploy.outputs.submodule_commit_message }}
