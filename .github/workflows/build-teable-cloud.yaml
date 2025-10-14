@@ -97,7 +97,19 @@ jobs:
   deploy:
     needs: build-push
     runs-on: ubuntu-latest
+    outputs:
+      start_time: ${{ steps.start_time.outputs.start }}
+      main_commit_sha: ${{ steps.get_sha.outputs.sha }}
+      main_commit_author: ${{ steps.get_main_commit_info.outputs.author }}
+      main_commit_message: ${{ steps.get_main_commit_info.outputs.message }}
+      submodule_commit_sha: ${{ steps.get_submodule_commit.outputs.submodule_sha }}
+      submodule_commit_author: ${{ steps.get_submodule_commit.outputs.submodule_author }}
+      submodule_commit_message: ${{ steps.get_submodule_commit.outputs.submodule_message }}
     steps:
+      - name: Record start time
+        id: start_time
+        run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
+
       - name: Checkout private repository
         uses: actions/checkout@v4
         with:
@@ -208,3 +220,34 @@ jobs:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         with:
           args: rollout status deployment/teable-cloud
+
+      - name: Get community submodule commit info
+        id: get_submodule_commit
+        run: |
+          cd community
+          echo "submodule_sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          echo "submodule_message=$(git log -1 --pretty=format:'%s')" >> $GITHUB_OUTPUT
+          echo "submodule_author=$(git log -1 --pretty=format:'%an')" >> $GITHUB_OUTPUT
+
+      - name: Get main commit info
+        id: get_main_commit_info
+        run: |
+          echo "message=$(git log -1 --pretty=format:'%s')" >> $GITHUB_OUTPUT
+          echo "author=$(git log -1 --pretty=format:'%an')" >> $GITHUB_OUTPUT
+
+  notify:
+    needs: deploy
+    if: always()
+    uses: ./.github/workflows/notify-feishu.yaml
+    with:
+      workflow_name: "Teable Cloud"
+      workflow_status: ${{ needs.deploy.result }}
+      start_time: ${{ needs.deploy.outputs.start_time }}
+      main_commit_sha: ${{ needs.deploy.outputs.main_commit_sha }}
+      main_commit_author: ${{ needs.deploy.outputs.main_commit_author }}
+      main_commit_message: ${{ needs.deploy.outputs.main_commit_message }}
+      submodule_commit_sha: ${{ needs.deploy.outputs.submodule_commit_sha }}
+      submodule_commit_author: ${{ needs.deploy.outputs.submodule_commit_author }}
+      submodule_commit_message: ${{ needs.deploy.outputs.submodule_commit_message }}
+    secrets:
+      LARK_BOT_URL: ${{ secrets.LARK_BOT_URL }}

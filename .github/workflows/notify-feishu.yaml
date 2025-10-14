@@ -1,0 +1,261 @@
+name: Send Feishu Notification
+
+on:
+  workflow_call:
+    inputs:
+      workflow_name:
+        description: 'Name of the workflow (e.g., "Teable Cloud", "Teable EE")'
+        required: true
+        type: string
+      workflow_status:
+        description: 'Status of the workflow (success/failure)'
+        required: true
+        type: string
+      start_time:
+        description: 'Start timestamp in seconds'
+        required: true
+        type: string
+      main_commit_sha:
+        description: 'Main repository commit SHA'
+        required: false
+        type: string
+      main_commit_author:
+        description: 'Main repository commit author'
+        required: false
+        type: string
+      main_commit_message:
+        description: 'Main repository commit message'
+        required: false
+        type: string
+      submodule_commit_sha:
+        description: 'Submodule commit SHA'
+        required: false
+        type: string
+      submodule_commit_author:
+        description: 'Submodule commit author'
+        required: false
+        type: string
+      submodule_commit_message:
+        description: 'Submodule commit message'
+        required: false
+        type: string
+    secrets:
+      LARK_BOT_URL:
+        description: 'Feishu bot webhook URL'
+        required: true
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Calculate duration
+        id: duration
+        run: |
+          end_time=$(date +%s)
+          start_time=${{ inputs.start_time }}
+          duration=$((end_time - start_time))
+          minutes=$((duration / 60))
+          seconds=$((duration % 60))
+          echo "time=${minutes}m ${seconds}s" >> $GITHUB_OUTPUT
+
+      - name: Send success notification
+        if: inputs.workflow_status == 'success'
+        run: |
+          curl -X POST "${{ secrets.LARK_BOT_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "msg_type": "interactive",
+              "card": {
+                "elements": [
+                  {
+                    "tag": "div",
+                    "text": {
+                      "content": "✅ **${{ inputs.workflow_name }} Build & Deploy Success**",
+                      "tag": "lark_md"
+                    }
+                  },
+                  {
+                    "tag": "hr"
+                  },
+                  {
+                    "tag": "div",
+                    "fields": [
+                      {
+                        "is_short": true,
+                        "text": {
+                          "content": "**Triggered by:**\n${{ github.actor }}",
+                          "tag": "lark_md"
+                        }
+                      },
+                      {
+                        "is_short": true,
+                        "text": {
+                          "content": "**Event:**\n${{ github.event_name }}",
+                          "tag": "lark_md"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "hr"
+                  },
+                  {
+                    "tag": "div",
+                    "text": {
+                      "content": "**📦 Main Repository (teableio/teable-ee)**",
+                      "tag": "lark_md"
+                    }
+                  },
+                  {
+                    "tag": "div",
+                    "fields": [
+                      {
+                        "is_short": false,
+                        "text": {
+                          "content": "**Commit:** `${{ inputs.main_commit_sha || github.sha }}`\n**Author:** ${{ inputs.main_commit_author || github.actor }}\n**Message:** ${{ inputs.main_commit_message || github.event.head_commit.message }}",
+                          "tag": "lark_md"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "hr"
+                  },
+                  {
+                    "tag": "div",
+                    "text": {
+                      "content": "**🏘️ Community Submodule**",
+                      "tag": "lark_md"
+                    }
+                  },
+                  {
+                    "tag": "div",
+                    "fields": [
+                      {
+                        "is_short": false,
+                        "text": {
+                          "content": "**Commit:** `${{ inputs.submodule_commit_sha || 'N/A' }}`\n**Author:** ${{ inputs.submodule_commit_author || 'N/A' }}\n**Message:** ${{ inputs.submodule_commit_message || 'N/A' }}",
+                          "tag": "lark_md"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "hr"
+                  },
+                  {
+                    "tag": "div",
+                    "text": {
+                      "content": "⏱️ **Duration:** ${{ steps.duration.outputs.time }}",
+                      "tag": "lark_md"
+                    }
+                  }
+                ]
+              }
+            }'
+
+      - name: Send failure notification
+        if: inputs.workflow_status == 'failure'
+        run: |
+          curl -X POST "${{ secrets.LARK_BOT_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "msg_type": "interactive",
+              "card": {
+                "elements": [
+                  {
+                    "tag": "div",
+                    "text": {
+                      "content": "❌ **${{ inputs.workflow_name }} Build & Deploy Failed**",
+                      "tag": "lark_md"
+                    }
+                  },
+                  {
+                    "tag": "hr"
+                  },
+                  {
+                    "tag": "div",
+                    "fields": [
+                      {
+                        "is_short": true,
+                        "text": {
+                          "content": "**Triggered by:**\n${{ github.actor }}",
+                          "tag": "lark_md"
+                        }
+                      },
+                      {
+                        "is_short": true,
+                        "text": {
+                          "content": "**Event:**\n${{ github.event_name }}",
+                          "tag": "lark_md"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "hr"
+                  },
+                  {
+                    "tag": "div",
+                    "text": {
+                      "content": "**📦 Main Repository (teableio/teable-ee)**",
+                      "tag": "lark_md"
+                    }
+                  },
+                  {
+                    "tag": "div",
+                    "fields": [
+                      {
+                        "is_short": false,
+                        "text": {
+                          "content": "**Commit:** `${{ inputs.main_commit_sha || github.sha }}`\n**Author:** ${{ inputs.main_commit_author || github.actor }}\n**Message:** ${{ inputs.main_commit_message || github.event.head_commit.message }}",
+                          "tag": "lark_md"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "hr"
+                  },
+                  {
+                    "tag": "div",
+                    "text": {
+                      "content": "**🏘️ Community Submodule**",
+                      "tag": "lark_md"
+                    }
+                  },
+                  {
+                    "tag": "div",
+                    "fields": [
+                      {
+                        "is_short": false,
+                        "text": {
+                          "content": "**Commit:** `${{ inputs.submodule_commit_sha || 'N/A' }}`\n**Author:** ${{ inputs.submodule_commit_author || 'N/A' }}\n**Message:** ${{ inputs.submodule_commit_message || 'N/A' }}",
+                          "tag": "lark_md"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "hr"
+                  },
+                  {
+                    "tag": "div",
+                    "text": {
+                      "content": "**🔗 View Details:**\n[GitHub Actions](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+                      "tag": "lark_md"
+                    }
+                  },
+                  {
+                    "tag": "hr"
+                  },
+                  {
+                    "tag": "div",
+                    "text": {
+                      "content": "⏱️ **Failed After:** ${{ steps.duration.outputs.time }}",
+                      "tag": "lark_md"
+                    }
+                  }
+                ]
+              }
+            }'
