@@ -12,6 +12,7 @@ jobs:
       pr_number: ${{ github.event.client_payload.pr_number }}
       ref: ${{ github.event.client_payload.ref }}
       main_commit_sha: ${{ steps.get_sha.outputs.sha }}
+      main_commit_author: ${{ steps.get_commit_info.outputs.author }}
     strategy:
       matrix:
         include:
@@ -35,6 +36,11 @@ jobs:
       - name: Get teable-ee SHA
         id: get_sha
         run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Get commit info
+        id: get_commit_info
+        run: |
+          echo "author=$(git log -1 --pretty=format:'%an')" >> $GITHUB_OUTPUT
 
       - name: Login to Ali container registry
         uses: docker/login-action@v3
@@ -176,6 +182,7 @@ jobs:
       workflow_status: ${{ needs.build-push.result }}
       start_time: ${{ needs.build-push.outputs.start_time }}
       main_commit_sha: ${{ needs.build-push.outputs.main_commit_sha }}
-      main_commit_message: "Preview deployment for PR #${{ needs.build-push.outputs.pr_number }} (ref: ${{ needs.build-push.outputs.ref }}) - Preview URL: https://pr-cloud-${{ needs.build-push.outputs.pr_number }}.sealoshzh.site"
+      main_commit_author: ${{ needs.build-push.outputs.main_commit_author }}
+      main_commit_message: "Preview deployment for PR #${{ needs.build-push.outputs.pr_number }} (ref: ${{ needs.build-push.outputs.ref }}) - Preview URL: https://pr-cloud-${{ needs.build-push.outputs.pr_number }}.sealoshzh.site - PR Link: https://github.com/teableio/teable-ee/pull/${{ needs.build-push.outputs.pr_number }}"
     secrets:
       LARK_BOT_URL: ${{ secrets.LARK_BOT_URL }}

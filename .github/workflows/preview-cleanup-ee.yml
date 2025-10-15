@@ -7,15 +7,7 @@ on:
 jobs:
   cleanup:
     runs-on: ubuntu-latest
-    outputs:
-      start_time: ${{ steps.start_time.outputs.start }}
-      pr_number: ${{ github.event.client_payload.pr_number }}
-      merged: ${{ github.event.client_payload.merged }}
     steps:
-      - name: Record start time
-        id: start_time
-        run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
-
       - name: Checkout private repository
         uses: actions/checkout@v4
         with:
@@ -64,15 +56,3 @@ jobs:
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/teableio/teable-ee/issues/${PR_NUMBER}/comments" \
             -d "{\"body\":\"${BODY}\"}"
-
-  notify:
-    needs: cleanup
-    if: always()
-    uses: ./.github/workflows/notify-feishu.yaml
-    with:
-      workflow_name: "Cleanup EE Preview"
-      workflow_status: ${{ needs.cleanup.result }}
-      start_time: ${{ needs.cleanup.outputs.start_time }}
-      main_commit_message: "Cleanup preview environment for PR #${{ needs.cleanup.outputs.pr_number }} (${{ needs.cleanup.outputs.merged == 'true' && 'Merged' || 'Closed' }})"
-    secrets:
-      LARK_BOT_URL: ${{ secrets.LARK_BOT_URL }}

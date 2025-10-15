@@ -83,7 +83,7 @@ jobs:
                       {
                         "is_short": true,
                         "text": {
-                          "content": "**Triggered by:**\n${{ github.actor }}",
+                          "content": "**Triggered by:**\n${{ inputs.main_commit_author || github.actor }}",
                           "tag": "lark_md"
                         }
                       },
@@ -179,7 +179,7 @@ jobs:
                       {
                         "is_short": true,
                         "text": {
-                          "content": "**Triggered by:**\n${{ github.actor }}",
+                          "content": "**Triggered by:**\n${{ inputs.main_commit_author || github.actor }}",
                           "tag": "lark_md"
                         }
                       },
