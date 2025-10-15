@@ -165,16 +165,3 @@ jobs:
             "https://api.github.com/repos/teableio/teable-ee/issues/${{ github.event.client_payload.pr_number }}/comments" \
             -d "{\"body\":\"${BODY}\"}"
 
-  notify:
-    needs: build-push
-    if: always()
-    uses: ./.github/workflows/notify-feishu.yaml
-    with:
-      workflow_name: "Preview EE"
-      workflow_status: ${{ needs.build-push.result }}
-      start_time: ${{ needs.build-push.outputs.start_time }}
-      main_commit_sha: ${{ needs.build-push.outputs.main_commit_sha }}
-      main_commit_author: ${{ needs.build-push.outputs.main_commit_author }}
-      main_commit_message: "Preview deployment for PR #${{ needs.build-push.outputs.pr_number }} (ref: ${{ needs.build-push.outputs.ref }}) - Preview URL: https://pr-ee-${{ needs.build-push.outputs.pr_number }}.sealoshzh.site - PR Link: https://github.com/teableio/teable-ee/pull/${{ needs.build-push.outputs.pr_number }}"
-    secrets:
-      LARK_BOT_URL: ${{ secrets.LARK_BOT_URL }}
