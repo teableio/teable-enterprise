@@ -117,6 +117,7 @@ jobs:
             -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
             -H 'Content-Type: application/json' \
             -d '{
+              "fieldKeyType": "dbFieldName",
               "records": [
                 {
                   "fields": {
@@ -161,6 +162,7 @@ jobs:
             -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
             -H 'Content-Type: application/json' \
             -d '{
+              "fieldKeyType": "dbFieldName",
               "record": {
                 "fields": {
                   "status": "${{ inputs.status }}",
