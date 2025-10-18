@@ -232,20 +232,3 @@ jobs:
     secrets:
       TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
       PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
-
-  notify:
-    needs: [track-start, create-manifest, track-complete]
-    if: always()
-    uses: ./.github/workflows/notify-feishu.yaml
-    with:
-      workflow_name: "Teable EE"
-      workflow_status: ${{ needs.create-manifest.result }}
-      start_time: ${{ needs.create-manifest.outputs.start_time }}
-      main_commit_sha: ${{ needs.create-manifest.outputs.main_commit_sha }}
-      main_commit_author: ${{ needs.create-manifest.outputs.main_commit_author }}
-      main_commit_message: "${{ needs.create-manifest.outputs.main_commit_message }} - Image Tag: ${{ needs.track-start.outputs.version_tag }}"
-      submodule_commit_sha: ${{ needs.create-manifest.outputs.submodule_commit_sha }}
-      submodule_commit_author: ${{ needs.create-manifest.outputs.submodule_commit_author }}
-      submodule_commit_message: ${{ needs.create-manifest.outputs.submodule_commit_message }}
-    secrets:
-      LARK_BOT_URL: ${{ secrets.LARK_BOT_URL }}
