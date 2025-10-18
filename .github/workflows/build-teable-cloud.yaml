@@ -3,14 +3,24 @@ name: Build teable cloud
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 on:
   workflow_dispatch:
   repository_dispatch:
     types: [build-cloud]
 
 jobs:
+  track-start:
+    uses: ./.github/workflows/track-build-teable.yaml
+    with:
+      action: create
+      edition: cloud
+      status: Building
+    secrets:
+      TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+
   build-push:
+    needs: track-start
     runs-on: ubuntu-latest
 
     strategy:
@@ -80,6 +90,7 @@ jobs:
           tags: |
             type=raw,value=latest
             type=raw,value=${{ steps.get_sha.outputs.sha }}
+            type=raw,value=${{ needs.track-start.outputs.version_tag }}
 
       - name: ⚙️ Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -94,7 +105,37 @@ jobs:
               --push \
               --upload-assets-list='[["aws-objectstorage","https://s3.us-west-2.amazonaws.com","${{ secrets.AWS_ACCESS_KEY_ID }}","${{ secrets.AWS_SECRET_ACCESS_KEY }}","teable-next-asset"],["sealos-objectstorage","https://objectstorageapi.hzh.sealos.run","${{ secrets.SEALOS_OBJECTSTORAGE_ACCESS_KEY }}","${{ secrets.SEALOS_OBJECTSTORAGE_SECRET_KEY }}","38puz7wo-teable-public"]]'
 
-  deploy:
+  determine-status:
+    needs: [track-start, build-push]
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.status.outputs.status }}
+    steps:
+      - name: Determine final status
+        id: status
+        run: |
+          if [ "${{ needs.build-push.result }}" == "success" ]; then
+            echo "status=Released" >> $GITHUB_OUTPUT
+          else
+            echo "status=Fail" >> $GITHUB_OUTPUT
+          fi
+
+  track-complete:
+    needs: [track-start, build-push, determine-status]
+    if: always()
+    uses: ./.github/workflows/track-build-teable.yaml
+    with:
+      action: update
+      edition: cloud
+      record_id: ${{ needs.track-start.outputs.record_id }}
+      status: ${{ needs.determine-status.outputs.status }}
+      start_time: ${{ needs.track-start.outputs.start_time }}
+    secrets:
+      TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+
+  get-commit-info:
     needs: build-push
     runs-on: ubuntu-latest
     outputs:
@@ -108,7 +149,7 @@ jobs:
     steps:
       - name: Record start time
         id: start_time
-        run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
+        run: echo "start=${{ needs.track-start.outputs.start_time }}" >> $GITHUB_OUTPUT
 
       - name: Checkout private repository
         uses: actions/checkout@v4
@@ -120,106 +161,6 @@ jobs:
       - name: Get teable-ee SHA
         id: get_sha
         run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Update sandbox deployment
-        uses: actions-hub/kubectl@master
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        with:
-          args: set image deployment/teable-sandbox-cloud teable-sandbox-cloud=registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-cloud:${{ steps.get_sha.outputs.sha }}-amd64
-
-      - name: Update sandbox deployment annotations
-        uses: actions-hub/kubectl@master
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        with:
-          args: annotate deployment/teable-sandbox-cloud originImageName="registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-cloud:${{ steps.get_sha.outputs.sha }}-amd64" --overwrite
-
-      - name: Rollout sandbox status
-        uses: actions-hub/kubectl@master
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        with:
-          args: rollout status deployment/teable-sandbox-cloud
-
-      - name: Create Job YAML
-        run: |
-          cat <<EOF > migration-job.yaml
-          apiVersion: batch/v1
-          kind: Job
-          metadata:
-            name: teable-migration-${{ steps.get_sha.outputs.sha }}
-            labels:
-              cloud.sealos.io/deploy-on-sealos: teable
-          spec:
-            completions: 1
-            template:
-              metadata:
-                name: teable-cloud-teable
-              spec:
-                restartPolicy: Never
-                imagePullSecrets:
-                  - name: teable-cloud
-                containers:
-                  - name: teable
-                    image: "registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud:${{ steps.get_sha.outputs.sha }}-amd64"
-                    imagePullPolicy: IfNotPresent
-                    args:
-                      - migrate-only
-                    env:
-                      - name: "PRISMA_DATABASE_URL"
-                        value: "${{ secrets.PRISMA_DATABASE_URL }}"
-                    resources:
-                      limits:
-                        memory: 512Mi
-                        cpu: 500m
-                      requests:
-                        cpu: 100m
-            backoffLimit: 0
-            ttlSecondsAfterFinished: 300
-          EOF
-
-      - name: Clean up existing migration job
-        uses: actions-hub/kubectl@master
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        with:
-          args: delete job teable-migration-${{ steps.get_sha.outputs.sha }} --ignore-not-found=true
-
-      - name: Apply migration job
-        uses: actions-hub/kubectl@master
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        with:
-          args: apply -f migration-job.yaml
-
-      - name: Wait for migration job to complete
-        uses: actions-hub/kubectl@master
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        with:
-          args: wait --for=condition=complete job/teable-migration-${{ steps.get_sha.outputs.sha }} --timeout=3600s
-
-      - name: Update application deployment
-        uses: actions-hub/kubectl@master
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        with:
-          args: set image deployment/teable-cloud teable-cloud=registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud:${{ steps.get_sha.outputs.sha }}-amd64
-
-      - name: Update deployment annotations
-        uses: actions-hub/kubectl@master
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        with:
-          args: annotate deployment/teable-cloud originImageName="registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud:${{ steps.get_sha.outputs.sha }}-amd64" --overwrite
-
-      - name: Rollout status
-        uses: actions-hub/kubectl@master
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        with:
-          args: rollout status deployment/teable-cloud
 
       - name: Get community submodule commit info
         id: get_submodule_commit
@@ -236,18 +177,18 @@ jobs:
           echo "author=$(git log -1 --pretty=format:'%an')" >> $GITHUB_OUTPUT
 
   notify:
-    needs: deploy
+    needs: [track-start, get-commit-info, build-push]
     if: always()
     uses: ./.github/workflows/notify-feishu.yaml
     with:
       workflow_name: "Teable Cloud"
-      workflow_status: ${{ needs.deploy.result }}
-      start_time: ${{ needs.deploy.outputs.start_time }}
-      main_commit_sha: ${{ needs.deploy.outputs.main_commit_sha }}
-      main_commit_author: ${{ needs.deploy.outputs.main_commit_author }}
-      main_commit_message: "${{ needs.deploy.outputs.main_commit_message }} - Image Tag: ${{ needs.deploy.outputs.main_commit_sha }}-amd64"
-      submodule_commit_sha: ${{ needs.deploy.outputs.submodule_commit_sha }}
-      submodule_commit_author: ${{ needs.deploy.outputs.submodule_commit_author }}
-      submodule_commit_message: ${{ needs.deploy.outputs.submodule_commit_message }}
+      workflow_status: ${{ needs.build-push.result }}
+      start_time: ${{ needs.get-commit-info.outputs.start_time }}
+      main_commit_sha: ${{ needs.get-commit-info.outputs.main_commit_sha }}
+      main_commit_author: ${{ needs.get-commit-info.outputs.main_commit_author }}
+      main_commit_message: "${{ needs.get-commit-info.outputs.main_commit_message }} - Image Tag: ${{ needs.track-start.outputs.version_tag }}"
+      submodule_commit_sha: ${{ needs.get-commit-info.outputs.submodule_commit_sha }}
+      submodule_commit_author: ${{ needs.get-commit-info.outputs.submodule_commit_author }}
+      submodule_commit_message: ${{ needs.get-commit-info.outputs.submodule_commit_message }}
     secrets:
-      LARK_BOT_URL: ${{ secrets.LARK_BOT_URL }}
+      LARK_BOT_URL: ${{ secrets.LARK_BOT_URL_PRODUCTION }}

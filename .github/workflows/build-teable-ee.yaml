@@ -17,7 +17,18 @@ on:
     types: [build-ee]
 
 jobs:
+  track-start:
+    uses: ./.github/workflows/track-build-teable.yaml
+    with:
+      action: create
+      edition: ee
+      status: Building
+    secrets:
+      TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+
   build-push:
+    needs: track-start
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -86,6 +97,7 @@ jobs:
           tags: |
             type=raw,value=latest
             type=raw,value=${{ steps.get_sha.outputs.sha }}
+            type=raw,value=${{ needs.track-start.outputs.version_tag }}
 
       - name: ⚙️ Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -100,7 +112,7 @@ jobs:
               --push
 
   create-manifest:
-    needs: build-push
+    needs: [track-start, build-push]
     runs-on: ubuntu-latest
     outputs:
       start_time: ${{ steps.start_time.outputs.start }}
@@ -191,8 +203,38 @@ jobs:
           echo "message=$(git log -1 --pretty=format:'%s')" >> $GITHUB_OUTPUT
           echo "author=$(git log -1 --pretty=format:'%an')" >> $GITHUB_OUTPUT
 
+  determine-status:
+    needs: [track-start, create-manifest]
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.status.outputs.status }}
+    steps:
+      - name: Determine final status
+        id: status
+        run: |
+          if [ "${{ needs.create-manifest.result }}" == "success" ]; then
+            echo "status=Released" >> $GITHUB_OUTPUT
+          else
+            echo "status=Fail" >> $GITHUB_OUTPUT
+          fi
+
+  track-complete:
+    needs: [track-start, create-manifest, determine-status]
+    if: always()
+    uses: ./.github/workflows/track-build-teable.yaml
+    with:
+      action: update
+      edition: ee
+      record_id: ${{ needs.track-start.outputs.record_id }}
+      status: ${{ needs.determine-status.outputs.status }}
+      start_time: ${{ needs.track-start.outputs.start_time }}
+    secrets:
+      TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+
   notify:
-    needs: create-manifest
+    needs: [track-start, create-manifest, track-complete]
     if: always()
     uses: ./.github/workflows/notify-feishu.yaml
     with:
@@ -201,7 +243,7 @@ jobs:
       start_time: ${{ needs.create-manifest.outputs.start_time }}
       main_commit_sha: ${{ needs.create-manifest.outputs.main_commit_sha }}
       main_commit_author: ${{ needs.create-manifest.outputs.main_commit_author }}
-      main_commit_message: "${{ needs.create-manifest.outputs.main_commit_message }} - Image Tags: ${{ needs.create-manifest.outputs.main_commit_sha }}-amd64, ${{ needs.create-manifest.outputs.main_commit_sha }}-arm64"
+      main_commit_message: "${{ needs.create-manifest.outputs.main_commit_message }} - Image Tag: ${{ needs.track-start.outputs.version_tag }}"
       submodule_commit_sha: ${{ needs.create-manifest.outputs.submodule_commit_sha }}
       submodule_commit_author: ${{ needs.create-manifest.outputs.submodule_commit_author }}
       submodule_commit_message: ${{ needs.create-manifest.outputs.submodule_commit_message }}

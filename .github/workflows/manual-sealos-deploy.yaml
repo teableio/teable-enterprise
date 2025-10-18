@@ -1,0 +1,155 @@
+name: Manual Sealos Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Docker image tag (e.g., 0.5.0-alpha+1.10.0-build.467-amd64)'
+        required: true
+  workflow_call:
+    inputs:
+      image_tag:
+        description: 'Docker image tag'
+        required: true
+        type: string
+    outputs:
+      start_time:
+        description: 'Deployment start timestamp'
+        value: ${{ jobs.deploy.outputs.start_time }}
+      image_tag:
+        description: 'Deployed image tag'
+        value: ${{ jobs.deploy.outputs.image_tag }}
+    secrets:
+      KUBE_CONFIG:
+        required: true
+      PRISMA_DATABASE_URL:
+        required: true
+
+jobs:
+  deploy:
+    name: Deploy to Sealos
+    runs-on: ubuntu-latest
+    outputs:
+      start_time: ${{ steps.start_time.outputs.start }}
+      image_tag: ${{ inputs.image_tag }}
+    
+    steps:
+      - name: Record start time
+        id: start_time
+        run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Update sandbox deployment
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        with:
+          args: set image deployment/teable-sandbox-cloud teable-sandbox-cloud=registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-cloud:${{ inputs.image_tag }}
+
+      - name: Update sandbox deployment annotations
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        with:
+          args: annotate deployment/teable-sandbox-cloud originImageName="registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-cloud:${{ inputs.image_tag }}" --overwrite
+
+      - name: Rollout sandbox status
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        with:
+          args: rollout status deployment/teable-sandbox-cloud
+
+      - name: Create Job YAML
+        run: |
+          cat <<EOF > migration-job.yaml
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: teable-migration-${{ github.run_number }}
+            labels:
+              cloud.sealos.io/deploy-on-sealos: teable
+          spec:
+            completions: 1
+            template:
+              metadata:
+                name: teable-cloud-teable
+              spec:
+                restartPolicy: Never
+                imagePullSecrets:
+                  - name: teable-cloud
+                containers:
+                  - name: teable
+                    image: "registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud:${{ inputs.image_tag }}"
+                    imagePullPolicy: IfNotPresent
+                    args:
+                      - migrate-only
+                    env:
+                      - name: "PRISMA_DATABASE_URL"
+                        value: "${{ secrets.PRISMA_DATABASE_URL }}"
+                    resources:
+                      limits:
+                        memory: 512Mi
+                        cpu: 500m
+                      requests:
+                        cpu: 100m
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 300
+          EOF
+
+      - name: Clean up existing migration job
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        with:
+          args: delete job teable-migration-${{ github.run_number }} --ignore-not-found=true
+
+      - name: Apply migration job
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        with:
+          args: apply -f migration-job.yaml
+
+      - name: Wait for migration job to complete
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        with:
+          args: wait --for=condition=complete job/teable-migration-${{ github.run_number }} --timeout=3600s
+
+      - name: Update application deployment
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        with:
+          args: set image deployment/teable-cloud teable-cloud=registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud:${{ inputs.image_tag }}
+
+      - name: Update deployment annotations
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        with:
+          args: annotate deployment/teable-cloud originImageName="registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud:${{ inputs.image_tag }}" --overwrite
+
+      - name: Rollout status
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        with:
+          args: rollout status deployment/teable-cloud
+
+  notify:
+    needs: deploy
+    if: always()
+    uses: ./.github/workflows/notify-feishu.yaml
+    with:
+      workflow_name: "Manual Sealos Deploy"
+      workflow_status: ${{ needs.deploy.result }}
+      start_time: ${{ needs.deploy.outputs.start_time }}
+      main_commit_message: "Manual Sealos deployment with image tag: ${{ needs.deploy.outputs.image_tag }}"
+    secrets:
+      LARK_BOT_URL: ${{ secrets.LARK_BOT_URL_PRODUCTION }}
+

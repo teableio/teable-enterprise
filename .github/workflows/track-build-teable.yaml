@@ -1,0 +1,175 @@
+name: Track Build in Teable
+
+on:
+  workflow_call:
+    inputs:
+      action:
+        description: 'Action to perform: create or update'
+        required: true
+        type: string
+      edition:
+        description: 'Edition: cloud or ee'
+        required: true
+        type: string
+      record_id:
+        description: 'Record ID for update action'
+        required: false
+        type: string
+      status:
+        description: 'Status: Building, Released, or Fail'
+        required: false
+        type: string
+        default: 'Building'
+      start_time:
+        description: 'Start timestamp in seconds for duration calculation'
+        required: false
+        type: string
+    outputs:
+      record_id:
+        description: 'The Teable record ID'
+        value: ${{ jobs.track.outputs.record_id }}
+      version_tag:
+        description: 'The generated version tag'
+        value: ${{ jobs.track.outputs.version_tag }}
+      start_time:
+        description: 'The start timestamp'
+        value: ${{ jobs.track.outputs.start_time }}
+    secrets:
+      TEABLE_API_TOKEN:
+        required: true
+      PACKAGES_KEY:
+        required: true
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    outputs:
+      record_id: ${{ steps.create_record.outputs.record_id || steps.update_record.outputs.record_id }}
+      version_tag: ${{ steps.generate_version.outputs.version_tag }}
+      start_time: ${{ steps.record_time.outputs.start_time }}
+    
+    steps:
+      - name: Record start time
+        id: record_time
+        run: echo "start_time=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          submodules: "true"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.9.0
+
+      - name: Generate version tag
+        id: generate_version
+        run: |
+          # Read versions from package.json files
+          ee_version=$(node -p "require('./enterprise/app-ee/package.json').version")
+          ce_version=$(node -p "require('./community/apps/nextjs-app/package.json').version")
+          
+          # Generate version tag with + symbol
+          version_tag="${ee_version}-alpha+${ce_version}-build.${{ github.run_number }}-amd64"
+          echo "version_tag=${version_tag}" >> $GITHUB_OUTPUT
+          echo "Generated version tag: ${version_tag}"
+
+      - name: Get EE commit info
+        id: get_ee_commit
+        run: |
+          commit_sha=$(git rev-parse HEAD)
+          commit_message=$(git log -1 --pretty=format:'%s')
+          commit_author=$(git log -1 --pretty=format:'%an')
+          
+          echo "sha=${commit_sha}" >> $GITHUB_OUTPUT
+          echo "message=${commit_message}" >> $GITHUB_OUTPUT
+          echo "author=${commit_author}" >> $GITHUB_OUTPUT
+
+      - name: Get CE commit info
+        id: get_ce_commit
+        run: |
+          cd community
+          ce_sha=$(git rev-parse HEAD)
+          ce_message=$(git log -1 --pretty=format:'%s')
+          ce_author=$(git log -1 --pretty=format:'%an')
+          
+          echo "sha=${ce_sha}" >> $GITHUB_OUTPUT
+          echo "message=${ce_message}" >> $GITHUB_OUTPUT
+          echo "author=${ce_author}" >> $GITHUB_OUTPUT
+
+      - name: Extract PR number
+        id: extract_pr
+        run: |
+          commit_message="${{ steps.get_ee_commit.outputs.message }}"
+          # Extract PR number from commit message like (#456)
+          pr_number=$(echo "$commit_message" | grep -oP '\(#\K\d+(?=\))' || echo "")
+          echo "pr_number=${pr_number}" >> $GITHUB_OUTPUT
+          echo "Extracted PR number: ${pr_number}"
+
+      - name: Create Teable record
+        if: inputs.action == 'create'
+        id: create_record
+        run: |
+          response=$(curl -s -X POST 'https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record' \
+            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "records": [
+                {
+                  "fields": {
+                    "tag": "${{ steps.generate_version.outputs.version_tag }}",
+                    "status": "${{ inputs.status }}",
+                    "Edition": "${{ inputs.edition }}",
+                    "Commit_meessage": "${{ steps.get_ee_commit.outputs.message }}",
+                    "CE_Community_Message": "${{ steps.get_ce_commit.outputs.message }}",
+                    "Commit": "${{ steps.get_ee_commit.outputs.sha }}",
+                    "CE_commit": "${{ steps.get_ce_commit.outputs.sha }}",
+                    "Author": "${{ steps.get_ee_commit.outputs.author }}",
+                    "Pull_Request": "${{ steps.extract_pr.outputs.pr_number }}"
+                  }
+                }
+              ]
+            }')
+          
+          echo "Response: $response"
+          
+          # Extract record ID from response
+          record_id=$(echo "$response" | jq -r '.records[0].id')
+          echo "record_id=${record_id}" >> $GITHUB_OUTPUT
+          echo "Created record with ID: ${record_id}"
+
+      - name: Calculate duration
+        if: inputs.action == 'update'
+        id: calc_duration
+        run: |
+          end_time=$(date +%s)
+          start_time=${{ inputs.start_time }}
+          duration=$((end_time - start_time))
+          # Convert to minutes
+          duration_minutes=$((duration / 60))
+          echo "duration=${duration_minutes}" >> $GITHUB_OUTPUT
+          echo "Duration: ${duration_minutes} minutes"
+
+      - name: Update Teable record
+        if: inputs.action == 'update'
+        id: update_record
+        run: |
+          response=$(curl -s -X PATCH 'https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/${{ inputs.record_id }}' \
+            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "record": {
+                "fields": {
+                  "status": "${{ inputs.status }}",
+                  "Duration": ${{ steps.calc_duration.outputs.duration }}
+                }
+              }
+            }')
+          
+          echo "Response: $response"
+          echo "record_id=${{ inputs.record_id }}" >> $GITHUB_OUTPUT
+          echo "Updated record ${{ inputs.record_id }} with status: ${{ inputs.status }}"
+

@@ -1,0 +1,109 @@
+name: Test Teable Tracking
+
+on:
+  workflow_dispatch:
+    inputs:
+      edition:
+        description: 'Edition to test (cloud or ee)'
+        required: true
+        type: choice
+        options:
+          - cloud
+          - ee
+        default: cloud
+
+jobs:
+  test-create:
+    uses: ./.github/workflows/track-build-teable.yaml
+    with:
+      action: create
+      edition: ${{ inputs.edition }}
+      status: Building
+    secrets:
+      TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+
+  display-create:
+    needs: test-create
+    runs-on: ubuntu-latest
+    steps:
+      - name: Display created record info
+        run: |
+          echo "Record ID: ${{ needs.test-create.outputs.record_id }}"
+          echo "Version Tag: ${{ needs.test-create.outputs.version_tag }}"
+          echo "Start Time: ${{ needs.test-create.outputs.start_time }}"
+
+  wait-before-update:
+    needs: display-create
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait a moment
+        run: sleep 10
+
+  test-update-success:
+    needs: [test-create, wait-before-update]
+    uses: ./.github/workflows/track-build-teable.yaml
+    with:
+      action: update
+      edition: ${{ inputs.edition }}
+      record_id: ${{ needs.test-create.outputs.record_id }}
+      status: Released
+      start_time: ${{ needs.test-create.outputs.start_time }}
+    secrets:
+      TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+
+  display-update-success:
+    needs: [test-create, test-update-success]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Display update info
+        run: |
+          echo "Updated record ${{ needs.test-create.outputs.record_id }} to Released"
+
+  test-create-fail:
+    uses: ./.github/workflows/track-build-teable.yaml
+    with:
+      action: create
+      edition: ${{ inputs.edition }}
+      status: Building
+    secrets:
+      TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+
+  display-create-fail:
+    needs: test-create-fail
+    runs-on: ubuntu-latest
+    steps:
+      - name: Display created record info
+        run: |
+          echo "Record ID: ${{ needs.test-create-fail.outputs.record_id }}"
+
+  wait-before-update-fail:
+    needs: display-create-fail
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait a moment
+        run: sleep 10
+
+  test-update-fail:
+    needs: [test-create-fail, wait-before-update-fail]
+    uses: ./.github/workflows/track-build-teable.yaml
+    with:
+      action: update
+      edition: ${{ inputs.edition }}
+      record_id: ${{ needs.test-create-fail.outputs.record_id }}
+      status: Fail
+      start_time: ${{ needs.test-create-fail.outputs.start_time }}
+    secrets:
+      TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+
+  display-update-fail:
+    needs: [test-create-fail, test-update-fail]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Display update info
+        run: |
+          echo "Updated record ${{ needs.test-create-fail.outputs.record_id }} to Fail"
+
