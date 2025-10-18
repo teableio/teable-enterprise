@@ -123,13 +123,13 @@ jobs:
                   "fields": {
                     "tag": "${{ steps.generate_version.outputs.version_tag }}",
                     "status": "${{ inputs.status }}",
-                    "Edition": "${{ inputs.edition }}",
-                    "Commit_meessage": "${{ steps.get_ee_commit.outputs.message }}",
-                    "CE_Community_Message": "${{ steps.get_ce_commit.outputs.message }}",
-                    "Commit": "${{ steps.get_ee_commit.outputs.sha }}",
-                    "CE_commit": "${{ steps.get_ce_commit.outputs.sha }}",
-                    "Author": "${{ steps.get_ee_commit.outputs.author }}",
-                    "Pull_Request": "${{ steps.extract_pr.outputs.pr_number }}"
+                    "edition": "${{ inputs.edition }}",
+                    "commit_message": "${{ steps.get_ee_commit.outputs.message }}",
+                    "ce_comunity_message": "${{ steps.get_ce_commit.outputs.message }}",
+                    "commit": "${{ steps.get_ee_commit.outputs.sha }}",
+                    "ce_commit": "${{ steps.get_ce_commit.outputs.sha }}",
+                    "author": "${{ steps.get_ee_commit.outputs.author }}",
+                    "pull_request": "${{ steps.extract_pr.outputs.pr_number }}"
                   }
                 }
               ]
@@ -166,7 +166,7 @@ jobs:
               "record": {
                 "fields": {
                   "status": "${{ inputs.status }}",
-                  "Duration": ${{ steps.calc_duration.outputs.duration }}
+                  "duration": ${{ steps.calc_duration.outputs.duration }}
                 }
               }
             }')
