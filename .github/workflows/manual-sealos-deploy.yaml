@@ -160,6 +160,7 @@ jobs:
             -H 'Content-Type: application/json' \
             -d '{
               "fieldKeyType": "dbFieldName",
+              "typecast": true,
               "records": [
                 {
                   "fields": {
