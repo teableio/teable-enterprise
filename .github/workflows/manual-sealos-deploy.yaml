@@ -6,19 +6,21 @@ on:
       image_tag:
         description: 'Docker image tag (e.g., 0.5.0-alpha+1.10.0-build.467-amd64)'
         required: true
-      record_id:
-        description: 'Teable record ID to update (optional)'
+      trigger:
+        description: 'Who triggered this deployment'
         required: false
+        default: 'Manual'
   workflow_call:
     inputs:
       image_tag:
         description: 'Docker image tag'
         required: true
         type: string
-      record_id:
-        description: 'Teable record ID to update (optional)'
+      trigger:
+        description: 'Who triggered this deployment'
         required: false
         type: string
+        default: 'Automation'
     outputs:
       start_time:
         description: 'Deployment start timestamp'
@@ -150,20 +152,26 @@ jobs:
         with:
           args: rollout status deployment/teable-cloud
 
-      - name: Update Teable record to Launched
-        if: inputs.record_id != '' && inputs.record_id != null
+      - name: Record deployment in Teable
         run: |
-          response=$(curl -s -X PATCH 'https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/${{ inputs.record_id }}' \
+          current_time=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+          response=$(curl -s -X POST 'https://app.teable.ai/api/table/tblmGAFOHrGcy66PaUp/record' \
             -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
             -H 'Content-Type: application/json' \
             -d '{
               "fieldKeyType": "dbFieldName",
-              "record": {
-                "fields": {
-                  "status": "Launched"
+              "records": [
+                {
+                  "fields": {
+                    "date": "'"${current_time}"'",
+                    "release": "${{ inputs.image_tag }}",
+                    "region": "teable.cn",
+                    "trigger": "${{ inputs.trigger || github.actor }}"
+                  }
                 }
-              }
+              ]
             }')
           
           echo "Response: $response"
-          echo "Updated record ${{ inputs.record_id }} to Launched status"
+          record_id=$(echo "$response" | jq -r '.records[0].id')
+          echo "Created deployment record with ID: ${record_id}"
