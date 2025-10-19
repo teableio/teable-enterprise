@@ -129,7 +129,8 @@ jobs:
                     "commit": "${{ steps.get_ee_commit.outputs.sha }}",
                     "ce_commit": "${{ steps.get_ce_commit.outputs.sha }}",
                     "author": "${{ steps.get_ee_commit.outputs.author }}",
-                    "pull_request": "${{ steps.extract_pr.outputs.pr_number }}"
+                    "pull_request": "${{ steps.extract_pr.outputs.pr_number }}",
+                    "runs": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
                   }
                 }
               ]

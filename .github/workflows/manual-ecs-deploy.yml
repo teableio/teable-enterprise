@@ -6,6 +6,9 @@ on:
       image_tag:
         description: 'Docker image tag (e.g., 0.3.0-alpha-1.9.0-build.302-amd64)'
         required: true
+      record_id:
+        description: 'Teable record ID to update (optional)'
+        required: false
 
 jobs:
   deploy:
@@ -58,14 +61,20 @@ jobs:
           cluster: teable
           wait-for-service-stability: true
 
-  notify:
-    needs: deploy
-    if: always()
-    uses: ./.github/workflows/notify-feishu.yaml
-    with:
-      workflow_name: "Manual ECS Deploy"
-      workflow_status: ${{ needs.deploy.result }}
-      start_time: ${{ needs.deploy.outputs.start_time }}
-      main_commit_message: "Manual deployment with image tag: ${{ needs.deploy.outputs.image_tag }}"
-    secrets:
-      LARK_BOT_URL: ${{ secrets.LARK_BOT_URL }}
+      - name: Update Teable record to Launched
+        if: inputs.record_id != '' && inputs.record_id != null
+        run: |
+          response=$(curl -s -X PATCH 'https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/${{ inputs.record_id }}' \
+            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "fieldKeyType": "dbFieldName",
+              "record": {
+                "fields": {
+                  "status": "Launched"
+                }
+              }
+            }')
+          
+          echo "Response: $response"
+          echo "Updated record ${{ inputs.record_id }} to Launched status"

@@ -6,11 +6,18 @@ on:
       image_tag:
         description: 'Docker image tag (e.g., 0.5.0-alpha+1.10.0-build.467-amd64)'
         required: true
+      record_id:
+        description: 'Teable record ID to update (optional)'
+        required: false
   workflow_call:
     inputs:
       image_tag:
         description: 'Docker image tag'
         required: true
+        type: string
+      record_id:
+        description: 'Teable record ID to update (optional)'
+        required: false
         type: string
     outputs:
       start_time:
@@ -24,6 +31,8 @@ on:
         required: true
       PRISMA_DATABASE_URL:
         required: true
+      TEABLE_API_TOKEN:
+        required: false
 
 jobs:
   deploy:
@@ -141,15 +150,20 @@ jobs:
         with:
           args: rollout status deployment/teable-cloud
 
-  notify:
-    needs: deploy
-    if: always()
-    uses: ./.github/workflows/notify-feishu.yaml
-    with:
-      workflow_name: "Manual Sealos Deploy"
-      workflow_status: ${{ needs.deploy.result }}
-      start_time: ${{ needs.deploy.outputs.start_time }}
-      main_commit_message: "Manual Sealos deployment with image tag: ${{ needs.deploy.outputs.image_tag }}"
-    secrets:
-      LARK_BOT_URL: ${{ secrets.LARK_BOT_URL_PRODUCTION }}
-
+      - name: Update Teable record to Launched
+        if: inputs.record_id != '' && inputs.record_id != null
+        run: |
+          response=$(curl -s -X PATCH 'https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/${{ inputs.record_id }}' \
+            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "fieldKeyType": "dbFieldName",
+              "record": {
+                "fields": {
+                  "status": "Launched"
+                }
+              }
+            }')
+          
+          echo "Response: $response"
+          echo "Updated record ${{ inputs.record_id }} to Launched status"
