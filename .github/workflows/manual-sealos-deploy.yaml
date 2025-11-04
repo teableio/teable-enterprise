@@ -153,15 +153,18 @@ jobs:
           args: rollout status deployment/teable-cloud
 
       - name: Record deployment in Teable
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          TRIGGER: ${{ inputs.trigger || github.actor }}
         run: |
           current_time=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
           
           # Build JSON payload using jq to properly escape special characters
           payload=$(jq -n \
-            --arg date "${current_time}" \
-            --arg release "${{ inputs.image_tag }}" \
+            --arg date "$current_time" \
+            --arg release "$IMAGE_TAG" \
             --arg region "teable.cn" \
-            --arg trigger "${{ inputs.trigger || github.actor }}" \
+            --arg trigger "$TRIGGER" \
             '{
               "fieldKeyType": "dbFieldName",
               "typecast": true,

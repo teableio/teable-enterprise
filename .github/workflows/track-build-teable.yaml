@@ -114,19 +114,30 @@ jobs:
       - name: Create Teable record
         if: inputs.action == 'create'
         id: create_record
+        env:
+          TAG: ${{ steps.generate_version.outputs.version_tag }}
+          STATUS: ${{ inputs.status }}
+          EDITION: ${{ inputs.edition }}
+          COMMIT_MESSAGE: ${{ steps.get_ee_commit.outputs.message }}
+          CE_MESSAGE: ${{ steps.get_ce_commit.outputs.message }}
+          COMMIT: ${{ steps.get_ee_commit.outputs.sha }}
+          CE_COMMIT: ${{ steps.get_ce_commit.outputs.sha }}
+          AUTHOR: ${{ steps.get_ee_commit.outputs.author }}
+          PR: ${{ steps.extract_pr.outputs.pr_number }}
+          RUNS: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           # Build JSON payload using jq to properly escape special characters
           payload=$(jq -n \
-            --arg tag "${{ steps.generate_version.outputs.version_tag }}" \
-            --arg status "${{ inputs.status }}" \
-            --arg edition "${{ inputs.edition }}" \
-            --arg commit_message "${{ steps.get_ee_commit.outputs.message }}" \
-            --arg ce_message "${{ steps.get_ce_commit.outputs.message }}" \
-            --arg commit "${{ steps.get_ee_commit.outputs.sha }}" \
-            --arg ce_commit "${{ steps.get_ce_commit.outputs.sha }}" \
-            --arg author "${{ steps.get_ee_commit.outputs.author }}" \
-            --arg pr "${{ steps.extract_pr.outputs.pr_number }}" \
-            --arg runs "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --arg tag "$TAG" \
+            --arg status "$STATUS" \
+            --arg edition "$EDITION" \
+            --arg commit_message "$COMMIT_MESSAGE" \
+            --arg ce_message "$CE_MESSAGE" \
+            --arg commit "$COMMIT" \
+            --arg ce_commit "$CE_COMMIT" \
+            --arg author "$AUTHOR" \
+            --arg pr "$PR" \
+            --arg runs "$RUNS" \
             '{
               "fieldKeyType": "dbFieldName",
               "records": [
@@ -184,11 +195,15 @@ jobs:
       - name: Update Teable record
         if: inputs.action == 'update'
         id: update_record
+        env:
+          STATUS: ${{ inputs.status }}
+          DURATION: ${{ steps.calc_duration.outputs.duration }}
+          RECORD_ID: ${{ inputs.record_id }}
         run: |
           # Build JSON payload using jq to properly escape special characters
           payload=$(jq -n \
-            --arg status "${{ inputs.status }}" \
-            --argjson duration ${{ steps.calc_duration.outputs.duration }} \
+            --arg status "$STATUS" \
+            --argjson duration "$DURATION" \
             '{
               "fieldKeyType": "dbFieldName",
               "record": {
@@ -200,7 +215,7 @@ jobs:
             }')
           
           # Make the API call and capture both response and HTTP status code
-          http_code=$(curl -s -w "%{http_code}" -o /tmp/response.json -X PATCH 'https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/${{ inputs.record_id }}' \
+          http_code=$(curl -s -w "%{http_code}" -o /tmp/response.json -X PATCH "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/$RECORD_ID" \
             -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
             -H 'Content-Type: application/json' \
             -d "$payload")
@@ -211,8 +226,8 @@ jobs:
           
           # Check if request was successful
           if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
-            echo "record_id=${{ inputs.record_id }}" >> $GITHUB_OUTPUT
-            echo "Updated record ${{ inputs.record_id }} with status: ${{ inputs.status }}"
+            echo "record_id=$RECORD_ID" >> $GITHUB_OUTPUT
+            echo "Updated record $RECORD_ID with status: $STATUS"
           else
             echo "Error: API request failed with status code $http_code"
             echo "Response: $response"
