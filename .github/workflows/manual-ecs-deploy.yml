@@ -65,24 +65,44 @@ jobs:
       - name: Record deployment in Teable
         run: |
           current_time=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-          response=$(curl -s -X POST 'https://app.teable.ai/api/table/tblmGAFOHrGcy66PaUp/record' \
-            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
-            -H 'Content-Type: application/json' \
-            -d '{
+          
+          # Build JSON payload using jq to properly escape special characters
+          payload=$(jq -n \
+            --arg date "${current_time}" \
+            --arg release "${{ inputs.image_tag }}" \
+            --arg region "teable.ai" \
+            --arg trigger "${{ inputs.trigger || github.actor }}" \
+            '{
               "fieldKeyType": "dbFieldName",
               "typecast": true,
               "records": [
                 {
                   "fields": {
-                    "date": "'"${current_time}"'",
-                    "release": "${{ inputs.image_tag }}",
-                    "region": "teable.ai",
-                    "trigger": "${{ inputs.trigger || github.actor }}"
+                    "date": $date,
+                    "release": $release,
+                    "region": $region,
+                    "trigger": $trigger
                   }
                 }
               ]
             }')
           
+          # Make the API call and capture both response and HTTP status code
+          http_code=$(curl -s -w "%{http_code}" -o /tmp/response.json -X POST 'https://app.teable.ai/api/table/tblmGAFOHrGcy66PaUp/record' \
+            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
+            -H 'Content-Type: application/json' \
+            -d "$payload")
+          
+          response=$(cat /tmp/response.json)
           echo "Response: $response"
-          record_id=$(echo "$response" | jq -r '.records[0].id')
-          echo "Created deployment record with ID: ${record_id}"
+          echo "HTTP Status Code: $http_code"
+          
+          # Check if request was successful
+          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+            record_id=$(echo "$response" | jq -r '.records[0].id')
+            echo "Created deployment record with ID: ${record_id}"
+          else
+            echo "Error: API request failed with status code $http_code"
+            echo "Response: $response"
+            exit 1
+          fi
