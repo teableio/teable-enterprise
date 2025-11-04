@@ -115,35 +115,59 @@ jobs:
         if: inputs.action == 'create'
         id: create_record
         run: |
-          response=$(curl -s -X POST 'https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record' \
-            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
-            -H 'Content-Type: application/json' \
-            -d '{
+          # Build JSON payload using jq to properly escape special characters
+          payload=$(jq -n \
+            --arg tag "${{ steps.generate_version.outputs.version_tag }}" \
+            --arg status "${{ inputs.status }}" \
+            --arg edition "${{ inputs.edition }}" \
+            --arg commit_message "${{ steps.get_ee_commit.outputs.message }}" \
+            --arg ce_message "${{ steps.get_ce_commit.outputs.message }}" \
+            --arg commit "${{ steps.get_ee_commit.outputs.sha }}" \
+            --arg ce_commit "${{ steps.get_ce_commit.outputs.sha }}" \
+            --arg author "${{ steps.get_ee_commit.outputs.author }}" \
+            --arg pr "${{ steps.extract_pr.outputs.pr_number }}" \
+            --arg runs "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{
               "fieldKeyType": "dbFieldName",
               "records": [
                 {
                   "fields": {
-                    "tag": "${{ steps.generate_version.outputs.version_tag }}",
-                    "status": "${{ inputs.status }}",
-                    "edition": "${{ inputs.edition }}",
-                    "commit_message": "${{ steps.get_ee_commit.outputs.message }}",
-                    "ce_comunity_message": "${{ steps.get_ce_commit.outputs.message }}",
-                    "commit": "${{ steps.get_ee_commit.outputs.sha }}",
-                    "ce_commit": "${{ steps.get_ce_commit.outputs.sha }}",
-                    "author": "${{ steps.get_ee_commit.outputs.author }}",
-                    "pull_request": "${{ steps.extract_pr.outputs.pr_number }}",
-                    "runs": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    "tag": $tag,
+                    "status": $status,
+                    "edition": $edition,
+                    "commit_message": $commit_message,
+                    "ce_comunity_message": $ce_message,
+                    "commit": $commit,
+                    "ce_commit": $ce_commit,
+                    "author": $author,
+                    "pull_request": $pr,
+                    "runs": $runs
                   }
                 }
               ]
             }')
           
-          echo "Response: $response"
+          # Make the API call and capture both response and HTTP status code
+          http_code=$(curl -s -w "%{http_code}" -o /tmp/response.json -X POST 'https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record' \
+            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
+            -H 'Content-Type: application/json' \
+            -d "$payload")
           
-          # Extract record ID from response
-          record_id=$(echo "$response" | jq -r '.records[0].id')
-          echo "record_id=${record_id}" >> $GITHUB_OUTPUT
-          echo "Created record with ID: ${record_id}"
+          response=$(cat /tmp/response.json)
+          echo "Response: $response"
+          echo "HTTP Status Code: $http_code"
+          
+          # Check if request was successful
+          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+            # Extract record ID from response
+            record_id=$(echo "$response" | jq -r '.records[0].id')
+            echo "record_id=${record_id}" >> $GITHUB_OUTPUT
+            echo "Created record with ID: ${record_id}"
+          else
+            echo "Error: API request failed with status code $http_code"
+            echo "Response: $response"
+            exit 1
+          fi
 
       - name: Calculate duration
         if: inputs.action == 'update'
@@ -161,20 +185,37 @@ jobs:
         if: inputs.action == 'update'
         id: update_record
         run: |
-          response=$(curl -s -X PATCH 'https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/${{ inputs.record_id }}' \
-            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
-            -H 'Content-Type: application/json' \
-            -d '{
+          # Build JSON payload using jq to properly escape special characters
+          payload=$(jq -n \
+            --arg status "${{ inputs.status }}" \
+            --argjson duration ${{ steps.calc_duration.outputs.duration }} \
+            '{
               "fieldKeyType": "dbFieldName",
               "record": {
                 "fields": {
-                  "status": "${{ inputs.status }}",
-                  "duration": ${{ steps.calc_duration.outputs.duration }}
+                  "status": $status,
+                  "duration": $duration
                 }
               }
             }')
           
+          # Make the API call and capture both response and HTTP status code
+          http_code=$(curl -s -w "%{http_code}" -o /tmp/response.json -X PATCH 'https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/${{ inputs.record_id }}' \
+            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
+            -H 'Content-Type: application/json' \
+            -d "$payload")
+          
+          response=$(cat /tmp/response.json)
           echo "Response: $response"
-          echo "record_id=${{ inputs.record_id }}" >> $GITHUB_OUTPUT
-          echo "Updated record ${{ inputs.record_id }} with status: ${{ inputs.status }}"
+          echo "HTTP Status Code: $http_code"
+          
+          # Check if request was successful
+          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+            echo "record_id=${{ inputs.record_id }}" >> $GITHUB_OUTPUT
+            echo "Updated record ${{ inputs.record_id }} with status: ${{ inputs.status }}"
+          else
+            echo "Error: API request failed with status code $http_code"
+            echo "Response: $response"
+            exit 1
+          fi
 
