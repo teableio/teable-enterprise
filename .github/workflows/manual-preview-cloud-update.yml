@@ -109,6 +109,14 @@ jobs:
         with:
           args: set image deployment/teable-${{ env.INSTANCE_NAME }}-sandbox teable-${{ env.INSTANCE_NAME }}-sandbox=${{ env.SANDBOX_IMAGE }}
 
+      - name: Update sandbox deployment annotations
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          SANDBOX_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-cloud-preview:${{ needs.build-push.outputs.main_commit_sha }}-amd64
+        with:
+          args: annotate deployment/teable-${{ env.INSTANCE_NAME }}-sandbox originImageName="${{ env.SANDBOX_IMAGE }}" --overwrite
+
       - name: Update main deployment image
         uses: actions-hub/kubectl@master
         env:
@@ -116,6 +124,14 @@ jobs:
           MAIN_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud-preview:${{ needs.build-push.outputs.main_commit_sha }}-amd64
         with:
           args: set image deployment/teable-${{ env.INSTANCE_NAME }} teable-${{ env.INSTANCE_NAME }}=${{ env.MAIN_IMAGE }}
+
+      - name: Update main deployment annotations
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          MAIN_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud-preview:${{ needs.build-push.outputs.main_commit_sha }}-amd64
+        with:
+          args: annotate deployment/teable-${{ env.INSTANCE_NAME }} originImageName="${{ env.MAIN_IMAGE }}" --overwrite
 
       - name: Rollout sandbox status
         uses: actions-hub/kubectl@master
