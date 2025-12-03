@@ -1,0 +1,168 @@
+name: Preview EE PR Update
+
+on:
+  repository_dispatch:
+    types: [preview-ee-update]
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    outputs:
+      start_time: ${{ steps.start_time.outputs.start }}
+      pr_number: ${{ github.event.client_payload.pr_number }}
+      ref: ${{ github.event.client_payload.ref }}
+      main_commit_sha: ${{ steps.get_sha.outputs.sha }}
+      main_commit_author: ${{ steps.get_commit_info.outputs.author }}
+    strategy:
+      matrix:
+        include:
+          - image: teable-ee-preview
+            file: Dockerfile
+          - image: teable-sandbox-ee-preview
+            file: Dockerfile.sandbox
+    steps:
+      - name: Record start time
+        id: start_time
+        run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          submodules: "true"
+          ref: ${{ github.event.client_payload.ref }}
+
+      - name: Get teable-ee SHA
+        id: get_sha
+        run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Get commit info
+        id: get_commit_info
+        run: |
+          echo "author=$(git log -1 --pretty=format:'%an')" >> $GITHUB_OUTPUT
+
+      - name: Login to Ali container registry
+        uses: docker/login-action@v3
+        with:
+          registry: registry.cn-shenzhen.aliyuncs.com
+          username: ${{ vars.ALI_DOCKER_USERNAME }}
+          password: ${{ secrets.ALI_DOCKER_PASSWORD }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Login to AWS ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.9.0
+      - name: ⚙️ Install zx
+        run: npm install -g zx
+
+      - name: ⚙️ Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            registry.cn-shenzhen.aliyuncs.com/teable/${{ matrix.image }}
+            649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/${{ matrix.image }}
+          tags: |
+            type=raw,value=alpha-pr-${{ github.event.client_payload.pr_number }}
+            type=raw,value=${{ steps.get_sha.outputs.sha }}
+      - name: ⚙️ Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: 📦 Build and push
+        run: |
+          zx scripts/build-image.mjs --file=dockers/teable/${{ matrix.file }} \
+              --build-arg="ENABLE_CSP=false" \
+              --build-arg="NEXT_BUILD_ENV_EDITION=EE" \
+              --tag="${{ steps.meta.outputs.tags }}" \
+              --platform="linux/amd64" \
+              --push
+
+  deploy:
+    needs: [build-push]
+    runs-on: ubuntu-latest
+    env:
+      INSTANCE_NAME: pr-ee-${{ github.event.client_payload.pr_number }}
+    steps:
+      - name: Update sandbox deployment image
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          SANDBOX_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-ee-preview:${{ needs.build-push.outputs.main_commit_sha }}-amd64
+        with:
+          args: set image deployment/teable-${{ env.INSTANCE_NAME }}-sandbox teable-${{ env.INSTANCE_NAME }}-sandbox=${{ env.SANDBOX_IMAGE }}
+
+      - name: Update sandbox deployment annotations
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          SANDBOX_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-ee-preview:${{ needs.build-push.outputs.main_commit_sha }}-amd64
+        with:
+          args: annotate deployment/teable-${{ env.INSTANCE_NAME }}-sandbox originImageName="${{ env.SANDBOX_IMAGE }}" --overwrite
+
+      - name: Update main deployment image
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          MAIN_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-ee-preview:${{ needs.build-push.outputs.main_commit_sha }}-amd64
+        with:
+          args: set image deployment/teable-${{ env.INSTANCE_NAME }} teable-${{ env.INSTANCE_NAME }}=${{ env.MAIN_IMAGE }}
+
+      - name: Update main deployment annotations
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          MAIN_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-ee-preview:${{ needs.build-push.outputs.main_commit_sha }}-amd64
+        with:
+          args: annotate deployment/teable-${{ env.INSTANCE_NAME }} originImageName="${{ env.MAIN_IMAGE }}" --overwrite
+
+      - name: Rollout sandbox status
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        with:
+          args: rollout status deployment/teable-${{ env.INSTANCE_NAME }}-sandbox --timeout=300s
+
+      - name: Rollout main status
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        with:
+          args: rollout status deployment/teable-${{ env.INSTANCE_NAME }} --timeout=300s
+
+      - name: Wait for application health check
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        with:
+          args: exec deployment/teable-${{ env.INSTANCE_NAME }} -- curl -f --retry 30 --retry-delay 5 --retry-connrefused http://localhost:3000/health
+
+      - name: Create deployment status comment
+        if: always()
+        run: |
+          SUCCESS="${{ job.status == 'success' }}"
+          DOMAIN="pr-ee-${{ github.event.client_payload.pr_number }}"
+          URL="https://${DOMAIN}.sealoshzh.site"
+
+          if [ "$SUCCESS" = "true" ]; then
+            STATUS="✅ Success"
+            BODY="**Deployment Status: ${STATUS}** 🔗 Preview URL: ${URL}"
+          else
+            STATUS="❌ Failed"
+            BODY="**Deployment Status: ${STATUS}**"
+          fi
+
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.PACKAGES_KEY }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/teableio/teable-ee/issues/${{ github.event.client_payload.pr_number }}/comments" \
+            -d "{\"body\":\"${BODY}\"}"
