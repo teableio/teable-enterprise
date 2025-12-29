@@ -51,7 +51,6 @@ jobs:
         with:
           repository: teableio/teable-ee
           token: ${{ secrets.PACKAGES_KEY }}
-          submodules: "true"
 
       - name: Get teable-ee SHA
         id: get_sha
@@ -119,9 +118,6 @@ jobs:
       main_commit_sha: ${{ steps.get_sha.outputs.sha }}
       main_commit_author: ${{ steps.get_main_commit_info.outputs.author }}
       main_commit_message: ${{ steps.get_main_commit_info.outputs.message }}
-      submodule_commit_sha: ${{ steps.get_submodule_commit.outputs.submodule_sha }}
-      submodule_commit_author: ${{ steps.get_submodule_commit.outputs.submodule_author }}
-      submodule_commit_message: ${{ steps.get_submodule_commit.outputs.submodule_message }}
     strategy:
       matrix:
         target: [app, db-migrate, sandbox]
@@ -143,7 +139,6 @@ jobs:
         with:
           repository: teableio/teable-ee
           token: ${{ secrets.PACKAGES_KEY }}
-          submodules: "true"
 
       - name: Get teable-ee SHA
         id: get_sha
@@ -186,15 +181,6 @@ jobs:
               done
             done
           done
-
-      - name: Get community submodule commit info
-        if: matrix.target == 'app'  # Only run once
-        id: get_submodule_commit
-        run: |
-          cd community
-          echo "submodule_sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-          echo "submodule_message=$(git log -1 --pretty=format:'%s')" >> $GITHUB_OUTPUT
-          echo "submodule_author=$(git log -1 --pretty=format:'%an')" >> $GITHUB_OUTPUT
 
       - name: Get main commit info
         if: matrix.target == 'app'  # Only run once

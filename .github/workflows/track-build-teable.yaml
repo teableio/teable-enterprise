@@ -58,7 +58,6 @@ jobs:
         with:
           repository: teableio/teable-ee
           token: ${{ secrets.PACKAGES_KEY }}
-          submodules: "true"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -77,7 +76,7 @@ jobs:
           echo "version_tag=${version_tag}" >> $GITHUB_OUTPUT
           echo "Generated version tag: ${version_tag}"
 
-      - name: Get EE commit info
+      - name: Get commit info
         id: get_ee_commit
         run: |
           commit_sha=$(git rev-parse HEAD)
@@ -87,18 +86,6 @@ jobs:
           echo "sha=${commit_sha}" >> $GITHUB_OUTPUT
           echo "message=${commit_message}" >> $GITHUB_OUTPUT
           echo "author=${commit_author}" >> $GITHUB_OUTPUT
-
-      - name: Get CE commit info
-        id: get_ce_commit
-        run: |
-          cd community
-          ce_sha=$(git rev-parse HEAD)
-          ce_message=$(git log -1 --pretty=format:'%s')
-          ce_author=$(git log -1 --pretty=format:'%an')
-          
-          echo "sha=${ce_sha}" >> $GITHUB_OUTPUT
-          echo "message=${ce_message}" >> $GITHUB_OUTPUT
-          echo "author=${ce_author}" >> $GITHUB_OUTPUT
 
       - name: Extract PR number
         id: extract_pr
@@ -119,9 +106,7 @@ jobs:
           STATUS: ${{ inputs.status }}
           EDITION: ${{ inputs.edition }}
           COMMIT_MESSAGE: ${{ steps.get_ee_commit.outputs.message }}
-          CE_MESSAGE: ${{ steps.get_ce_commit.outputs.message }}
           COMMIT: ${{ steps.get_ee_commit.outputs.sha }}
-          CE_COMMIT: ${{ steps.get_ce_commit.outputs.sha }}
           AUTHOR: ${{ steps.get_ee_commit.outputs.author }}
           PR: ${{ steps.extract_pr.outputs.pr_number }}
           RUNS: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -132,9 +117,7 @@ jobs:
             --arg status "$STATUS" \
             --arg edition "$EDITION" \
             --arg commit_message "$COMMIT_MESSAGE" \
-            --arg ce_message "$CE_MESSAGE" \
             --arg commit "$COMMIT" \
-            --arg ce_commit "$CE_COMMIT" \
             --arg author "$AUTHOR" \
             --arg pr "$PR" \
             --arg runs "$RUNS" \
@@ -147,9 +130,7 @@ jobs:
                     "status": $status,
                     "edition": $edition,
                     "commit_message": $commit_message,
-                    "ce_comunity_message": $ce_message,
                     "commit": $commit,
-                    "ce_commit": $ce_commit,
                     "author": $author,
                     "pull_request": $pr,
                     "runs": $runs

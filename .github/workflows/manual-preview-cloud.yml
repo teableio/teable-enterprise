@@ -30,7 +30,6 @@ jobs:
         with:
           repository: teableio/teable-ee
           token: ${{ secrets.PACKAGES_KEY }}
-          submodules: "true"
           ref: ${{ github.event.client_payload.ref }}
 
       - name: Get teable-ee SHA
@@ -109,7 +108,6 @@ jobs:
         with:
           repository: teableio/teable-ee
           token: ${{ secrets.PACKAGES_KEY }}
-          submodules: "true"
           ref: ${{ github.event.client_payload.ref }}
 
       - name: Get teable-ee SHA
