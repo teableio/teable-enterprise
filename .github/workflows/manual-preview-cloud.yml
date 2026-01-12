@@ -2,7 +2,7 @@ name: Preview Cloud PR
 
 on:
   repository_dispatch:
-    types: [preview-cloud]
+    types: [preview-cloud-old]
 
 jobs:
   build-push:
@@ -67,7 +67,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20.9.0
+          node-version: 22.18.0
       - name: ⚙️ Install zx
         run: npm install -g zx
 

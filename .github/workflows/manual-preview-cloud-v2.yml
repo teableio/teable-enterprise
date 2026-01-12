@@ -1,8 +1,8 @@
-name: Preview EE PR Update
+name: Preview Cloud PR v2
 
 on:
   repository_dispatch:
-    types: [preview-ee-update]
+    types: [preview-cloud]
 
 jobs:
   build-push:
@@ -16,9 +16,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - image: teable-ee-preview
+          - image: teable-cloud-preview
             file: Dockerfile
-          - image: teable-sandbox-ee-preview
+          - image: teable-sandbox-cloud-preview
             file: Dockerfile.sandbox
     steps:
       - name: Record start time
@@ -30,7 +30,6 @@ jobs:
         with:
           repository: teableio/teable-ee
           token: ${{ secrets.PACKAGES_KEY }}
-          submodules: "true"
           ref: ${{ github.event.client_payload.ref }}
 
       - name: Get teable-ee SHA
@@ -49,6 +48,13 @@ jobs:
           username: ${{ vars.ALI_DOCKER_USERNAME }}
           password: ${{ secrets.ALI_DOCKER_PASSWORD }}
 
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -65,25 +71,37 @@ jobs:
       - name: ⚙️ Install zx
         run: npm install -g zx
 
-      - name: ⚙️ Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            registry.cn-shenzhen.aliyuncs.com/teable/${{ matrix.image }}
-            649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/${{ matrix.image }}
-          tags: |
-            type=raw,value=alpha-pr-${{ github.event.client_payload.pr_number }}
-            type=raw,value=${{ steps.get_sha.outputs.sha }}
+      - name: ⚙️ Install skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+
       - name: ⚙️ Set up QEMU
         uses: docker/setup-qemu-action@v3
 
       - name: 📦 Build and push
+        env:
+          LOCAL_IMAGE: ${{ matrix.image }}
+          GHCR_IMAGE: ghcr.io/teableio/${{ matrix.image }}
+          ALI_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/${{ matrix.image }}
+          AWS_IMAGE: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/${{ matrix.image }}
+          ALI_CREDS: ${{ vars.ALI_DOCKER_USERNAME }}:${{ secrets.ALI_DOCKER_PASSWORD }}
         run: |
+          AWS_CREDS="AWS:$(aws ecr get-login-password --region us-west-2)"
+
           zx scripts/build-image.mjs --file=dockers/teable/${{ matrix.file }} \
               --build-arg="ENABLE_CSP=false" \
-              --build-arg="NEXT_BUILD_ENV_EDITION=EE" \
-              --tag="${{ steps.meta.outputs.tags }}" \
+              --build-arg="NEXT_BUILD_ENV_EDITION=CLOUD" \
+              --local-image="${LOCAL_IMAGE}" \
+              --tag="alpha-pr-${{ github.event.client_payload.pr_number }}" \
+              --tag="${{ steps.get_sha.outputs.sha }}" \
+              --dest="${GHCR_IMAGE}" \
+              --dest="${ALI_IMAGE}" \
+              --dest="${AWS_IMAGE}" \
+              --dest-creds="" \
+              --dest-creds="${ALI_CREDS}" \
+              --dest-creds="${AWS_CREDS}" \
+              --push-concurrency=6 \
               --platform="linux/amd64" \
               --push
 
@@ -91,48 +109,45 @@ jobs:
     needs: [build-push]
     runs-on: ubuntu-latest
     env:
-      INSTANCE_NAME: pr-ee-${{ github.event.client_payload.pr_number }}
+      NAMESPACE: 38puz7wo
+      INSTANCE_NAME: pr-cloud-${{ github.event.client_payload.pr_number }}
+      INSTANCE_DOMAIN: pr-cloud-${{ github.event.client_payload.pr_number }}
+      DISPLAY_NAME: "teable-pr-cloud-${{ github.event.client_payload.pr_number }}"
     steps:
-      - name: Update sandbox deployment image
-        uses: actions-hub/kubectl@master
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-          SANDBOX_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-ee-preview:${{ needs.build-push.outputs.main_commit_sha }}-amd64
+      - name: Checkout private repository
+        uses: actions/checkout@v4
         with:
-          args: set image deployment/teable-${{ env.INSTANCE_NAME }}-sandbox teable-${{ env.INSTANCE_NAME }}-sandbox=${{ env.SANDBOX_IMAGE }}
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ github.event.client_payload.ref }}
 
-      - name: Update sandbox deployment annotations
-        uses: actions-hub/kubectl@master
+      - name: Get teable-ee SHA
+        id: get_sha
+        run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Create deployment YAML
         env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-          SANDBOX_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-ee-preview:${{ needs.build-push.outputs.main_commit_sha }}-amd64
-        with:
-          args: annotate deployment/teable-${{ env.INSTANCE_NAME }}-sandbox originImageName="${{ env.SANDBOX_IMAGE }}" --overwrite
+          MAIN_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud-preview
+          SANDBOX_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-cloud-preview
+          IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}-amd64
+        run: |
+          cp .github/workflows/templates/preview-template.yaml deploy.yaml
+          sed -i "s#__NAMESPACE__#${{ env.NAMESPACE }}#g" deploy.yaml
+          sed -i "s#__INSTANCE_NAME__#${{ env.INSTANCE_NAME }}#g" deploy.yaml
+          sed -i "s#__INSTANCE_DOMAIN__#${{ env.INSTANCE_DOMAIN }}#g" deploy.yaml
+          sed -i "s#__MAIN_IMAGE_REPOSITORY__#${{ env.MAIN_IMAGE_REPOSITORY }}#g" deploy.yaml
+          sed -i "s#__SANDBOX_IMAGE_REPOSITORY__#${{ env.SANDBOX_IMAGE_REPOSITORY }}#g" deploy.yaml
+          sed -i "s#__IMAGE_TAG__#${{ env.IMAGE_TAG }}#g" deploy.yaml
+          sed -i "s#__DISPLAY_NAME__#${{ env.DISPLAY_NAME }}#g" deploy.yaml
 
-      - name: Update main deployment image
-        uses: actions-hub/kubectl@master
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-          MAIN_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-ee-preview:${{ needs.build-push.outputs.main_commit_sha }}-amd64
-        with:
-          args: set image deployment/teable-${{ env.INSTANCE_NAME }} teable-${{ env.INSTANCE_NAME }}=${{ env.MAIN_IMAGE }}
-
-      - name: Update main deployment annotations
-        uses: actions-hub/kubectl@master
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-          MAIN_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-ee-preview:${{ needs.build-push.outputs.main_commit_sha }}-amd64
-        with:
-          args: annotate deployment/teable-${{ env.INSTANCE_NAME }} originImageName="${{ env.MAIN_IMAGE }}" --overwrite
-
-      - name: Rollout sandbox status
+      - name: Apply deploy job
         uses: actions-hub/kubectl@master
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         with:
-          args: rollout status deployment/teable-${{ env.INSTANCE_NAME }}-sandbox --timeout=300s
+          args: apply -f deploy.yaml
 
-      - name: Rollout main status
+      - name: Rollout status
         uses: actions-hub/kubectl@master
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
@@ -150,7 +165,7 @@ jobs:
         if: always()
         run: |
           SUCCESS="${{ job.status == 'success' }}"
-          DOMAIN="pr-ee-${{ github.event.client_payload.pr_number }}"
+          DOMAIN="pr-cloud-${{ github.event.client_payload.pr_number }}"
           URL="https://${DOMAIN}.sealoshzh.site"
 
           if [ "$SUCCESS" = "true" ]; then
@@ -166,3 +181,4 @@ jobs:
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/teableio/teable-ee/issues/${{ github.event.client_payload.pr_number }}/comments" \
             -d "{\"body\":\"${BODY}\"}"
+
