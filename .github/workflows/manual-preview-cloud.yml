@@ -2,7 +2,7 @@ name: Preview Cloud PR
 
 on:
   repository_dispatch:
-    types: [preview-cloud-old]
+    types: [preview-cloud]
 
 jobs:
   build-push:
