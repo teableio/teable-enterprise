@@ -66,10 +66,6 @@ jobs:
           tags: |
             type=raw,value=latest
             type=raw,value=${{ steps.get_sha.outputs.sha }}
-
-      - name: ⚙️ Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: 📦 Build
         run: |
           zx scripts/build-image.mjs --file=dockers/teable/${{ matrix.file }} \
@@ -77,5 +73,3 @@ jobs:
               --build-arg="NEXT_BUILD_ENV_EDITION=EE" \
               --tag="${{ steps.meta.outputs.tags }}" \
               --platform="linux/${{ matrix.arch }}" \
-              --cache-from="type=gha,scope=${{ matrix.target }}-${{ matrix.arch }}" \
-              --cache-to="type=gha,mode=max,scope=${{ matrix.target }}-${{ matrix.arch }}"
