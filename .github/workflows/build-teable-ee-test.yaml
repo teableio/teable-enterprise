@@ -73,7 +73,6 @@ jobs:
           tags: |
             type=raw,value=latest
             type=raw,value=${{ steps.get_sha.outputs.sha }}
-            type=raw,value=${{ needs.track-start.outputs.version_tag }}
 
       - name: ⚙️ Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
