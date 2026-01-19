@@ -29,7 +29,8 @@ jobs:
 
   build-push:
     needs: track-start
-    runs-on: ubuntu-latest
+    # runner images: https://github.com/actions/partner-runner-images?tab=readme-ov-file#available-images
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     strategy:
       matrix:
         target: [app, db-migrate, sandbox]
@@ -97,9 +98,8 @@ jobs:
             type=raw,value=latest
             type=raw,value=${{ steps.get_sha.outputs.sha }}
             type=raw,value=${{ needs.track-start.outputs.version_tag }}
-
-      - name: ⚙️ Set up QEMU
-        uses: docker/setup-qemu-action@v3
+          flavor: |
+            suffix=-${{ matrix.arch }}
 
       - name: 📦 Build and push
         run: |
@@ -167,16 +167,18 @@ jobs:
       - name: Create and push manifest
         run: |
           REGISTRIES=("${{ env.REGISTRY_ALI }}" "${{ env.REGISTRY_GITHUB }}" "${{ env.REGISTRY_DOCKERHUB }}")
-          TAGS=("latest" "${{ steps.get_sha.outputs.sha }}")
+          TAGS=("latest" "${{ steps.get_sha.outputs.sha }}" "${{ needs.track-start.outputs.version_tag }}")
           SUFFIXES=("${{ env.CE_IMAGE_SUFFIX }}" "${{ env.EE_IMAGE_SUFFIX }}")
 
           for REGISTRY in "${REGISTRIES[@]}"; do
             for TAG in "${TAGS[@]}"; do
               for SUFFIX in "${SUFFIXES[@]}"; do
+                # Create multi-arch manifest
                 docker manifest create ${REGISTRY}/${{ matrix.image }}${SUFFIX}:${TAG} \
                   ${REGISTRY}/${{ matrix.image }}${SUFFIX}:${TAG}-amd64 \
                   ${REGISTRY}/${{ matrix.image }}${SUFFIX}:${TAG}-arm64
-              
+                
+                # Push the manifest
                 docker manifest push ${REGISTRY}/${{ matrix.image }}${SUFFIX}:${TAG}
               done
             done

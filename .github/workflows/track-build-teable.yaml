@@ -71,8 +71,8 @@ jobs:
           ee_version=$(node -p "require('./enterprise/app-ee/package.json').version")
           ce_version=$(node -p "require('./community/apps/nextjs-app/package.json').version")
           
-          # Generate version tag with - symbol (Docker compatible)
-          version_tag="${ee_version}-alpha-${ce_version}-build.${{ github.run_number }}-amd64"
+          # Generate version tag without architecture suffix (for multi-arch manifest)
+          version_tag="${ee_version}-alpha-${ce_version}-build.${{ github.run_number }}"
           echo "version_tag=${version_tag}" >> $GITHUB_OUTPUT
           echo "Generated version tag: ${version_tag}"
 
