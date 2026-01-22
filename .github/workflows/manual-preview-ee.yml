@@ -81,6 +81,7 @@ jobs:
         run: |
           zx scripts/build-image.mjs --file=dockers/teable/${{ matrix.file }} \
               --build-arg="ENABLE_CSP=false" \
+              --build-arg="SENTRY_ENABLED=false" \
               --build-arg="NEXT_BUILD_ENV_EDITION=EE" \
               --tag="${{ steps.meta.outputs.tags }}" \
               --platform="linux/amd64" \
