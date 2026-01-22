@@ -99,6 +99,10 @@ jobs:
           zx scripts/build-image.mjs --file=dockers/teable/${{ matrix.file }} \
               --build-arg="ENABLE_CSP=false" \
               --build-arg="NEXT_BUILD_ENV_EDITION=CLOUD" \
+              --build-arg="SENTRY_ORG=${{ secrets.SENTRY_ORG }}" \
+              --build-arg="SENTRY_PROJECT=${{ secrets.SENTRY_PROJECT }}" \
+              --build-arg="SENTRY_AUTH_TOKEN=${{ secrets.SENTRY_AUTH_TOKEN }}" \
+              --build-arg="NEXT_BUILD_ENV_ASSET_PREFIX=${{ vars.NEXT_BUILD_ENV_ASSET_PREFIX }}" \
               --tag="${{ steps.meta.outputs.tags }}" \
               --platform="linux/amd64" \
               --push \
