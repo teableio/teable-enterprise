@@ -34,6 +34,33 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-west-2
 
+      - name: Download sandbox task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition teable-sandbox \
+            --query taskDefinition > sandbox-task-definition-raw.json
+
+      - name: Clean sandbox task definition for registration
+        run: |
+          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy, .enableFaultInjection, .faultInjectionPolicy)' \
+            sandbox-task-definition-raw.json > sandbox-task-definition.json
+
+      - name: Render sandbox task definition with new image
+        id: render-sandbox-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: sandbox-task-definition.json
+          container-name: teable-sandbox
+          image: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-sandbox-cloud:${{ inputs.image_tag }}
+
+      - name: Deploy sandbox to ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.render-sandbox-task-def.outputs.task-definition }}
+          service: teable-sandbox-service-1
+          cluster: teable
+          wait-for-service-stability: true
+
       - name: Download current task definition
         run: |
           aws ecs describe-task-definition \
