@@ -57,7 +57,7 @@ jobs:
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
         with:
           task-definition: ${{ steps.render-sandbox-task-def.outputs.task-definition }}
-          service: teable-sandbox-service-1
+          service: teable-sandbox
           cluster: teable
           wait-for-service-stability: true
 
@@ -99,7 +99,6 @@ jobs:
           # Build JSON payload using jq to properly escape special characters
           payload=$(jq -n \
             --arg date "$current_time" \
-            --arg release "$IMAGE_TAG" \
             --arg region "teable.ai" \
             --arg trigger "$TRIGGER" \
             '{
@@ -109,7 +108,6 @@ jobs:
                 {
                   "fields": {
                     "date": $date,
-                    "release": $release,
                     "region": $region,
                     "trigger": $trigger
                   }
