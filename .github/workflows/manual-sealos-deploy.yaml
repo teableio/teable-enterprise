@@ -162,7 +162,6 @@ jobs:
           # Build JSON payload using jq to properly escape special characters
           payload=$(jq -n \
             --arg date "$current_time" \
-            --arg release "$IMAGE_TAG" \
             --arg region "teable.cn" \
             --arg trigger "$TRIGGER" \
             '{
@@ -172,7 +171,6 @@ jobs:
                 {
                   "fields": {
                     "date": $date,
-                    "release": $release,
                     "region": $region,
                     "trigger": $trigger
                   }
