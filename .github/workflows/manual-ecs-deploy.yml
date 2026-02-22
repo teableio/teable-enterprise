@@ -10,20 +10,94 @@ on:
         description: 'Who triggered this deployment'
         required: false
         default: 'Manual'
+  workflow_call:
+    inputs:
+      image_tag:
+        description: 'Docker image tag'
+        required: true
+        type: string
+      trigger:
+        description: 'Who triggered this deployment'
+        required: false
+        type: string
+        default: 'Automation'
+    outputs:
+      start_time:
+        description: 'Deployment start timestamp'
+        value: ${{ jobs.prepare.outputs.start_time }}
+      image_tag:
+        description: 'Deployed image tag'
+        value: ${{ jobs.prepare.outputs.image_tag }}
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      TEABLE_API_TOKEN:
+        required: false
 
 jobs:
-  deploy:
-    name: Deploy to ECS
+  prepare:
+    name: Prepare Deployment
     runs-on: ubuntu-latest
     outputs:
       start_time: ${{ steps.start_time.outputs.start }}
       image_tag: ${{ inputs.image_tag }}
-    
+
     steps:
       - name: Record start time
         id: start_time
         run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
 
+  deploy-sandbox:
+    name: Deploy Sandbox to ECS
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Download sandbox task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition teable-sandbox \
+            --query taskDefinition > sandbox-task-definition-raw.json
+
+      - name: Clean sandbox task definition for registration
+        run: |
+          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy, .enableFaultInjection, .faultInjectionPolicy)' \
+            sandbox-task-definition-raw.json > sandbox-task-definition.json
+
+      - name: Render sandbox task definition with new image
+        id: render-sandbox-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: sandbox-task-definition.json
+          container-name: teable-sandbox
+          image: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-sandbox-cloud:${{ inputs.image_tag }}
+
+      - name: Deploy sandbox to ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.render-sandbox-task-def.outputs.task-definition }}
+          service: teable-sandbox
+          cluster: teable
+          wait-for-service-stability: true
+
+  deploy-app:
+    name: Deploy Main to ECS
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -62,6 +136,12 @@ jobs:
           cluster: teable
           wait-for-service-stability: true
 
+  notify:
+    name: Record Deployment in Teable
+    needs: [prepare, deploy-sandbox, deploy-app]
+    runs-on: ubuntu-latest
+
+    steps:
       - name: Record deployment in Teable
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
