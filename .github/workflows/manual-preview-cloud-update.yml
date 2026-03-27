@@ -5,6 +5,18 @@ on:
     types: [preview-cloud-update]
 
 jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment build progress on PR
+        run: |
+          BODY="🔄 Your preview cloud environment is being updated. You can view the progress at [this link](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.PACKAGES_KEY }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/teableio/teable-ee/issues/${{ github.event.client_payload.pr_number }}/comments" \
+            -d "{\"body\":\"${BODY}\"}"
+
   build-push:
     runs-on: ubuntu-latest
     outputs:
