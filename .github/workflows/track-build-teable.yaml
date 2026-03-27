@@ -139,26 +139,34 @@ jobs:
               ]
             }')
           
+          response_file=$(mktemp)
+
           # Make the API call and capture both response and HTTP status code
-          http_code=$(curl -s -w "%{http_code}" -o /tmp/response.json -X POST 'https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record' \
+          set +e
+          http_code=$(curl -s -w "%{http_code}" -o "$response_file" -X POST 'https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record' \
             -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
             -H 'Content-Type: application/json' \
             -d "$payload")
+          curl_exit_code=$?
+          set -e
           
-          response=$(cat /tmp/response.json)
+          response=$(cat "$response_file" 2>/dev/null || echo "")
           echo "Response: $response"
           echo "HTTP Status Code: $http_code"
           
           # Check if request was successful
-          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+          if [ "$curl_exit_code" -ne 0 ]; then
+            echo "::warning title=Teable tracking create failed::curl exited with code $curl_exit_code"
+            echo "record_id=" >> $GITHUB_OUTPUT
+          elif [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
             # Extract record ID from response
             record_id=$(echo "$response" | jq -r '.records[0].id')
             echo "record_id=${record_id}" >> $GITHUB_OUTPUT
             echo "Created record with ID: ${record_id}"
           else
-            echo "Error: API request failed with status code $http_code"
+            echo "::warning title=Teable tracking create failed::API request failed with status code $http_code"
             echo "Response: $response"
-            exit 1
+            echo "record_id=" >> $GITHUB_OUTPUT
           fi
 
       - name: Calculate duration
@@ -181,6 +189,12 @@ jobs:
           DURATION: ${{ steps.calc_duration.outputs.duration }}
           RECORD_ID: ${{ inputs.record_id }}
         run: |
+          if [ -z "$RECORD_ID" ]; then
+            echo "::warning title=Teable tracking update skipped::record_id is empty, skipping update"
+            echo "record_id=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           # Build JSON payload using jq to properly escape special characters
           payload=$(jq -n \
             --arg status "$STATUS" \
@@ -195,23 +209,30 @@ jobs:
               }
             }')
           
+          response_file=$(mktemp)
+
           # Make the API call and capture both response and HTTP status code
-          http_code=$(curl -s -w "%{http_code}" -o /tmp/response.json -X PATCH "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/$RECORD_ID" \
+          set +e
+          http_code=$(curl -s -w "%{http_code}" -o "$response_file" -X PATCH "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/$RECORD_ID" \
             -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
             -H 'Content-Type: application/json' \
             -d "$payload")
+          curl_exit_code=$?
+          set -e
           
-          response=$(cat /tmp/response.json)
+          response=$(cat "$response_file" 2>/dev/null || echo "")
           echo "Response: $response"
           echo "HTTP Status Code: $http_code"
           
           # Check if request was successful
-          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+          if [ "$curl_exit_code" -ne 0 ]; then
+            echo "::warning title=Teable tracking update failed::curl exited with code $curl_exit_code"
+            echo "record_id=$RECORD_ID" >> $GITHUB_OUTPUT
+          elif [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
             echo "record_id=$RECORD_ID" >> $GITHUB_OUTPUT
             echo "Updated record $RECORD_ID with status: $STATUS"
           else
-            echo "Error: API request failed with status code $http_code"
+            echo "::warning title=Teable tracking update failed::API request failed with status code $http_code"
             echo "Response: $response"
-            exit 1
+            echo "record_id=$RECORD_ID" >> $GITHUB_OUTPUT
           fi
-
