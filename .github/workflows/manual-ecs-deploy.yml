@@ -10,6 +10,10 @@ on:
         description: 'Who triggered this deployment'
         required: false
         default: 'Manual'
+      release_created_time:
+        description: 'Creation time of the release record that triggered this deploy (ISO 8601)'
+        required: false
+        default: ''
   workflow_call:
     inputs:
       image_tag:
@@ -21,6 +25,11 @@ on:
         required: false
         type: string
         default: 'Automation'
+      release_created_time:
+        description: 'Creation time of the release record that triggered this deploy (ISO 8601)'
+        required: false
+        type: string
+        default: ''
     outputs:
       start_time:
         description: 'Deployment start timestamp'
@@ -173,14 +182,16 @@ jobs:
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
           TRIGGER: ${{ inputs.trigger || github.actor }}
+          RELEASE_CREATED_TIME: ${{ inputs.release_created_time }}
         run: |
           current_time=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-          
+
           # Build JSON payload using jq to properly escape special characters
           payload=$(jq -n \
             --arg date "$current_time" \
             --arg region "teable.ai" \
             --arg trigger "$TRIGGER" \
+            --arg snapshot "$RELEASE_CREATED_TIME" \
             '{
               "fieldKeyType": "dbFieldName",
               "typecast": true,
@@ -189,22 +200,23 @@ jobs:
                   "fields": {
                     "date": $date,
                     "region": $region,
-                    "trigger": $trigger
+                    "trigger": $trigger,
+                    "Deploy_snapshot_time": (if $snapshot != "" then $snapshot else null end)
                   }
                 }
               ]
             }')
-          
+
           # Make the API call and capture both response and HTTP status code
           http_code=$(curl -s -w "%{http_code}" -o /tmp/response.json -X POST 'https://app.teable.ai/api/table/tblmGAFOHrGcy66PaUp/record' \
             -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
             -H 'Content-Type: application/json' \
             -d "$payload")
-          
+
           response=$(cat /tmp/response.json)
           echo "Response: $response"
           echo "HTTP Status Code: $http_code"
-          
+
           # Check if request was successful
           if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
             record_id=$(echo "$response" | jq -r '.records[0].id')
