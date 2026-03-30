@@ -25,14 +25,11 @@ jobs:
 
     strategy:
       matrix:
-        target: [app, db-migrate, sandbox]
+        target: [app, sandbox]
         include:
           - target: app
             file: Dockerfile
             image: teable-cloud
-          - target: db-migrate
-            file: Dockerfile.db-migrate
-            image: teable-db-migrate-cloud
           - target: sandbox
             file: Dockerfile.sandbox
             image: teable-sandbox-cloud

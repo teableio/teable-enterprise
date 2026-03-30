@@ -33,15 +33,12 @@ jobs:
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     strategy:
       matrix:
-        target: [app, db-migrate, sandbox]
+        target: [app, sandbox]
         arch: [amd64, arm64]
         include:
           - target: app
             file: Dockerfile
             image: teable
-          - target: db-migrate
-            file: Dockerfile.db-migrate
-            image: teable-db-migrate
           - target: sandbox
             file: Dockerfile.sandbox
             image: teable-sandbox
@@ -120,12 +117,10 @@ jobs:
       main_commit_message: ${{ steps.get_main_commit_info.outputs.message }}
     strategy:
       matrix:
-        target: [app, db-migrate, sandbox]
+        target: [app, sandbox]
         include:
           - target: app
             image: teable
-          - target: db-migrate
-            image: teable-db-migrate
           - target: sandbox
             image: teable-sandbox
 
