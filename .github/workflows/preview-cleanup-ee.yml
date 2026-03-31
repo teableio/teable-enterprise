@@ -28,6 +28,9 @@ jobs:
           SANDBOX_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-ee
           IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}-amd64
         run: |
+          OTEL_EXPORTER_OTLP_ENDPOINT="http://teable-${{ env.INSTANCE_NAME }}-jaeger:4318/v1/traces"
+          TRACE_LINK_BASE_URL="https://jaeger-${{ env.INSTANCE_DOMAIN }}.sealoshzh.site"
+
           cp .github/workflows/templates/preview-template.yaml deploy.yaml
           sed -i "s#__NAMESPACE__#${{ env.NAMESPACE }}#g" deploy.yaml
           sed -i "s#__INSTANCE_NAME__#${{ env.INSTANCE_NAME }}#g" deploy.yaml
@@ -36,6 +39,9 @@ jobs:
           sed -i "s#__SANDBOX_IMAGE_REPOSITORY__#${{ env.SANDBOX_IMAGE_REPOSITORY }}#g" deploy.yaml
           sed -i "s#__IMAGE_TAG__#${{ env.IMAGE_TAG }}#g" deploy.yaml
           sed -i "s#__DISPLAY_NAME__#${{ env.DISPLAY_NAME }}#g" deploy.yaml
+          sed -i "s#__OTEL_EXPORTER_OTLP_ENDPOINT__#${OTEL_EXPORTER_OTLP_ENDPOINT}#g" deploy.yaml
+          sed -i "s#__TRACE_LINK_BASE_URL__#${TRACE_LINK_BASE_URL}#g" deploy.yaml
+          sed -i '/^#__JAEGER_ENABLED_/d' deploy.yaml
 
       - name: Delete deployment
         uses: actions-hub/kubectl@master
