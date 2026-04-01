@@ -63,7 +63,7 @@ jobs:
             IMAGES=("teable-cloud" "teable-sandbox-cloud")
             for image in "${IMAGES[@]}"; do
               for tag in "${TAGS[@]}"; do
-                retry_copy "${SRC_REGISTRY}/${image}:${tag}" "${DST_REGISTRY}/${image}:${tag}" || FAILED=1
+                retry_copy "${SRC_REGISTRY}/${image}:${tag}-amd64" "${DST_REGISTRY}/${image}:${tag}-amd64" || FAILED=1
               done
             done
 
