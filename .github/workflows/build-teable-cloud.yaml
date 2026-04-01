@@ -52,13 +52,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.PACKAGES_KEY }}
 
-      - name: Login to Ali container registry
-        uses: docker/login-action@v3
-        with:
-          registry: registry.cn-shenzhen.aliyuncs.com
-          username: ${{ vars.ALI_DOCKER_USERNAME }}
-          password: ${{ secrets.ALI_DOCKER_PASSWORD }}
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -80,7 +73,6 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            registry.cn-shenzhen.aliyuncs.com/teable/${{ matrix.image }}
             ghcr.io/teableio/${{ matrix.image }}
             649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/${{ matrix.image }}
           tags: |
@@ -105,6 +97,30 @@ jobs:
               --platform="linux/amd64" \
               --push \
               --upload-assets-list='[["aws-objectstorage","https://s3.us-west-2.amazonaws.com","${{ secrets.AWS_ACCESS_KEY_ID }}","${{ secrets.AWS_SECRET_ACCESS_KEY }}","teable-next-asset"],["sealos-objectstorage","https://objectstorageapi.hzh.sealos.run","${{ secrets.SEALOS_OBJECTSTORAGE_ACCESS_KEY }}","${{ secrets.SEALOS_OBJECTSTORAGE_SECRET_KEY }}","38puz7wo-teable-public"]]'
+
+  sync-aliyun:
+    needs: [track-start, build-push]
+    if: needs.build-push.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+
+      - name: Get teable-ee SHA
+        id: get_sha
+        run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Dispatch Aliyun sync
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          gh workflow run sync-aliyun.yaml \
+            -R ${{ github.repository }} \
+            -f edition=cloud \
+            -f "tags=latest,${{ steps.get_sha.outputs.sha }},${{ needs.track-start.outputs.version_tag }}"
 
   determine-status:
     needs: [track-start, build-push]

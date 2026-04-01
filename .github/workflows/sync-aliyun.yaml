@@ -1,0 +1,100 @@
+name: Sync images to Aliyun
+
+on:
+  workflow_dispatch:
+    inputs:
+      edition:
+        description: 'Edition to sync (cloud or ee)'
+        required: true
+        type: choice
+        options:
+          - cloud
+          - ee
+      tags:
+        description: 'Comma-separated tags to sync (e.g., latest,abc123,1.0.0)'
+        required: true
+        type: string
+
+env:
+  SRC_REGISTRY: ghcr.io/teableio
+  DST_REGISTRY: registry.cn-shenzhen.aliyuncs.com/teable
+  MAX_RETRIES: 5
+  RETRY_DELAY: 30
+
+jobs:
+  sync:
+    name: Sync ${{ inputs.edition }} images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+
+      - name: Sync images to Aliyun
+        env:
+          SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
+          DST_CREDS: ${{ vars.ALI_DOCKER_USERNAME }}:${{ secrets.ALI_DOCKER_PASSWORD }}
+        run: |
+          set +e
+
+          retry_copy() {
+            local src="$1" dst="$2" all_flag="$3"
+            for attempt in $(seq 1 $MAX_RETRIES); do
+              echo "[$attempt/$MAX_RETRIES] Copying ${src} -> ${dst}"
+              if skopeo copy ${all_flag} \
+                  "docker://${src}" "docker://${dst}" \
+                  --src-creds="${SRC_CREDS}" \
+                  --dest-creds="${DST_CREDS}"; then
+                echo "✅ Success: ${src}"
+                return 0
+              fi
+              echo "⚠️ Attempt ${attempt} failed. Retrying in ${RETRY_DELAY}s..."
+              sleep $RETRY_DELAY
+            done
+            echo "❌ FAILED after ${MAX_RETRIES} attempts: ${src}"
+            return 1
+          }
+
+          IFS=',' read -ra TAGS <<< "${{ inputs.tags }}"
+          FAILED=0
+
+          if [ "${{ inputs.edition }}" = "cloud" ]; then
+            IMAGES=("teable-cloud" "teable-sandbox-cloud")
+            for image in "${IMAGES[@]}"; do
+              for tag in "${TAGS[@]}"; do
+                retry_copy "${SRC_REGISTRY}/${image}:${tag}" "${DST_REGISTRY}/${image}:${tag}" || FAILED=1
+              done
+            done
+
+          elif [ "${{ inputs.edition }}" = "ee" ]; then
+            IMAGES=("teable" "teable-sandbox")
+            SUFFIXES=("" "-ee")
+            ARCHES=("amd64" "arm64")
+
+            for image in "${IMAGES[@]}"; do
+              for suffix in "${SUFFIXES[@]}"; do
+                for tag in "${TAGS[@]}"; do
+                  # Sync arch-specific tags
+                  for arch in "${ARCHES[@]}"; do
+                    retry_copy \
+                      "${SRC_REGISTRY}/${image}${suffix}:${tag}-${arch}" \
+                      "${DST_REGISTRY}/${image}${suffix}:${tag}-${arch}" \
+                      || FAILED=1
+                  done
+                  # Sync manifest list with --all
+                  retry_copy \
+                    "${SRC_REGISTRY}/${image}${suffix}:${tag}" \
+                    "${DST_REGISTRY}/${image}${suffix}:${tag}" \
+                    "--all" \
+                    || FAILED=1
+                done
+              done
+            done
+          fi
+
+          if [ $FAILED -ne 0 ]; then
+            echo "::error::Some images failed to sync to Aliyun"
+            exit 1
+          fi
+          echo "🎉 All images synced successfully"

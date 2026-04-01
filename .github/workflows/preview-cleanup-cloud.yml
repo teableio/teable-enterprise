@@ -24,8 +24,8 @@ jobs:
           INSTANCE_NAME: pr-cloud-${{ github.event.client_payload.pr_number }}
           INSTANCE_DOMAIN: pr-cloud-${{ github.event.client_payload.pr_number }}
           DISPLAY_NAME: "teable-pr-cloud-${{ github.event.client_payload.pr_number }}"
-          MAIN_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud
-          SANDBOX_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-cloud
+          MAIN_IMAGE_REPOSITORY: ghcr.io/teableio/teable-cloud
+          SANDBOX_IMAGE_REPOSITORY: ghcr.io/teableio/teable-sandbox-cloud
           IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}-amd64
         run: |
           OTEL_EXPORTER_OTLP_ENDPOINT="http://teable-${{ env.INSTANCE_NAME }}-jaeger:4318/v1/traces"
