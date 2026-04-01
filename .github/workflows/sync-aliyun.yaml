@@ -14,6 +14,19 @@ on:
         description: 'Comma-separated tags to sync (e.g., latest,abc123,1.0.0)'
         required: true
         type: string
+  workflow_call:
+    inputs:
+      edition:
+        required: true
+        type: string
+      tags:
+        required: true
+        type: string
+    secrets:
+      PACKAGES_KEY:
+        required: true
+      ALI_DOCKER_PASSWORD:
+        required: true
 
 env:
   SRC_REGISTRY: ghcr.io/teableio

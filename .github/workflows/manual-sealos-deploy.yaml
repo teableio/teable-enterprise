@@ -66,14 +66,14 @@ jobs:
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         with:
-          args: set image deployment/teable-sandbox-cloud teable-sandbox-cloud=ghcr.io/teableio/teable-sandbox-cloud:${{ inputs.image_tag }}
+          args: set image deployment/teable-sandbox-cloud teable-sandbox-cloud=registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-cloud:${{ inputs.image_tag }}
 
       - name: Update sandbox deployment annotations
         uses: actions-hub/kubectl@master
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         with:
-          args: annotate deployment/teable-sandbox-cloud originImageName="ghcr.io/teableio/teable-sandbox-cloud:${{ inputs.image_tag }}" --overwrite
+          args: annotate deployment/teable-sandbox-cloud originImageName="registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-cloud:${{ inputs.image_tag }}" --overwrite
 
       - name: Rollout sandbox status
         uses: actions-hub/kubectl@master
@@ -102,7 +102,7 @@ jobs:
                   - name: teable-cloud
                 containers:
                   - name: teable
-                    image: "ghcr.io/teableio/teable-cloud:${{ inputs.image_tag }}"
+                    image: "registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud:${{ inputs.image_tag }}"
                     imagePullPolicy: IfNotPresent
                     args:
                       - migrate-only
@@ -145,14 +145,14 @@ jobs:
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         with:
-          args: set image deployment/teable-cloud teable-cloud=ghcr.io/teableio/teable-cloud:${{ inputs.image_tag }}
+          args: set image deployment/teable-cloud teable-cloud=registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud:${{ inputs.image_tag }}
 
       - name: Update deployment annotations
         uses: actions-hub/kubectl@master
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         with:
-          args: annotate deployment/teable-cloud originImageName="ghcr.io/teableio/teable-cloud:${{ inputs.image_tag }}" --overwrite
+          args: annotate deployment/teable-cloud originImageName="registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud:${{ inputs.image_tag }}" --overwrite
 
       - name: Rollout status
         uses: actions-hub/kubectl@master

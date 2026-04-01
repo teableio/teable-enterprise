@@ -172,29 +172,14 @@ jobs:
   sync-aliyun:
     needs: [track-start, create-manifest]
     if: needs.create-manifest.result == 'success'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout private repository
-        uses: actions/checkout@v4
-        with:
-          repository: teableio/teable-ee
-          token: ${{ secrets.PACKAGES_KEY }}
-
-      - name: Get teable-ee SHA
-        id: get_sha
-        run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Dispatch Aliyun sync
-        env:
-          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-        run: |
-          gh workflow run sync-aliyun.yaml \
-            -R ${{ github.repository }} \
-            -f edition=ee \
-            -f "tags=latest,${{ steps.get_sha.outputs.sha }},${{ needs.track-start.outputs.version_tag }}"
+    uses: ./.github/workflows/sync-aliyun.yaml
+    with:
+      edition: ee
+      tags: "latest,${{ needs.create-manifest.outputs.main_commit_sha }},${{ needs.track-start.outputs.version_tag }}"
+    secrets: inherit
 
   determine-status:
-    needs: [track-start, create-manifest]
+    needs: [track-start, create-manifest, sync-aliyun]
     if: always()
     runs-on: ubuntu-latest
     outputs:
@@ -203,14 +188,14 @@ jobs:
       - name: Determine final status
         id: status
         run: |
-          if [ "${{ needs.create-manifest.result }}" == "success" ]; then
+          if [ "${{ needs.create-manifest.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ]; then
             echo "status=Released" >> $GITHUB_OUTPUT
           else
             echo "status=Fail" >> $GITHUB_OUTPUT
           fi
 
   track-complete:
-    needs: [track-start, create-manifest, determine-status]
+    needs: [track-start, create-manifest, sync-aliyun, determine-status]
     if: always()
     uses: ./.github/workflows/track-build-teable.yaml
     with:

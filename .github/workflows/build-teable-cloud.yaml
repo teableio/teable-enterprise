@@ -22,6 +22,8 @@ jobs:
   build-push:
     needs: track-start
     runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.get_sha.outputs.sha }}
 
     strategy:
       matrix:
@@ -101,29 +103,14 @@ jobs:
   sync-aliyun:
     needs: [track-start, build-push]
     if: needs.build-push.result == 'success'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout private repository
-        uses: actions/checkout@v4
-        with:
-          repository: teableio/teable-ee
-          token: ${{ secrets.PACKAGES_KEY }}
-
-      - name: Get teable-ee SHA
-        id: get_sha
-        run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Dispatch Aliyun sync
-        env:
-          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-        run: |
-          gh workflow run sync-aliyun.yaml \
-            -R ${{ github.repository }} \
-            -f edition=cloud \
-            -f "tags=latest,${{ steps.get_sha.outputs.sha }},${{ needs.track-start.outputs.version_tag }}"
+    uses: ./.github/workflows/sync-aliyun.yaml
+    with:
+      edition: cloud
+      tags: "latest,${{ needs.build-push.outputs.sha }},${{ needs.track-start.outputs.version_tag }}"
+    secrets: inherit
 
   determine-status:
-    needs: [track-start, build-push]
+    needs: [track-start, build-push, sync-aliyun]
     if: always()
     runs-on: ubuntu-latest
     outputs:
@@ -132,14 +119,14 @@ jobs:
       - name: Determine final status
         id: status
         run: |
-          if [ "${{ needs.build-push.result }}" == "success" ]; then
+          if [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ]; then
             echo "status=Released" >> $GITHUB_OUTPUT
           else
             echo "status=Fail" >> $GITHUB_OUTPUT
           fi
 
   track-complete:
-    needs: [track-start, build-push, determine-status]
+    needs: [track-start, build-push, sync-aliyun, determine-status]
     if: always()
     uses: ./.github/workflows/track-build-teable.yaml
     with:
