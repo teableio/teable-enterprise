@@ -54,6 +54,13 @@ jobs:
         run: |
           echo "author=$(git log -1 --pretty=format:'%an')" >> $GITHUB_OUTPUT
 
+      - name: Login to Ali container registry
+        uses: docker/login-action@v3
+        with:
+          registry: registry.cn-shenzhen.aliyuncs.com
+          username: ${{ vars.ALI_DOCKER_USERNAME }}
+          password: ${{ secrets.ALI_DOCKER_PASSWORD }}
+
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -82,6 +89,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
+            registry.cn-shenzhen.aliyuncs.com/teable/${{ matrix.image }}
             ghcr.io/teableio/${{ matrix.image }}
             649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/${{ matrix.image }}
           tags: |
@@ -139,8 +147,8 @@ jobs:
 
       - name: Create deployment YAML
         env:
-          MAIN_IMAGE_REPOSITORY: ghcr.io/teableio/teable-cloud-preview
-          SANDBOX_IMAGE_REPOSITORY: ghcr.io/teableio/teable-sandbox-cloud-preview
+          MAIN_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud-preview
+          SANDBOX_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-cloud-preview
           IMAGE_TAG: ${{ needs.build-push.outputs.main_commit_sha }}-amd64
           ENABLE_TRACING: ${{ steps.labels.outputs.enable_tracing }}
         run: |
