@@ -2,7 +2,7 @@ name: Cleanup Cloud PR
 
 on:
   repository_dispatch:
-    types: [cleanup]
+    types: [cleanup, cleanup-cloud]
 
 jobs:
   cleanup:

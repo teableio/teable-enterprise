@@ -2,7 +2,7 @@ name: Cleanup EE PR
 
 on:
   repository_dispatch:
-    types: [cleanup]
+    types: [cleanup, cleanup-ee]
 
 jobs:
   cleanup:
