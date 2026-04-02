@@ -119,15 +119,7 @@ jobs:
       NAMESPACE: 38puz7wo
       INSTANCE_NAME: pr-cloud-${{ github.event.client_payload.pr_number }}
       INSTANCE_DOMAIN: pr-cloud-${{ github.event.client_payload.pr_number }}
-      DISPLAY_NAME: "teable-pr-cloud-${{ github.event.client_payload.pr_number }}"
     steps:
-      - name: Checkout private repository
-        uses: actions/checkout@v4
-        with:
-          repository: teableio/teable-ee
-          token: ${{ secrets.PACKAGES_KEY }}
-          ref: ${{ github.event.client_payload.ref }}
-
       - name: Check tracing label
         id: labels
         uses: actions/github-script@v7
@@ -145,52 +137,166 @@ jobs:
             console.log('PR labels:', labels.join(', '));
             console.log('Enable tracing:', enableTracing);
 
-      - name: Create deployment YAML
+      - name: Update sandbox deployment image
+        uses: actions-hub/kubectl@master
         env:
-          MAIN_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud-preview
-          SANDBOX_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-cloud-preview
-          IMAGE_TAG: ${{ needs.build-push.outputs.main_commit_sha }}-amd64
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          SANDBOX_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-cloud-preview:${{ needs.build-push.outputs.main_commit_sha }}-amd64
+        with:
+          args: set image deployment/teable-${{ env.INSTANCE_NAME }}-sandbox teable-${{ env.INSTANCE_NAME }}-sandbox=${{ env.SANDBOX_IMAGE }}
+
+      - name: Update sandbox deployment annotations
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          SANDBOX_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-cloud-preview:${{ needs.build-push.outputs.main_commit_sha }}-amd64
+        with:
+          args: annotate deployment/teable-${{ env.INSTANCE_NAME }}-sandbox originImageName="${{ env.SANDBOX_IMAGE }}" --overwrite
+
+      - name: Update main deployment image (container + init container)
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          MAIN_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud-preview:${{ needs.build-push.outputs.main_commit_sha }}-amd64
+        with:
+          args: set image deployment/teable-${{ env.INSTANCE_NAME }} teable-${{ env.INSTANCE_NAME }}=${{ env.MAIN_IMAGE }} db-migrate=${{ env.MAIN_IMAGE }}
+
+      - name: Update main deployment annotations
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          MAIN_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud-preview:${{ needs.build-push.outputs.main_commit_sha }}-amd64
+        with:
+          args: annotate deployment/teable-${{ env.INSTANCE_NAME }} originImageName="${{ env.MAIN_IMAGE }}" --overwrite
+
+      - name: Manage Jaeger tracing
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
           ENABLE_TRACING: ${{ steps.labels.outputs.enable_tracing }}
         run: |
-          if [ "${ENABLE_TRACING}" = "true" ]; then
-            OTEL_EXPORTER_OTLP_ENDPOINT="http://teable-${{ env.INSTANCE_NAME }}-jaeger:4318/v1/traces"
-            TRACE_LINK_BASE_URL="https://jaeger-${{ env.INSTANCE_DOMAIN }}.sealoshzh.site"
-          else
-            OTEL_EXPORTER_OTLP_ENDPOINT=""
-            TRACE_LINK_BASE_URL=""
-          fi
-
-          cp .github/workflows/templates/preview-template.yaml deploy.yaml
-          sed -i "s#__NAMESPACE__#${{ env.NAMESPACE }}#g" deploy.yaml
-          sed -i "s#__INSTANCE_NAME__#${{ env.INSTANCE_NAME }}#g" deploy.yaml
-          sed -i "s#__INSTANCE_DOMAIN__#${{ env.INSTANCE_DOMAIN }}#g" deploy.yaml
-          sed -i "s#__MAIN_IMAGE_REPOSITORY__#${{ env.MAIN_IMAGE_REPOSITORY }}#g" deploy.yaml
-          sed -i "s#__SANDBOX_IMAGE_REPOSITORY__#${{ env.SANDBOX_IMAGE_REPOSITORY }}#g" deploy.yaml
-          sed -i "s#__IMAGE_TAG__#${{ env.IMAGE_TAG }}#g" deploy.yaml
-          sed -i "s#__DISPLAY_NAME__#${{ env.DISPLAY_NAME }}#g" deploy.yaml
-          sed -i "s#__OTEL_EXPORTER_OTLP_ENDPOINT__#${OTEL_EXPORTER_OTLP_ENDPOINT}#g" deploy.yaml
-          sed -i "s#__TRACE_LINK_BASE_URL__#${TRACE_LINK_BASE_URL}#g" deploy.yaml
+          mkdir -p ~/.kube
+          echo "${KUBE_CONFIG}" | base64 -d > ~/.kube/config
 
           if [ "${ENABLE_TRACING}" = "true" ]; then
-            sed -i '/^#__JAEGER_ENABLED_/d' deploy.yaml
+            OTEL_ENDPOINT="http://teable-${{ env.INSTANCE_NAME }}-jaeger:4318/v1/traces"
+            TRACE_URL="https://jaeger-${{ env.INSTANCE_DOMAIN }}.sealoshzh.site"
+
+            kubectl -n ns-${{ env.NAMESPACE }} set env deployment/teable-${{ env.INSTANCE_NAME }} \
+              OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_ENDPOINT}" \
+              TRACE_LINK_BASE_URL="${TRACE_URL}"
+
+            kubectl -n ns-${{ env.NAMESPACE }} apply -f - <<'JAEGER_EOF'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: teable-${{ env.INSTANCE_NAME }}-jaeger
+            namespace: ns-${{ env.NAMESPACE }}
+            annotations:
+              deploy.cloud.sealos.io/minReplicas: '1'
+              deploy.cloud.sealos.io/maxReplicas: '1'
+            labels:
+              cloud.sealos.io/app-deploy-manager: teable-${{ env.INSTANCE_NAME }}-jaeger
+              app: teable-${{ env.INSTANCE_NAME }}-jaeger
+              cloud.sealos.io/deploy-on-sealos: teable-${{ env.INSTANCE_NAME }}
+          spec:
+            replicas: 1
+            revisionHistoryLimit: 1
+            selector:
+              matchLabels:
+                app: teable-${{ env.INSTANCE_NAME }}-jaeger
+            template:
+              metadata:
+                labels:
+                  app: teable-${{ env.INSTANCE_NAME }}-jaeger
+              spec:
+                terminationGracePeriodSeconds: 10
+                automountServiceAccountToken: false
+                containers:
+                  - name: teable-${{ env.INSTANCE_NAME }}-jaeger
+                    image: jaegertracing/jaeger:2.16.0
+                    args:
+                      - '--set=receivers.otlp.protocols.http.endpoint=0.0.0.0:4318'
+                      - '--set=receivers.otlp.protocols.grpc.endpoint=0.0.0.0:4317'
+                    resources:
+                      requests:
+                        cpu: 200m
+                        memory: 256Mi
+                      limits:
+                        cpu: 1000m
+                        memory: 1024Mi
+                    ports:
+                      - name: ui
+                        containerPort: 16686
+                      - name: otlp-grpc
+                        containerPort: 4317
+                      - name: otlp-http
+                        containerPort: 4318
+                    imagePullPolicy: IfNotPresent
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: teable-${{ env.INSTANCE_NAME }}-jaeger
+            namespace: ns-${{ env.NAMESPACE }}
+            labels:
+              cloud.sealos.io/app-deploy-manager: teable-${{ env.INSTANCE_NAME }}-jaeger
+              cloud.sealos.io/deploy-on-sealos: teable-${{ env.INSTANCE_NAME }}
+          spec:
+            ports:
+              - name: ui
+                port: 16686
+                targetPort: 16686
+                protocol: TCP
+              - name: otlp-grpc
+                port: 4317
+                targetPort: 4317
+                protocol: TCP
+              - name: otlp-http
+                port: 4318
+                targetPort: 4318
+                protocol: TCP
+            selector:
+              app: teable-${{ env.INSTANCE_NAME }}-jaeger
+          ---
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: teable-${{ env.INSTANCE_NAME }}-jaeger
+            namespace: ns-${{ env.NAMESPACE }}
+            labels:
+              cloud.sealos.io/app-deploy-manager: teable-${{ env.INSTANCE_NAME }}-jaeger
+              cloud.sealos.io/app-deploy-manager-domain: jaeger-${{ env.INSTANCE_DOMAIN }}
+              cloud.sealos.io/deploy-on-sealos: teable-${{ env.INSTANCE_NAME }}
+            annotations:
+              nginx.ingress.kubernetes.io/proxy-body-size: 16m
+          spec:
+            ingressClassName: nginx
+            rules:
+              - host: jaeger-${{ env.INSTANCE_DOMAIN }}.sealoshzh.site
+                http:
+                  paths:
+                    - path: /
+                      pathType: Prefix
+                      backend:
+                        service:
+                          name: teable-${{ env.INSTANCE_NAME }}-jaeger
+                          port:
+                            number: 16686
+            tls:
+              - hosts:
+                  - jaeger-${{ env.INSTANCE_DOMAIN }}.sealoshzh.site
+                secretName: wildcard-apps-cert
+          JAEGER_EOF
           else
-            sed -i '/^#__JAEGER_ENABLED_START__$/, /^#__JAEGER_ENABLED_END__$/d' deploy.yaml
+            kubectl -n ns-${{ env.NAMESPACE }} set env deployment/teable-${{ env.INSTANCE_NAME }} \
+              OTEL_EXPORTER_OTLP_ENDPOINT="" \
+              TRACE_LINK_BASE_URL=""
+
+            kubectl -n ns-${{ env.NAMESPACE }} delete deployment,service,ingress \
+              teable-${{ env.INSTANCE_NAME }}-jaeger --ignore-not-found=true
           fi
 
-      - name: Apply deploy job
-        uses: actions-hub/kubectl@master
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        with:
-          args: apply -f deploy.yaml
-
-      - name: Remove Jaeger resources
-        if: steps.labels.outputs.enable_tracing != 'true'
-        uses: actions-hub/kubectl@master
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        with:
-          args: delete deployment,service,ingress teable-${{ env.INSTANCE_NAME }}-jaeger --ignore-not-found=true
+          rm -f ~/.kube/config
 
       - name: Rollout sandbox status
         uses: actions-hub/kubectl@master
