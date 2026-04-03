@@ -114,7 +114,17 @@ jobs:
       NAMESPACE: 38puz7wo
       INSTANCE_NAME: pr-ee-${{ github.event.client_payload.pr_number }}
       INSTANCE_DOMAIN: pr-ee-${{ github.event.client_payload.pr_number }}
+      DISPLAY_NAME: "teable-pr-ee-${{ github.event.client_payload.pr_number }}"
     steps:
+      - name: Check if deployment exists
+        id: check_deploy
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        continue-on-error: true
+        with:
+          args: get deployment/teable-${{ env.INSTANCE_NAME }} --no-headers
+
       - name: Check tracing label
         id: labels
         uses: actions/github-script@v7
@@ -132,7 +142,59 @@ jobs:
             console.log('PR labels:', labels.join(', '));
             console.log('Enable tracing:', enableTracing);
 
+      # --- Fallback: full create if deployment does not exist ---
+      - name: Checkout repository (fallback create)
+        if: steps.check_deploy.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ github.event.client_payload.ref }}
+
+      - name: Create deployment YAML (fallback create)
+        if: steps.check_deploy.outcome == 'failure'
+        env:
+          MAIN_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-ee-preview
+          SANDBOX_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-ee-preview
+          IMAGE_TAG: ${{ needs.build-push.outputs.main_commit_sha }}-amd64
+          ENABLE_TRACING: ${{ steps.labels.outputs.enable_tracing }}
+        run: |
+          if [ "${ENABLE_TRACING}" = "true" ]; then
+            OTEL_EXPORTER_OTLP_ENDPOINT="http://teable-${{ env.INSTANCE_NAME }}-jaeger:4318/v1/traces"
+            TRACE_LINK_BASE_URL="https://jaeger-${{ env.INSTANCE_DOMAIN }}.sealoshzh.site"
+          else
+            OTEL_EXPORTER_OTLP_ENDPOINT=""
+            TRACE_LINK_BASE_URL=""
+          fi
+
+          cp .github/workflows/templates/preview-template.yaml deploy.yaml
+          sed -i "s#__NAMESPACE__#${{ env.NAMESPACE }}#g" deploy.yaml
+          sed -i "s#__INSTANCE_NAME__#${{ env.INSTANCE_NAME }}#g" deploy.yaml
+          sed -i "s#__INSTANCE_DOMAIN__#${{ env.INSTANCE_DOMAIN }}#g" deploy.yaml
+          sed -i "s#__MAIN_IMAGE_REPOSITORY__#${{ env.MAIN_IMAGE_REPOSITORY }}#g" deploy.yaml
+          sed -i "s#__SANDBOX_IMAGE_REPOSITORY__#${{ env.SANDBOX_IMAGE_REPOSITORY }}#g" deploy.yaml
+          sed -i "s#__IMAGE_TAG__#${{ env.IMAGE_TAG }}#g" deploy.yaml
+          sed -i "s#__DISPLAY_NAME__#${{ env.DISPLAY_NAME }}#g" deploy.yaml
+          sed -i "s#__OTEL_EXPORTER_OTLP_ENDPOINT__#${OTEL_EXPORTER_OTLP_ENDPOINT}#g" deploy.yaml
+          sed -i "s#__TRACE_LINK_BASE_URL__#${TRACE_LINK_BASE_URL}#g" deploy.yaml
+
+          if [ "${ENABLE_TRACING}" = "true" ]; then
+            sed -i '/^#__JAEGER_ENABLED_/d' deploy.yaml
+          else
+            sed -i '/^#__JAEGER_ENABLED_START__$/, /^#__JAEGER_ENABLED_END__$/d' deploy.yaml
+          fi
+
+      - name: Apply deploy job (fallback create)
+        if: steps.check_deploy.outcome == 'failure'
+        uses: actions-hub/kubectl@master
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        with:
+          args: apply -f deploy.yaml
+
+      # --- Normal update path if deployment exists ---
       - name: Update sandbox deployment image
+        if: steps.check_deploy.outcome == 'success'
         uses: actions-hub/kubectl@master
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
@@ -141,6 +203,7 @@ jobs:
           args: set image deployment/teable-${{ env.INSTANCE_NAME }}-sandbox teable-${{ env.INSTANCE_NAME }}-sandbox=${{ env.SANDBOX_IMAGE }}
 
       - name: Update sandbox deployment annotations
+        if: steps.check_deploy.outcome == 'success'
         uses: actions-hub/kubectl@master
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
@@ -149,6 +212,7 @@ jobs:
           args: annotate deployment/teable-${{ env.INSTANCE_NAME }}-sandbox originImageName="${{ env.SANDBOX_IMAGE }}" --overwrite
 
       - name: Update main deployment image (container + init container)
+        if: steps.check_deploy.outcome == 'success'
         uses: actions-hub/kubectl@master
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
@@ -157,6 +221,7 @@ jobs:
           args: set image deployment/teable-${{ env.INSTANCE_NAME }} teable-${{ env.INSTANCE_NAME }}=${{ env.MAIN_IMAGE }} db-migrate=${{ env.MAIN_IMAGE }}
 
       - name: Update main deployment annotations
+        if: steps.check_deploy.outcome == 'success'
         uses: actions-hub/kubectl@master
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
