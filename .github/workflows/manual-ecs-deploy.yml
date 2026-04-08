@@ -117,33 +117,6 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-west-2
 
-      - name: Download sandbox task definition
-        run: |
-          aws ecs describe-task-definition \
-            --task-definition teable-sandbox \
-            --query taskDefinition > sandbox-task-definition-raw.json
-
-      - name: Clean sandbox task definition for registration
-        run: |
-          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy, .enableFaultInjection, .faultInjectionPolicy)' \
-            sandbox-task-definition-raw.json > sandbox-task-definition.json
-
-      - name: Render sandbox task definition with new image
-        id: render-sandbox-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: sandbox-task-definition.json
-          container-name: teable-sandbox
-          image: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-sandbox-cloud:${{ inputs.image_tag }}
-
-      - name: Deploy sandbox to ECS service
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-        with:
-          task-definition: ${{ steps.render-sandbox-task-def.outputs.task-definition }}
-          service: teable-sandbox
-          cluster: teable
-          wait-for-service-stability: true
-
       - name: Download current task definition
         run: |
           aws ecs describe-task-definition \
@@ -152,7 +125,6 @@ jobs:
 
       - name: Clean task definition for registration
         run: |
-          # Remove system-managed fields that cannot be used for new task definition registration
           jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy, .enableFaultInjection, .faultInjectionPolicy)' \
             task-definition-raw.json > task-definition.json
 
@@ -164,10 +136,79 @@ jobs:
           container-name: teable
           image: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-cloud:${{ inputs.image_tag }}
 
+      - name: Run database migration as one-off task
+        run: |
+          # Get network config from the service for RunTask
+          NETWORK_CONFIG=$(aws ecs describe-services \
+            --cluster teable \
+            --services teable-service-1 \
+            --query 'services[0].networkConfiguration' \
+            --output json)
+
+          # Register a temporary task definition with the new image for migration
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://${{ steps.render-task-def.outputs.task-definition }} \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "Running migration with task definition: $TASK_DEF_ARN"
+
+          # Run migration as a one-off task with command override
+          TASK_ARN=$(aws ecs run-task \
+            --cluster teable \
+            --task-definition "$TASK_DEF_ARN" \
+            --launch-type FARGATE \
+            --network-configuration "$NETWORK_CONFIG" \
+            --overrides '{
+              "containerOverrides": [{
+                "name": "teable",
+                "command": ["migrate-only"]
+              }]
+            }' \
+            --query 'tasks[0].taskArn' \
+            --output text)
+
+          echo "Migration task started: $TASK_ARN"
+
+          # Wait for migration task to complete
+          echo "Waiting for migration to complete..."
+          aws ecs wait tasks-stopped --cluster teable --tasks "$TASK_ARN"
+
+          # Check exit code
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster teable \
+            --tasks "$TASK_ARN" \
+            --query 'tasks[0].containers[?name==`teable`].exitCode | [0]' \
+            --output text)
+
+          echo "Migration exit code: $EXIT_CODE"
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "::error::Database migration failed with exit code $EXIT_CODE"
+            # Print migration task logs for debugging
+            TASK_ID=$(echo "$TASK_ARN" | awk -F'/' '{print $NF}')
+            aws logs get-log-events \
+              --log-group-name /ecs/teable \
+              --log-stream-name "ecs/teable/$TASK_ID" \
+              --limit 50 \
+              --query 'events[*].message' \
+              --output text 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Database migration completed successfully"
+
+      - name: Update task definition with skip-migrate command
+        run: |
+          # Add skip-migrate command to the main container and remove the db-migrate init container if present
+          jq '(.containerDefinitions[] | select(.name == "teable")).command = ["skip-migrate"]
+              | .containerDefinitions = [.containerDefinitions[] | select(.name != "db-migrate")]
+              | (.containerDefinitions[] | select(.name == "teable")) |= del(.dependsOn)' \
+            "${{ steps.render-task-def.outputs.task-definition }}" > task-definition-skip-migrate.json
+
       - name: Deploy to ECS service
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
         with:
-          task-definition: ${{ steps.render-task-def.outputs.task-definition }}
+          task-definition: task-definition-skip-migrate.json
           service: teable-service-1
           cluster: teable
           wait-for-service-stability: true
