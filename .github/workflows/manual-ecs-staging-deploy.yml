@@ -326,7 +326,7 @@ jobs:
 
           # Send to Feishu
           http_code=$(curl -s -w "%{http_code}" -o /tmp/feishu.json -X POST \
-            'https://open.feishu.cn/open-apis/bot/v2/hook/05768f4a-62f4-410e-9c8f-146838641500' \
+            'https://open.feishu.cn/open-apis/bot/v2/hook/66b6ebf2-9bbd-4e41-b629-4062a6be4a42' \
             -H 'Content-Type: application/json' \
             -d "$card_payload")
 
