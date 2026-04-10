@@ -14,6 +14,22 @@ on:
         description: 'Creation time of the release record that triggered this deploy (ISO 8601)'
         required: false
         default: ''
+      release_record_id:
+        description: 'Teable Release record ID for status update'
+        required: false
+        default: ''
+      release_author:
+        description: 'Release author'
+        required: false
+        default: ''
+      release_pr:
+        description: 'Pull request number'
+        required: false
+        default: ''
+      release_issues:
+        description: 'Related issue titles (newline separated)'
+        required: false
+        default: ''
   workflow_call:
     inputs:
       image_tag:
@@ -27,6 +43,26 @@ on:
         default: 'Automation'
       release_created_time:
         description: 'Creation time of the release record that triggered this deploy (ISO 8601)'
+        required: false
+        type: string
+        default: ''
+      release_record_id:
+        description: 'Teable Release record ID for status update'
+        required: false
+        type: string
+        default: ''
+      release_author:
+        description: 'Release author'
+        required: false
+        type: string
+        default: ''
+      release_pr:
+        description: 'Pull request number'
+        required: false
+        type: string
+        default: ''
+      release_issues:
+        description: 'Related issue titles (newline separated)'
         required: false
         type: string
         default: ''
@@ -221,70 +257,39 @@ jobs:
 
     steps:
       - name: Update Staging Status in Releases table
+        if: inputs.release_record_id != ''
         env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
+          RECORD_ID: ${{ inputs.release_record_id }}
           DEPLOY_RESULT: ${{ (needs.deploy-app.result == 'success' && needs.deploy-sandbox.result == 'success') && 'Deployed' || 'Failed' }}
         run: |
-          # Strip -amd64 suffix to get the Release Tag
-          RELEASE_TAG="${IMAGE_TAG%-amd64}"
-          echo "Looking up Release with Tag: $RELEASE_TAG"
-
-          # Filter for the exact release record by Tag field
-          filter=$(jq -n --arg tag "$RELEASE_TAG" '{"conjunction":"and","filterSet":[{"fieldId":"fldY6yzWtcA6IBcSRus","operator":"is","value":$tag}]}')
-          encoded_filter=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$filter'))")
-          http_code=$(curl -s -w "%{http_code}" -o /tmp/search.json \
-            "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record?fieldKeyType=id&filter=${encoded_filter}&take=1" \
-            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}')
-
-          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-            echo "::warning::Failed to search for release record (HTTP $http_code)"
-            cat /tmp/search.json
-          else
-            record_id=$(jq -r '.records[0].id // empty' /tmp/search.json)
-            if [ -n "$record_id" ]; then
-              echo "Found release record: $record_id, updating Staging Status to $DEPLOY_RESULT"
-              update_payload=$(jq -n \
-                --arg status "$DEPLOY_RESULT" \
-                '{
-                  "fieldKeyType": "id",
-                  "typecast": true,
-                  "record": {
-                    "fields": {
-                      "fldDTDMmcyJ7jmn6YsH": $status
-                    }
-                  }
-                }')
-              curl -s -o /dev/null -w "Update HTTP %{http_code}\n" -X PATCH \
-                "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/${record_id}" \
-                -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
-                -H 'Content-Type: application/json' \
-                -d "$update_payload"
-            else
-              echo "::warning::No release record found for tag: $RELEASE_TAG"
-            fi
-          fi
+          echo "Updating record $RECORD_ID Staging Status to $DEPLOY_RESULT"
+          update_payload=$(jq -n \
+            --arg status "$DEPLOY_RESULT" \
+            '{
+              "fieldKeyType": "id",
+              "typecast": true,
+              "record": {
+                "fields": {
+                  "fldDTDMmcyJ7jmn6YsH": $status
+                }
+              }
+            }')
+          curl -s -o /dev/null -w "Update HTTP %{http_code}\n" -X PATCH \
+            "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/${RECORD_ID}" \
+            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
+            -H 'Content-Type: application/json' \
+            -d "$update_payload"
 
       - name: Send Feishu staging deploy notification
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
-          TRIGGER: ${{ inputs.trigger || github.actor }}
+          AUTHOR: ${{ inputs.release_author || 'unknown' }}
+          PR: ${{ inputs.release_pr || '无' }}
+          ISSUES: ${{ inputs.release_issues || '无关联 Issue' }}
           DEPLOY_SUCCESS: ${{ (needs.deploy-app.result == 'success' && needs.deploy-sandbox.result == 'success') && 'true' || 'false' }}
         run: |
           RELEASE_TAG="${IMAGE_TAG%-amd64}"
 
-          # Fetch release record with exact Tag filter
-          filter=$(jq -n --arg tag "$RELEASE_TAG" '{"conjunction":"and","filterSet":[{"fieldId":"fldY6yzWtcA6IBcSRus","operator":"is","value":$tag}]}')
-          encoded_filter=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$filter'))")
-          curl -s -o /tmp/release.json \
-            "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record?fieldKeyType=id&filter=${encoded_filter}&take=1" \
-            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}'
-
-          # Extract fields from release record
-          AUTHOR=$(jq -r '.records[0].fields.fldJ4qG0qPsJyQH2emY // "未知"' /tmp/release.json 2>/dev/null || echo "未知")
-          ISSUE_TITLES=$(jq -r '[.records[0].fields.fldtLzqnpEVjdmcRLNg // [] | .[]?] | if length == 0 then "无关联 Issue" else to_entries | map("• \(.value)") | join("\n") end' /tmp/release.json 2>/dev/null || echo "无关联 Issue")
-          PR=$(jq -r '.records[0].fields.fldCBYic8BUuwyeHFo5 // "无"' /tmp/release.json 2>/dev/null || echo "无")
-
-          # Determine card color and title
           if [ "$DEPLOY_SUCCESS" = "true" ]; then
             HEADER_COLOR="yellow"
             TITLE="🚀 Staging 部署成功 ${RELEASE_TAG}"
@@ -293,14 +298,19 @@ jobs:
             TITLE="❌ Staging 部署失败 ${RELEASE_TAG}"
           fi
 
-          # Build Feishu card
+          # Format issues as bullet list
+          ISSUE_LIST=$(echo "$ISSUES" | sed 's/^/• /' | sed '/^• $/d')
+          if [ -z "$ISSUE_LIST" ]; then
+            ISSUE_LIST="无关联 Issue"
+          fi
+
           card_payload=$(jq -n \
             --arg title "$TITLE" \
             --arg color "$HEADER_COLOR" \
             --arg tag "$RELEASE_TAG" \
             --arg author "$AUTHOR" \
             --arg pr "$PR" \
-            --arg issues "$ISSUE_TITLES" \
+            --arg issues "$ISSUE_LIST" \
             '{
               "msg_type": "interactive",
               "card": {
@@ -326,7 +336,6 @@ jobs:
               }
             }')
 
-          # Send to Feishu
           http_code=$(curl -s -w "%{http_code}" -o /tmp/feishu.json -X POST \
             'https://open.feishu.cn/open-apis/bot/v2/hook/66b6ebf2-9bbd-4e41-b629-4062a6be4a42' \
             -H 'Content-Type: application/json' \
