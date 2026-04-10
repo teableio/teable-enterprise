@@ -271,31 +271,32 @@ jobs:
         run: |
           RELEASE_TAG="${IMAGE_TAG%-amd64}"
 
-          # Determine card color and title
-          if [ "$DEPLOY_SUCCESS" = "true" ]; then
-            HEADER_COLOR="green"
-            TITLE="✅ Staging 部署成功 ${RELEASE_TAG}"
-          else
-            HEADER_COLOR="red"
-            TITLE="❌ Staging 部署失败 ${RELEASE_TAG}"
-          fi
-
-          # Fetch release record with issue titles
+          # Fetch release record with issue titles and author
           encoded_tag=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$RELEASE_TAG'))")
           curl -s -o /tmp/release.json \
             "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record?fieldKeyType=id&search%5B0%5D=${encoded_tag}&search%5B1%5D=fldY6yzWtcA6IBcSRus&take=1" \
             -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}'
 
-          # Extract issue titles and PR from release record
+          # Extract fields from release record
+          AUTHOR=$(jq -r '.records[0].fields.fldJ4qG0qPsJyQH2emY // "未知"' /tmp/release.json 2>/dev/null || echo "未知")
           ISSUE_TITLES=$(jq -r '[.records[0].fields.fldtLzqnpEVjdmcRLNg // [] | .[]?] | if length == 0 then "无关联 Issue" else to_entries | map("• \(.value)") | join("\n") end' /tmp/release.json 2>/dev/null || echo "无关联 Issue")
           PR=$(jq -r '.records[0].fields.fldCBYic8BUuwyeHFo5 // "无"' /tmp/release.json 2>/dev/null || echo "无")
+
+          # Determine card color and title
+          if [ "$DEPLOY_SUCCESS" = "true" ]; then
+            HEADER_COLOR="yellow"
+            TITLE="🚀 Staging 部署成功 ${RELEASE_TAG}"
+          else
+            HEADER_COLOR="red"
+            TITLE="❌ Staging 部署失败 ${RELEASE_TAG}"
+          fi
 
           # Build Feishu card
           card_payload=$(jq -n \
             --arg title "$TITLE" \
             --arg color "$HEADER_COLOR" \
             --arg tag "$RELEASE_TAG" \
-            --arg trigger "$TRIGGER" \
+            --arg author "$AUTHOR" \
             --arg pr "$PR" \
             --arg issues "$ISSUE_TITLES" \
             '{
@@ -310,7 +311,7 @@ jobs:
                     "tag": "div",
                     "fields": [
                       { "is_short": true, "text": { "tag": "lark_md", "content": ("**Tag**\n" + $tag) } },
-                      { "is_short": true, "text": { "tag": "lark_md", "content": ("**触发人**\n" + $trigger) } },
+                      { "is_short": true, "text": { "tag": "lark_md", "content": ("**Author**\n" + $author) } },
                       { "is_short": true, "text": { "tag": "lark_md", "content": ("**PR**\n" + $pr) } }
                     ]
                   },
