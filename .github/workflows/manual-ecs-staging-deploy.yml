@@ -229,10 +229,11 @@ jobs:
           RELEASE_TAG="${IMAGE_TAG%-amd64}"
           echo "Looking up Release with Tag: $RELEASE_TAG"
 
-          # Search for the release record by Tag field
-          encoded_tag=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$RELEASE_TAG'))")
+          # Filter for the exact release record by Tag field
+          filter=$(jq -n --arg tag "$RELEASE_TAG" '{"conjunction":"and","filterSet":[{"fieldId":"fldY6yzWtcA6IBcSRus","operator":"is","value":$tag}]}')
+          encoded_filter=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$filter'))")
           http_code=$(curl -s -w "%{http_code}" -o /tmp/search.json \
-            "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record?fieldKeyType=id&search%5B0%5D=${encoded_tag}&search%5B1%5D=fldY6yzWtcA6IBcSRus&take=1" \
+            "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record?fieldKeyType=id&filter=${encoded_filter}&take=1" \
             -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}')
 
           if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
@@ -271,10 +272,11 @@ jobs:
         run: |
           RELEASE_TAG="${IMAGE_TAG%-amd64}"
 
-          # Fetch release record with issue titles and author
-          encoded_tag=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$RELEASE_TAG'))")
+          # Fetch release record with exact Tag filter
+          filter=$(jq -n --arg tag "$RELEASE_TAG" '{"conjunction":"and","filterSet":[{"fieldId":"fldY6yzWtcA6IBcSRus","operator":"is","value":$tag}]}')
+          encoded_filter=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$filter'))")
           curl -s -o /tmp/release.json \
-            "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record?fieldKeyType=id&search%5B0%5D=${encoded_tag}&search%5B1%5D=fldY6yzWtcA6IBcSRus&take=1" \
+            "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record?fieldKeyType=id&filter=${encoded_filter}&take=1" \
             -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}'
 
           # Extract fields from release record
