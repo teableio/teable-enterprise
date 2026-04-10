@@ -102,7 +102,7 @@ jobs:
           wait-for-service-stability: true
 
   deploy-app:
-    name: Deploy Main to Staging ECS (Skip Migration)
+    name: Deploy Main to Staging ECS
     needs: prepare
     runs-on: ubuntu-latest
 
@@ -135,6 +135,67 @@ jobs:
           task-definition: task-definition.json
           container-name: teable
           image: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-cloud:${{ inputs.image_tag }}
+
+      - name: Run database migration as one-off task
+        run: |
+          # Get network config from the service for RunTask
+          NETWORK_CONFIG=$(aws ecs describe-services \
+            --cluster teable-staging \
+            --services teable-staging-service \
+            --query 'services[0].networkConfiguration' \
+            --output json)
+
+          # Register a temporary task definition with the new image for migration
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://${{ steps.render-task-def.outputs.task-definition }} \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "Running migration with task definition: $TASK_DEF_ARN"
+
+          # Run migration as a one-off task with command override
+          TASK_ARN=$(aws ecs run-task \
+            --cluster teable-staging \
+            --task-definition "$TASK_DEF_ARN" \
+            --launch-type FARGATE \
+            --network-configuration "$NETWORK_CONFIG" \
+            --overrides '{
+              "containerOverrides": [{
+                "name": "teable",
+                "command": ["migrate-only"]
+              }]
+            }' \
+            --query 'tasks[0].taskArn' \
+            --output text)
+
+          echo "Migration task started: $TASK_ARN"
+
+          # Wait for migration task to complete
+          echo "Waiting for migration to complete..."
+          aws ecs wait tasks-stopped --cluster teable-staging --tasks "$TASK_ARN"
+
+          # Check exit code
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster teable-staging \
+            --tasks "$TASK_ARN" \
+            --query 'tasks[0].containers[?name==`teable`].exitCode | [0]' \
+            --output text)
+
+          echo "Migration exit code: $EXIT_CODE"
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "::error::Database migration failed with exit code $EXIT_CODE"
+            # Print migration task logs for debugging
+            TASK_ID=$(echo "$TASK_ARN" | awk -F'/' '{print $NF}')
+            aws logs get-log-events \
+              --log-group-name /ecs/teable \
+              --log-stream-name "ecs/teable/$TASK_ID" \
+              --limit 50 \
+              --query 'events[*].message' \
+              --output text 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Database migration completed successfully"
 
       - name: Update task definition with skip-migrate command
         run: |
