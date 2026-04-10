@@ -155,10 +155,57 @@ jobs:
   notify:
     name: Record Deployment in Teable
     needs: [prepare, deploy-sandbox, deploy-app]
+    if: always()
     runs-on: ubuntu-latest
 
     steps:
-      - name: Record deployment in Teable
+      - name: Update Staging Status in Releases table
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          DEPLOY_RESULT: ${{ (needs.deploy-app.result == 'success' && needs.deploy-sandbox.result == 'success') && 'Deployed' || 'Failed' }}
+        run: |
+          # Strip -amd64 suffix to get the Release Tag
+          RELEASE_TAG="${IMAGE_TAG%-amd64}"
+          echo "Looking up Release with Tag: $RELEASE_TAG"
+
+          # Search for the release record by Tag field
+          encoded_tag=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$RELEASE_TAG'))")
+          http_code=$(curl -s -w "%{http_code}" -o /tmp/search.json \
+            "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record?fieldKeyType=id&search%5B0%5D=${encoded_tag}&search%5B1%5D=fldY6yzWtcA6IBcSRus&take=1" \
+            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}')
+
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "::warning::Failed to search for release record (HTTP $http_code)"
+            cat /tmp/search.json
+          else
+            record_id=$(jq -r '.records[0].id // empty' /tmp/search.json)
+            if [ -n "$record_id" ]; then
+              echo "Found release record: $record_id, updating Staging Status to $DEPLOY_RESULT"
+              update_payload=$(jq -n \
+                --arg rid "$record_id" \
+                --arg status "$DEPLOY_RESULT" \
+                '{
+                  "fieldKeyType": "id",
+                  "typecast": true,
+                  "record": {
+                    "id": $rid,
+                    "fields": {
+                      "fldDTDMmcyJ7jmn6YsH": $status
+                    }
+                  }
+                }')
+              curl -s -o /dev/null -w "Update HTTP %{http_code}\n" -X PATCH \
+                'https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record' \
+                -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
+                -H 'Content-Type: application/json' \
+                -d "$update_payload"
+            else
+              echo "::warning::No release record found for tag: $RELEASE_TAG"
+            fi
+          fi
+
+      - name: Record deployment in Launches table
+        if: needs.deploy-app.result == 'success' && needs.deploy-sandbox.result == 'success'
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
           TRIGGER: ${{ inputs.trigger || github.actor }}
