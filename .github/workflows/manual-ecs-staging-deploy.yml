@@ -1,0 +1,208 @@
+name: Manual ECS Staging Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Docker image tag (e.g., 0.3.0-alpha-1.9.0-build.302-amd64)'
+        required: true
+      trigger:
+        description: 'Who triggered this deployment'
+        required: false
+        default: 'Manual'
+      release_created_time:
+        description: 'Creation time of the release record that triggered this deploy (ISO 8601)'
+        required: false
+        default: ''
+  workflow_call:
+    inputs:
+      image_tag:
+        description: 'Docker image tag'
+        required: true
+        type: string
+      trigger:
+        description: 'Who triggered this deployment'
+        required: false
+        type: string
+        default: 'Automation'
+      release_created_time:
+        description: 'Creation time of the release record that triggered this deploy (ISO 8601)'
+        required: false
+        type: string
+        default: ''
+    outputs:
+      start_time:
+        description: 'Deployment start timestamp'
+        value: ${{ jobs.prepare.outputs.start_time }}
+      image_tag:
+        description: 'Deployed image tag'
+        value: ${{ jobs.prepare.outputs.image_tag }}
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      TEABLE_API_TOKEN:
+        required: false
+
+jobs:
+  prepare:
+    name: Prepare Deployment
+    runs-on: ubuntu-latest
+    outputs:
+      start_time: ${{ steps.start_time.outputs.start }}
+      image_tag: ${{ inputs.image_tag }}
+
+    steps:
+      - name: Record start time
+        id: start_time
+        run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
+
+  deploy-sandbox:
+    name: Deploy Sandbox to Staging ECS
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Download sandbox task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition teable-sandbox-staging \
+            --query taskDefinition > sandbox-task-definition-raw.json
+
+      - name: Clean sandbox task definition for registration
+        run: |
+          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy, .enableFaultInjection, .faultInjectionPolicy)' \
+            sandbox-task-definition-raw.json > sandbox-task-definition.json
+
+      - name: Render sandbox task definition with new image
+        id: render-sandbox-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: sandbox-task-definition.json
+          container-name: sandbox
+          image: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-sandbox-cloud:${{ inputs.image_tag }}
+
+      - name: Deploy sandbox to ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.render-sandbox-task-def.outputs.task-definition }}
+          service: teable-sandbox-service
+          cluster: teable-staging
+          wait-for-service-stability: true
+
+  deploy-app:
+    name: Deploy Main to Staging ECS (Skip Migration)
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition teable-staging \
+            --query taskDefinition > task-definition-raw.json
+
+      - name: Clean task definition for registration
+        run: |
+          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy, .enableFaultInjection, .faultInjectionPolicy)' \
+            task-definition-raw.json > task-definition.json
+
+      - name: Render task definition with new image
+        id: render-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: teable
+          image: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-cloud:${{ inputs.image_tag }}
+
+      - name: Update task definition with skip-migrate command
+        run: |
+          # Add skip-migrate command to the main container and remove the db-migrate init container if present
+          jq '(.containerDefinitions[] | select(.name == "teable")).command = ["skip-migrate"]
+              | .containerDefinitions = [.containerDefinitions[] | select(.name != "db-migrate")]
+              | (.containerDefinitions[] | select(.name == "teable")) |= del(.dependsOn)' \
+            "${{ steps.render-task-def.outputs.task-definition }}" > task-definition-skip-migrate.json
+
+      - name: Deploy to ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: task-definition-skip-migrate.json
+          service: teable-staging-service
+          cluster: teable-staging
+          wait-for-service-stability: true
+
+  notify:
+    name: Record Deployment in Teable
+    needs: [prepare, deploy-sandbox, deploy-app]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Record deployment in Teable
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          TRIGGER: ${{ inputs.trigger || github.actor }}
+          RELEASE_CREATED_TIME: ${{ inputs.release_created_time }}
+        run: |
+          current_time=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+
+          # Build JSON payload using jq to properly escape special characters
+          payload=$(jq -n \
+            --arg date "$current_time" \
+            --arg region "staging.teable.ai" \
+            --arg trigger "$TRIGGER" \
+            --arg snapshot "$RELEASE_CREATED_TIME" \
+            '{
+              "fieldKeyType": "dbFieldName",
+              "typecast": true,
+              "records": [
+                {
+                  "fields": {
+                    "date": $date,
+                    "region": $region,
+                    "trigger": $trigger,
+                    "Deploy_snapshot_time": (if $snapshot != "" then $snapshot else null end)
+                  }
+                }
+              ]
+            }')
+
+          # Make the API call and capture both response and HTTP status code
+          http_code=$(curl -s -w "%{http_code}" -o /tmp/response.json -X POST 'https://app.teable.ai/api/table/tblmGAFOHrGcy66PaUp/record' \
+            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
+            -H 'Content-Type: application/json' \
+            -d "$payload")
+
+          response=$(cat /tmp/response.json)
+          echo "Response: $response"
+          echo "HTTP Status Code: $http_code"
+
+          # Check if request was successful
+          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+            record_id=$(echo "$response" | jq -r '.records[0].id')
+            echo "Created deployment record with ID: ${record_id}"
+          else
+            echo "Error: API request failed with status code $http_code"
+            echo "Response: $response"
+            exit 1
+          fi
