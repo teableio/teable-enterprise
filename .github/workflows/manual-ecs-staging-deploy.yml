@@ -204,52 +204,74 @@ jobs:
             fi
           fi
 
-      - name: Record deployment in Launches table
-        if: needs.deploy-app.result == 'success' && needs.deploy-sandbox.result == 'success'
+      - name: Send Feishu staging deploy notification
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
           TRIGGER: ${{ inputs.trigger || github.actor }}
-          RELEASE_CREATED_TIME: ${{ inputs.release_created_time }}
+          DEPLOY_SUCCESS: ${{ (needs.deploy-app.result == 'success' && needs.deploy-sandbox.result == 'success') && 'true' || 'false' }}
         run: |
-          current_time=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+          RELEASE_TAG="${IMAGE_TAG%-amd64}"
 
-          # Build JSON payload using jq to properly escape special characters
-          payload=$(jq -n \
-            --arg date "$current_time" \
-            --arg region "staging.teable.ai" \
+          # Determine card color and title
+          if [ "$DEPLOY_SUCCESS" = "true" ]; then
+            HEADER_COLOR="green"
+            TITLE="✅ Staging 部署成功 ${RELEASE_TAG}"
+          else
+            HEADER_COLOR="red"
+            TITLE="❌ Staging 部署失败 ${RELEASE_TAG}"
+          fi
+
+          # Fetch release record with issue titles
+          encoded_tag=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$RELEASE_TAG'))")
+          curl -s -o /tmp/release.json \
+            "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record?fieldKeyType=id&search%5B0%5D=${encoded_tag}&search%5B1%5D=fldY6yzWtcA6IBcSRus&take=1" \
+            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}'
+
+          # Extract issue titles and PR from release record
+          ISSUE_TITLES=$(jq -r '[.records[0].fields.fldtLzqnpEVjdmcRLNg // [] | .[]?] | if length == 0 then "无关联 Issue" else to_entries | map("• \(.value)") | join("\n") end' /tmp/release.json 2>/dev/null || echo "无关联 Issue")
+          PR=$(jq -r '.records[0].fields.fldCBYic8BUuwyeHFo5 // "无"' /tmp/release.json 2>/dev/null || echo "无")
+
+          # Build Feishu card
+          card_payload=$(jq -n \
+            --arg title "$TITLE" \
+            --arg color "$HEADER_COLOR" \
+            --arg tag "$RELEASE_TAG" \
             --arg trigger "$TRIGGER" \
-            --arg snapshot "$RELEASE_CREATED_TIME" \
+            --arg pr "$PR" \
+            --arg issues "$ISSUE_TITLES" \
             '{
-              "fieldKeyType": "dbFieldName",
-              "typecast": true,
-              "records": [
-                {
-                  "fields": {
-                    "date": $date,
-                    "region": $region,
-                    "trigger": $trigger,
-                    "Deploy_snapshot_time": (if $snapshot != "" then $snapshot else null end)
+              "msg_type": "interactive",
+              "card": {
+                "header": {
+                  "title": { "tag": "plain_text", "content": $title },
+                  "template": $color
+                },
+                "elements": [
+                  {
+                    "tag": "div",
+                    "fields": [
+                      { "is_short": true, "text": { "tag": "lark_md", "content": ("**Tag**\n" + $tag) } },
+                      { "is_short": true, "text": { "tag": "lark_md", "content": ("**触发人**\n" + $trigger) } },
+                      { "is_short": true, "text": { "tag": "lark_md", "content": ("**PR**\n" + $pr) } }
+                    ]
+                  },
+                  { "tag": "hr" },
+                  {
+                    "tag": "div",
+                    "text": { "tag": "lark_md", "content": ("**📋 关联 Issue：**\n" + $issues) }
                   }
-                }
-              ]
+                ]
+              }
             }')
 
-          # Make the API call and capture both response and HTTP status code
-          http_code=$(curl -s -w "%{http_code}" -o /tmp/response.json -X POST 'https://app.teable.ai/api/table/tblmGAFOHrGcy66PaUp/record' \
-            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
+          # Send to Feishu
+          http_code=$(curl -s -w "%{http_code}" -o /tmp/feishu.json -X POST \
+            'https://open.feishu.cn/open-apis/bot/v2/hook/05768f4a-62f4-410e-9c8f-146838641500' \
             -H 'Content-Type: application/json' \
-            -d "$payload")
+            -d "$card_payload")
 
-          response=$(cat /tmp/response.json)
-          echo "Response: $response"
-          echo "HTTP Status Code: $http_code"
-
-          # Check if request was successful
-          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
-            record_id=$(echo "$response" | jq -r '.records[0].id')
-            echo "Created deployment record with ID: ${record_id}"
-          else
-            echo "Error: API request failed with status code $http_code"
-            echo "Response: $response"
-            exit 1
+          echo "Feishu notification HTTP: $http_code"
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "::warning::Feishu notification failed"
+            cat /tmp/feishu.json
           fi
