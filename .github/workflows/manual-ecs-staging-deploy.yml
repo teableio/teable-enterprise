@@ -182,20 +182,18 @@ jobs:
             if [ -n "$record_id" ]; then
               echo "Found release record: $record_id, updating Staging Status to $DEPLOY_RESULT"
               update_payload=$(jq -n \
-                --arg rid "$record_id" \
                 --arg status "$DEPLOY_RESULT" \
                 '{
                   "fieldKeyType": "id",
                   "typecast": true,
                   "record": {
-                    "id": $rid,
                     "fields": {
                       "fldDTDMmcyJ7jmn6YsH": $status
                     }
                   }
                 }')
               curl -s -o /dev/null -w "Update HTTP %{http_code}\n" -X PATCH \
-                'https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record' \
+                "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/${record_id}" \
                 -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
                 -H 'Content-Type: application/json' \
                 -d "$update_payload"
