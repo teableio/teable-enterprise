@@ -108,6 +108,7 @@ jobs:
             fi
             for image in "${IMAGES[@]}"; do
               for tag in "${TAGS[@]}"; do
+                [ -n "$tag" ] || continue
                 retry_copy \
                   "${SRC_REGISTRY}/${image}:${tag}" \
                   "${DST_REGISTRY}/${image}:${tag}" \
@@ -128,6 +129,7 @@ jobs:
             for image in "${IMAGES[@]}"; do
               for suffix in "${SUFFIXES[@]}"; do
                 for tag in "${TAGS[@]}"; do
+                  [ -n "$tag" ] || continue
                   retry_copy \
                     "${SRC_REGISTRY}/${image}${suffix}:${tag}" \
                     "${DST_REGISTRY}/${image}${suffix}:${tag}" \
