@@ -14,6 +14,14 @@ on:
         description: 'Creation time of the release record that triggered this deploy (ISO 8601)'
         required: false
         default: ''
+      release_record_id:
+        description: 'Cloud release record ID in Teable Releases table'
+        required: false
+        default: ''
+      related_release_record_ids:
+        description: 'Comma-separated Teable release record IDs to link on the launch record'
+        required: false
+        default: ''
   workflow_call:
     inputs:
       image_tag:
@@ -27,6 +35,16 @@ on:
         default: 'Automation'
       release_created_time:
         description: 'Creation time of the release record that triggered this deploy (ISO 8601)'
+        required: false
+        type: string
+        default: ''
+      release_record_id:
+        description: 'Cloud release record ID in Teable Releases table'
+        required: false
+        type: string
+        default: ''
+      related_release_record_ids:
+        description: 'Comma-separated Teable release record IDs to link on the launch record'
         required: false
         type: string
         default: ''
@@ -166,8 +184,11 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
           TRIGGER: ${{ inputs.trigger || github.actor }}
           RELEASE_CREATED_TIME: ${{ inputs.release_created_time }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          RELATED_RELEASE_RECORD_IDS: ${{ inputs.related_release_record_ids }}
         run: |
           current_time=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+          related_release_ids_json=$(printf '%s' "$RELATED_RELEASE_RECORD_IDS" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
 
           # Build JSON payload using jq to properly escape special characters
           payload=$(jq -n \
@@ -175,6 +196,7 @@ jobs:
             --arg region "teable.cn" \
             --arg trigger "$TRIGGER" \
             --arg snapshot "$RELEASE_CREATED_TIME" \
+            --argjson relatedReleaseIds "$related_release_ids_json" \
             '{
               "fieldKeyType": "dbFieldName",
               "typecast": true,
@@ -184,7 +206,8 @@ jobs:
                     "date": $date,
                     "region": $region,
                     "trigger": $trigger,
-                    "Deploy_snapshot_time": (if $snapshot != "" then $snapshot else null end)
+                    "Deploy_snapshot_time": (if $snapshot != "" then $snapshot else null end),
+                    "Related_Releases": (if ($relatedReleaseIds | length) > 0 then $relatedReleaseIds else null end)
                   }
                 }
               ]
@@ -204,6 +227,27 @@ jobs:
           if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
             record_id=$(echo "$response" | jq -r '.records[0].id')
             echo "Created deployment record with ID: ${record_id}"
+
+            if [ -n "$RELEASE_RECORD_ID" ]; then
+              update_payload=$(jq -n \
+                '{
+                  "fieldKeyType": "dbFieldName",
+                  "typecast": true,
+                  "record": {
+                    "fields": {
+                      "status": "Launched"
+                    }
+                  }
+                }')
+
+              update_http_code=$(curl -s -w "%{http_code}" -o /tmp/release-update.json -X PATCH \
+                "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/${RELEASE_RECORD_ID}" \
+                -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
+                -H 'Content-Type: application/json' \
+                -d "$update_payload")
+
+              echo "Updated release record ${RELEASE_RECORD_ID} to Launched: HTTP ${update_http_code}"
+            fi
           else
             echo "Error: API request failed with status code $http_code"
             echo "Response: $response"

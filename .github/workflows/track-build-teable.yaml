@@ -76,7 +76,7 @@ jobs:
           else
             release_timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
             release_timestamp_tag=$(printf '%s' "$release_timestamp" | tr ':' '-')
-            release_sequence="${{ github.run_attempt || github.run_number }}"
+            release_sequence="${{ github.run_number || 1 }}"
             version_tag="release.${release_timestamp_tag}.${release_sequence}"
           fi
 

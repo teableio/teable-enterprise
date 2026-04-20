@@ -106,7 +106,7 @@ jobs:
               RELEASE_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
             fi
 
-            RELEASE_SEQUENCE="${INPUT_RELEASE_SEQUENCE:-${GITHUB_RUN_ATTEMPT:-${GITHUB_RUN_NUMBER:-1}}}"
+            RELEASE_SEQUENCE="${INPUT_RELEASE_SEQUENCE:-${GITHUB_RUN_NUMBER:-1}}"
             RELEASE_TIMESTAMP_NO_MS=$(printf '%s' "$RELEASE_TIMESTAMP" | sed -E 's/\.[0-9]{3}Z$/Z/')
             RELEASE_TIMESTAMP_TAG=$(printf '%s' "$RELEASE_TIMESTAMP_NO_MS" | tr ':' '-')
             RELEASE_ID="release.${RELEASE_TIMESTAMP_TAG}.${RELEASE_SEQUENCE}"
