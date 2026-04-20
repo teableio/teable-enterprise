@@ -10,6 +10,15 @@ on:
         options:
           - cloud
           - ee
+      build_scope:
+        description: 'Build scope to sync (sandbox, app, or all)'
+        required: false
+        default: all
+        type: choice
+        options:
+          - sandbox
+          - app
+          - all
       tags:
         description: 'Comma-separated tags to sync (e.g., latest,abc123,1.0.0)'
         required: true
@@ -19,6 +28,10 @@ on:
       edition:
         required: true
         type: string
+      build_scope:
+        required: false
+        type: string
+        default: all
       tags:
         required: true
         type: string
@@ -71,31 +84,50 @@ jobs:
 
           IFS=',' read -ra TAGS <<< "${{ inputs.tags }}"
           FAILED=0
+          BUILD_SCOPE="${{ inputs.build_scope }}"
+
+          if [ -z "$BUILD_SCOPE" ]; then
+            BUILD_SCOPE="all"
+          fi
+
+          case "$BUILD_SCOPE" in
+            app|sandbox|all) ;;
+            *)
+              echo "::error::Unsupported build_scope: $BUILD_SCOPE"
+              exit 1
+              ;;
+          esac
 
           if [ "${{ inputs.edition }}" = "cloud" ]; then
-            IMAGES=("teable-cloud" "teable-sandbox-cloud")
+            if [ "$BUILD_SCOPE" = "app" ]; then
+              IMAGES=("teable-cloud")
+            elif [ "$BUILD_SCOPE" = "sandbox" ]; then
+              IMAGES=("teable-sandbox-cloud")
+            else
+              IMAGES=("teable-cloud" "teable-sandbox-cloud")
+            fi
             for image in "${IMAGES[@]}"; do
               for tag in "${TAGS[@]}"; do
-                retry_copy "${SRC_REGISTRY}/${image}:${tag}-amd64" "${DST_REGISTRY}/${image}:${tag}-amd64" || FAILED=1
+                retry_copy \
+                  "${SRC_REGISTRY}/${image}:${tag}" \
+                  "${DST_REGISTRY}/${image}:${tag}" \
+                  "--all" \
+                  || FAILED=1
               done
             done
-
           elif [ "${{ inputs.edition }}" = "ee" ]; then
-            IMAGES=("teable" "teable-sandbox")
+            if [ "$BUILD_SCOPE" = "app" ]; then
+              IMAGES=("teable")
+            elif [ "$BUILD_SCOPE" = "sandbox" ]; then
+              IMAGES=("teable-sandbox")
+            else
+              IMAGES=("teable" "teable-sandbox")
+            fi
             SUFFIXES=("" "-ee")
-            ARCHES=("amd64" "arm64")
 
             for image in "${IMAGES[@]}"; do
               for suffix in "${SUFFIXES[@]}"; do
                 for tag in "${TAGS[@]}"; do
-                  # Sync arch-specific tags
-                  for arch in "${ARCHES[@]}"; do
-                    retry_copy \
-                      "${SRC_REGISTRY}/${image}${suffix}:${tag}-${arch}" \
-                      "${DST_REGISTRY}/${image}${suffix}:${tag}-${arch}" \
-                      || FAILED=1
-                  done
-                  # Sync manifest list with --all
                   retry_copy \
                     "${SRC_REGISTRY}/${image}${suffix}:${tag}" \
                     "${DST_REGISTRY}/${image}${suffix}:${tag}" \

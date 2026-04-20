@@ -24,6 +24,10 @@ on:
         description: 'Start timestamp in seconds for duration calculation'
         required: false
         type: string
+      release_id:
+        description: 'Optional precomputed release id'
+        required: false
+        type: string
     outputs:
       record_id:
         description: 'The Teable record ID'
@@ -67,12 +71,15 @@ jobs:
       - name: Generate version tag
         id: generate_version
         run: |
-          # Read versions from package.json files
-          ee_version=$(node -p "require('./enterprise/app-ee/package.json').version")
-          ce_version=$(node -p "require('./community/apps/nextjs-app/package.json').version")
-          
-          # Generate version tag without architecture suffix (for multi-arch manifest)
-          version_tag="${ee_version}-alpha-${ce_version}-build.${{ github.run_number }}"
+          if [ -n "${{ inputs.release_id }}" ]; then
+            version_tag="${{ inputs.release_id }}"
+          else
+            release_timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            release_timestamp_tag=$(printf '%s' "$release_timestamp" | tr ':' '-')
+            release_sequence="${{ github.run_attempt || github.run_number }}"
+            version_tag="release.${release_timestamp_tag}.${release_sequence}"
+          fi
+
           echo "version_tag=${version_tag}" >> $GITHUB_OUTPUT
           echo "Generated version tag: ${version_tag}"
 

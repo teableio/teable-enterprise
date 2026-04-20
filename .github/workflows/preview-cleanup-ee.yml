@@ -26,7 +26,7 @@ jobs:
           DISPLAY_NAME: "teable-pr-ee-${{ github.event.client_payload.pr_number }}"
           MAIN_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-ee
           SANDBOX_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-ee
-          IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}-amd64
+          IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}
         run: |
           OTEL_EXPORTER_OTLP_ENDPOINT="http://teable-${{ env.INSTANCE_NAME }}-jaeger:4318/v1/traces"
           TRACE_LINK_BASE_URL="https://jaeger-${{ env.INSTANCE_DOMAIN }}.sealoshzh.site"

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Docker image tag (e.g., 0.3.0-alpha-1.9.0-build.302-amd64)'
+        description: 'Docker image tag (e.g., release.2026-04-20T10-38-57Z.1)'
         required: true
       trigger:
         description: 'Who triggered this deployment'
@@ -288,7 +288,7 @@ jobs:
           ISSUES: ${{ inputs.release_issues || '无关联 Issue' }}
           DEPLOY_SUCCESS: ${{ (needs.deploy-app.result == 'success' && needs.deploy-sandbox.result == 'success') && 'true' || 'false' }}
         run: |
-          RELEASE_TAG="${IMAGE_TAG%-amd64}"
+          RELEASE_TAG="${IMAGE_TAG}"
 
           if [ "$DEPLOY_SUCCESS" = "true" ]; then
             HEADER_COLOR="yellow"

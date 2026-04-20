@@ -12,35 +12,113 @@ env:
 
 on:
   workflow_dispatch:
+    inputs:
+      build_scope:
+        description: 'Build scope for smoke testing or full release'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - sandbox
+          - app
+          - all
+      release_timestamp:
+        description: 'Optional UTC timestamp for release id (e.g. 2026-04-20T10:38:57Z)'
+        required: false
+        type: string
+      release_sequence:
+        description: 'Optional release id sequence suffix'
+        required: false
+        type: string
   repository_dispatch:
     types: [build-ee]
 
 jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    outputs:
+      build_scope: ${{ steps.release.outputs.build_scope }}
+      matrix_json: ${{ steps.release.outputs.matrix_json }}
+      release_id: ${{ steps.release.outputs.release_id }}
+      release_timestamp: ${{ steps.release.outputs.release_timestamp }}
+      release_sequence: ${{ steps.release.outputs.release_sequence }}
+    steps:
+      - name: Compute release id
+        id: release
+        env:
+          INPUT_BUILD_SCOPE: ${{ github.event.client_payload.build_scope || inputs.build_scope }}
+          INPUT_RELEASE_ID: ${{ github.event.client_payload.release_id }}
+          INPUT_RELEASE_TIMESTAMP: ${{ github.event.client_payload.release_timestamp || inputs.release_timestamp }}
+          INPUT_RELEASE_SEQUENCE: ${{ github.event.client_payload.release_sequence || inputs.release_sequence }}
+        run: |
+          BUILD_SCOPE="${INPUT_BUILD_SCOPE:-all}"
+          case "$BUILD_SCOPE" in
+            app)
+              MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable"}]}'
+              ;;
+            sandbox)
+              MATRIX_JSON='{"include":[{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox"}]}'
+              ;;
+            all)
+              MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox"}]}'
+              ;;
+            *)
+              echo "Unsupported build_scope: $BUILD_SCOPE" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ -n "$INPUT_RELEASE_ID" ]; then
+            RELEASE_ID="$INPUT_RELEASE_ID"
+            RELEASE_TIMESTAMP="${INPUT_RELEASE_TIMESTAMP}"
+            RELEASE_SEQUENCE="${INPUT_RELEASE_SEQUENCE}"
+
+            if [ -z "$RELEASE_TIMESTAMP" ] || [ -z "$RELEASE_SEQUENCE" ]; then
+              RELEASE_BODY="${RELEASE_ID#release.}"
+              RELEASE_SEQUENCE="${RELEASE_SEQUENCE:-${RELEASE_BODY##*.}}"
+              RELEASE_TIMESTAMP_TAG="${RELEASE_BODY%.*}"
+              RELEASE_TIMESTAMP="${RELEASE_TIMESTAMP:-$(printf '%s' "$RELEASE_TIMESTAMP_TAG" | sed -E 's/^([0-9]{4}-[0-9]{2}-[0-9]{2}T)([0-9]{2})-([0-9]{2})-([0-9]{2}Z)$/\1\2:\3:\4/')}"
+            fi
+          else
+            RELEASE_TIMESTAMP="${INPUT_RELEASE_TIMESTAMP}"
+            if [ -z "$RELEASE_TIMESTAMP" ]; then
+              RELEASE_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            fi
+
+            RELEASE_SEQUENCE="${INPUT_RELEASE_SEQUENCE:-${GITHUB_RUN_ATTEMPT:-${GITHUB_RUN_NUMBER:-1}}}"
+            RELEASE_TIMESTAMP_NO_MS=$(printf '%s' "$RELEASE_TIMESTAMP" | sed -E 's/\.[0-9]{3}Z$/Z/')
+            RELEASE_TIMESTAMP_TAG=$(printf '%s' "$RELEASE_TIMESTAMP_NO_MS" | tr ':' '-')
+            RELEASE_ID="release.${RELEASE_TIMESTAMP_TAG}.${RELEASE_SEQUENCE}"
+            RELEASE_TIMESTAMP="$RELEASE_TIMESTAMP_NO_MS"
+          fi
+
+          echo "build_scope=$BUILD_SCOPE" >> "$GITHUB_OUTPUT"
+          echo "matrix_json=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+          echo "release_timestamp=$RELEASE_TIMESTAMP" >> "$GITHUB_OUTPUT"
+          echo "release_sequence=$RELEASE_SEQUENCE" >> "$GITHUB_OUTPUT"
+          echo "Build scope: $BUILD_SCOPE"
+          echo "Release id: $RELEASE_ID"
+
   track-start:
+    needs: prepare-release
     uses: ./.github/workflows/track-build-teable.yaml
     with:
       action: create
       edition: ee
       status: Building
+      release_id: ${{ needs.prepare-release.outputs.release_id }}
     secrets:
       TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
       PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
 
   build-push:
-    needs: track-start
-    # runner images: https://github.com/actions/partner-runner-images?tab=readme-ov-file#available-images
-    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    needs: [prepare-release, track-start]
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.get_sha.outputs.sha }}
     strategy:
-      matrix:
-        target: [app, sandbox]
-        arch: [amd64, arm64]
-        include:
-          - target: app
-            file: Dockerfile
-            image: teable
-          - target: sandbox
-            file: Dockerfile.sandbox
-            image: teable-sandbox
+      matrix: ${{ fromJson(needs.prepare-release.outputs.matrix_json) }}
 
     steps:
       - name: Checkout private repository
@@ -72,6 +150,12 @@ jobs:
       - name: ⚙️ Install zx
         run: npm install -g zx
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: ⚙️ Docker meta
         id: meta
         uses: docker/metadata-action@v5
@@ -82,104 +166,34 @@ jobs:
             ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}${{ env.EE_IMAGE_SUFFIX }}
             ${{ env.REGISTRY_DOCKERHUB }}/${{ matrix.image }}${{ env.EE_IMAGE_SUFFIX }}
           tags: |
-            type=raw,value=latest
+            type=raw,value=beta
             type=raw,value=${{ steps.get_sha.outputs.sha }}
-            type=raw,value=${{ needs.track-start.outputs.version_tag }}
-          flavor: |
-            suffix=-${{ matrix.arch }}
+            type=raw,value=${{ needs.prepare-release.outputs.release_id }}
 
       - name: 📦 Build and push
+        env:
+          TEABLE_RELEASE_TIMESTAMP: ${{ needs.prepare-release.outputs.release_timestamp }}
+          TEABLE_RELEASE_SEQUENCE: ${{ needs.prepare-release.outputs.release_sequence }}
         run: |
           zx scripts/build-image.mjs --file=dockers/teable/${{ matrix.file }} \
               --build-arg="ENABLE_CSP=false" \
               --build-arg="NEXT_BUILD_ENV_EDITION=EE" \
               --tag="${{ steps.meta.outputs.tags }}" \
-              --platform="linux/${{ matrix.arch }}" \
+              --platform="linux/amd64,linux/arm64" \
               --push
 
-  create-manifest:
-    needs: [track-start, build-push]
-    runs-on: ubuntu-latest
-    outputs:
-      start_time: ${{ steps.start_time.outputs.start }}
-      main_commit_sha: ${{ steps.get_sha.outputs.sha }}
-      main_commit_author: ${{ steps.get_main_commit_info.outputs.author }}
-      main_commit_message: ${{ steps.get_main_commit_info.outputs.message }}
-    strategy:
-      matrix:
-        target: [app, sandbox]
-        include:
-          - target: app
-            image: teable
-          - target: sandbox
-            image: teable-sandbox
-
-    steps:
-      - name: Record start time
-        id: start_time
-        run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
-
-      - name: Checkout private repository
-        uses: actions/checkout@v4
-        with:
-          repository: teableio/teable-ee
-          token: ${{ secrets.PACKAGES_KEY }}
-
-      - name: Get teable-ee SHA
-        id: get_sha
-        run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Login to GitHub container registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.PACKAGES_KEY }}
-
-      - name: Login to Docker Hub registry
-        uses: docker/login-action@v3
-        with:
-          username: ${{ vars.DOCKER_HUB_NAME }}
-          password: ${{ secrets.DOCKER_HUB_AK }}
-
-      - name: Create and push manifest
-        run: |
-          REGISTRIES=("${{ env.REGISTRY_GITHUB }}" "${{ env.REGISTRY_DOCKERHUB }}")
-          TAGS=("latest" "${{ steps.get_sha.outputs.sha }}" "${{ needs.track-start.outputs.version_tag }}")
-          SUFFIXES=("${{ env.CE_IMAGE_SUFFIX }}" "${{ env.EE_IMAGE_SUFFIX }}")
-
-          for REGISTRY in "${REGISTRIES[@]}"; do
-            for TAG in "${TAGS[@]}"; do
-              for SUFFIX in "${SUFFIXES[@]}"; do
-                # Create multi-arch manifest
-                docker manifest create ${REGISTRY}/${{ matrix.image }}${SUFFIX}:${TAG} \
-                  ${REGISTRY}/${{ matrix.image }}${SUFFIX}:${TAG}-amd64 \
-                  ${REGISTRY}/${{ matrix.image }}${SUFFIX}:${TAG}-arm64
-                
-                # Push the manifest
-                docker manifest push ${REGISTRY}/${{ matrix.image }}${SUFFIX}:${TAG}
-              done
-            done
-          done
-
-      - name: Get main commit info
-        if: matrix.target == 'app'  # Only run once
-        id: get_main_commit_info
-        run: |
-          echo "message=$(git log -1 --pretty=format:'%s')" >> $GITHUB_OUTPUT
-          echo "author=$(git log -1 --pretty=format:'%an')" >> $GITHUB_OUTPUT
-
   sync-aliyun:
-    needs: [track-start, create-manifest]
-    if: needs.create-manifest.result == 'success'
+    needs: [prepare-release, track-start, build-push]
+    if: needs.build-push.result == 'success'
     uses: ./.github/workflows/sync-aliyun.yaml
     with:
+      build_scope: ${{ needs.prepare-release.outputs.build_scope }}
       edition: ee
-      tags: "latest,${{ needs.create-manifest.outputs.main_commit_sha }},${{ needs.track-start.outputs.version_tag }}"
+      tags: "beta,${{ needs.build-push.outputs.sha }},${{ needs.prepare-release.outputs.release_id }}"
     secrets: inherit
 
   determine-status:
-    needs: [track-start, create-manifest, sync-aliyun]
+    needs: [track-start, build-push, sync-aliyun]
     if: always()
     runs-on: ubuntu-latest
     outputs:
@@ -188,14 +202,14 @@ jobs:
       - name: Determine final status
         id: status
         run: |
-          if [ "${{ needs.create-manifest.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ]; then
+          if [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ]; then
             echo "status=Released" >> $GITHUB_OUTPUT
           else
             echo "status=Fail" >> $GITHUB_OUTPUT
           fi
 
   track-complete:
-    needs: [track-start, create-manifest, sync-aliyun, determine-status]
+    needs: [track-start, build-push, sync-aliyun, determine-status]
     if: always()
     uses: ./.github/workflows/track-build-teable.yaml
     with:

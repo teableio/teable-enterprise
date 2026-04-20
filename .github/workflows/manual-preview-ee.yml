@@ -148,7 +148,7 @@ jobs:
         env:
           MAIN_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-ee-preview
           SANDBOX_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-ee-preview
-          IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}-amd64
+          IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}
           ENABLE_TRACING: ${{ steps.labels.outputs.enable_tracing }}
         run: |
           if [ "${ENABLE_TRACING}" = "true" ]; then

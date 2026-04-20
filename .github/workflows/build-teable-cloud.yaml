@@ -5,36 +5,114 @@ concurrency:
   cancel-in-progress: true
 on:
   workflow_dispatch:
+    inputs:
+      build_scope:
+        description: 'Build scope for smoke testing or full release'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - sandbox
+          - app
+          - all
+      release_timestamp:
+        description: 'Optional UTC timestamp for release id (e.g. 2026-04-20T10:38:57Z)'
+        required: false
+        type: string
+      release_sequence:
+        description: 'Optional release id sequence suffix'
+        required: false
+        type: string
   repository_dispatch:
     types: [build-cloud]
 
 jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    outputs:
+      build_scope: ${{ steps.release.outputs.build_scope }}
+      matrix_json: ${{ steps.release.outputs.matrix_json }}
+      release_id: ${{ steps.release.outputs.release_id }}
+      release_timestamp: ${{ steps.release.outputs.release_timestamp }}
+      release_sequence: ${{ steps.release.outputs.release_sequence }}
+    steps:
+      - name: Compute release id
+        id: release
+        env:
+          INPUT_BUILD_SCOPE: ${{ github.event.client_payload.build_scope || inputs.build_scope }}
+          INPUT_RELEASE_ID: ${{ github.event.client_payload.release_id }}
+          INPUT_RELEASE_TIMESTAMP: ${{ github.event.client_payload.release_timestamp || inputs.release_timestamp }}
+          INPUT_RELEASE_SEQUENCE: ${{ github.event.client_payload.release_sequence || inputs.release_sequence }}
+        run: |
+          BUILD_SCOPE="${INPUT_BUILD_SCOPE:-all}"
+          case "$BUILD_SCOPE" in
+            app)
+              MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud"}]}'
+              ;;
+            sandbox)
+              MATRIX_JSON='{"include":[{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud"}]}'
+              ;;
+            all)
+              MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud"}]}'
+              ;;
+            *)
+              echo "Unsupported build_scope: $BUILD_SCOPE" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ -n "$INPUT_RELEASE_ID" ]; then
+            RELEASE_ID="$INPUT_RELEASE_ID"
+            RELEASE_TIMESTAMP="${INPUT_RELEASE_TIMESTAMP}"
+            RELEASE_SEQUENCE="${INPUT_RELEASE_SEQUENCE}"
+
+            if [ -z "$RELEASE_TIMESTAMP" ] || [ -z "$RELEASE_SEQUENCE" ]; then
+              RELEASE_BODY="${RELEASE_ID#release.}"
+              RELEASE_SEQUENCE="${RELEASE_SEQUENCE:-${RELEASE_BODY##*.}}"
+              RELEASE_TIMESTAMP_TAG="${RELEASE_BODY%.*}"
+              RELEASE_TIMESTAMP="${RELEASE_TIMESTAMP:-$(printf '%s' "$RELEASE_TIMESTAMP_TAG" | sed -E 's/^([0-9]{4}-[0-9]{2}-[0-9]{2}T)([0-9]{2})-([0-9]{2})-([0-9]{2}Z)$/\1\2:\3:\4/')}"
+            fi
+          else
+            RELEASE_TIMESTAMP="${INPUT_RELEASE_TIMESTAMP}"
+            if [ -z "$RELEASE_TIMESTAMP" ]; then
+              RELEASE_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            fi
+
+            RELEASE_SEQUENCE="${INPUT_RELEASE_SEQUENCE:-${GITHUB_RUN_ATTEMPT:-${GITHUB_RUN_NUMBER:-1}}}"
+            RELEASE_TIMESTAMP_NO_MS=$(printf '%s' "$RELEASE_TIMESTAMP" | sed -E 's/\.[0-9]{3}Z$/Z/')
+            RELEASE_TIMESTAMP_TAG=$(printf '%s' "$RELEASE_TIMESTAMP_NO_MS" | tr ':' '-')
+            RELEASE_ID="release.${RELEASE_TIMESTAMP_TAG}.${RELEASE_SEQUENCE}"
+            RELEASE_TIMESTAMP="$RELEASE_TIMESTAMP_NO_MS"
+          fi
+
+          echo "build_scope=$BUILD_SCOPE" >> "$GITHUB_OUTPUT"
+          echo "matrix_json=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+          echo "release_timestamp=$RELEASE_TIMESTAMP" >> "$GITHUB_OUTPUT"
+          echo "release_sequence=$RELEASE_SEQUENCE" >> "$GITHUB_OUTPUT"
+          echo "Build scope: $BUILD_SCOPE"
+          echo "Release id: $RELEASE_ID"
+
   track-start:
+    needs: prepare-release
     uses: ./.github/workflows/track-build-teable.yaml
     with:
       action: create
       edition: cloud
       status: Building
+      release_id: ${{ needs.prepare-release.outputs.release_id }}
     secrets:
       TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
       PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
 
   build-push:
-    needs: track-start
+    needs: [prepare-release, track-start]
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.get_sha.outputs.sha }}
 
     strategy:
-      matrix:
-        target: [app, sandbox]
-        include:
-          - target: app
-            file: Dockerfile
-            image: teable-cloud
-          - target: sandbox
-            file: Dockerfile.sandbox
-            image: teable-sandbox-cloud
+      matrix: ${{ fromJson(needs.prepare-release.outputs.matrix_json) }}
 
     steps:
       - name: Checkout private repository
@@ -78,14 +156,20 @@ jobs:
             ghcr.io/teableio/${{ matrix.image }}
             649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/${{ matrix.image }}
           tags: |
-            type=raw,value=latest
+            type=raw,value=beta
             type=raw,value=${{ steps.get_sha.outputs.sha }}
-            type=raw,value=${{ needs.track-start.outputs.version_tag }}
+            type=raw,value=${{ needs.prepare-release.outputs.release_id }}
 
       - name: ⚙️ Set up QEMU
         uses: docker/setup-qemu-action@v3
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: 📦 Build and push
+        env:
+          TEABLE_RELEASE_TIMESTAMP: ${{ needs.prepare-release.outputs.release_timestamp }}
+          TEABLE_RELEASE_SEQUENCE: ${{ needs.prepare-release.outputs.release_sequence }}
         run: |
           zx scripts/build-image.mjs --file=dockers/teable/${{ matrix.file }} \
               --build-arg="ENABLE_CSP=false" \
@@ -101,12 +185,13 @@ jobs:
               --upload-assets-list='[["aws-objectstorage","https://s3.us-west-2.amazonaws.com","${{ secrets.AWS_ACCESS_KEY_ID }}","${{ secrets.AWS_SECRET_ACCESS_KEY }}","teable-next-asset"],["sealos-objectstorage","https://objectstorageapi.hzh.sealos.run","${{ secrets.SEALOS_OBJECTSTORAGE_ACCESS_KEY }}","${{ secrets.SEALOS_OBJECTSTORAGE_SECRET_KEY }}","38puz7wo-teable-public"]]'
 
   sync-aliyun:
-    needs: [track-start, build-push]
+    needs: [prepare-release, track-start, build-push]
     if: needs.build-push.result == 'success'
     uses: ./.github/workflows/sync-aliyun.yaml
     with:
+      build_scope: ${{ needs.prepare-release.outputs.build_scope }}
       edition: cloud
-      tags: "latest,${{ needs.build-push.outputs.sha }},${{ needs.track-start.outputs.version_tag }}"
+      tags: "beta,${{ needs.build-push.outputs.sha }},${{ needs.prepare-release.outputs.release_id }}"
     secrets: inherit
 
   determine-status:

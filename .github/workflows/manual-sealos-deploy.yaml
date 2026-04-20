@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Docker image tag (e.g., 0.5.0-alpha+1.10.0-build.467-amd64)'
+        description: 'Docker image tag (e.g., release.2026-04-20T10-38-57Z.1)'
         required: true
       trigger:
         description: 'Who triggered this deployment'
