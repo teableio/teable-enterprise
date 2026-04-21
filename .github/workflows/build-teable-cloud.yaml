@@ -230,7 +230,7 @@ jobs:
         with:
           images: ghcr.io/teableio/${{ matrix.image }}
           tags: |
-            type=raw,value=beta
+            type=raw,value=latest
             type=raw,value=${{ needs.prepare-release.outputs.source_sha }}
             type=raw,value=${{ needs.prepare-release.outputs.release_id }}
 
@@ -290,7 +290,7 @@ jobs:
       - name: Sync images to ECR
         env:
           SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
-          TAGS: beta,${{ needs.prepare-release.outputs.source_sha }},${{ needs.prepare-release.outputs.release_id }}
+          TAGS: latest,${{ needs.prepare-release.outputs.source_sha }},${{ needs.prepare-release.outputs.release_id }}
           ECR_REGISTRY: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable
         run: |
           set -euo pipefail
@@ -316,7 +316,7 @@ jobs:
     uses: ./.github/workflows/sync-aliyun.yaml
     with:
       edition: cloud
-      tags: "beta,${{ needs.prepare-release.outputs.source_sha }},${{ needs.prepare-release.outputs.release_id }}"
+      tags: "latest,${{ needs.prepare-release.outputs.source_sha }},${{ needs.prepare-release.outputs.release_id }}"
     secrets: inherit
 
   determine-status:
