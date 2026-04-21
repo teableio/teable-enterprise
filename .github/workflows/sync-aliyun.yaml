@@ -10,15 +10,6 @@ on:
         options:
           - cloud
           - ee
-      build_scope:
-        description: 'Build scope to sync (sandbox, app, or all)'
-        required: false
-        default: all
-        type: choice
-        options:
-          - sandbox
-          - app
-          - all
       tags:
         description: 'Comma-separated tags to sync (e.g., latest,abc123,1.0.0)'
         required: true
@@ -28,10 +19,6 @@ on:
       edition:
         required: true
         type: string
-      build_scope:
-        required: false
-        type: string
-        default: all
       tags:
         required: true
         type: string
@@ -84,28 +71,9 @@ jobs:
 
           IFS=',' read -ra TAGS <<< "${{ inputs.tags }}"
           FAILED=0
-          BUILD_SCOPE="${{ inputs.build_scope }}"
-
-          if [ -z "$BUILD_SCOPE" ]; then
-            BUILD_SCOPE="all"
-          fi
-
-          case "$BUILD_SCOPE" in
-            app|sandbox|all) ;;
-            *)
-              echo "::error::Unsupported build_scope: $BUILD_SCOPE"
-              exit 1
-              ;;
-          esac
 
           if [ "${{ inputs.edition }}" = "cloud" ]; then
-            if [ "$BUILD_SCOPE" = "app" ]; then
-              IMAGES=("teable-cloud")
-            elif [ "$BUILD_SCOPE" = "sandbox" ]; then
-              IMAGES=("teable-sandbox-cloud")
-            else
-              IMAGES=("teable-cloud" "teable-sandbox-cloud")
-            fi
+            IMAGES=("teable-cloud" "teable-sandbox-cloud")
             for image in "${IMAGES[@]}"; do
               for tag in "${TAGS[@]}"; do
                 [ -n "$tag" ] || continue
@@ -117,13 +85,7 @@ jobs:
               done
             done
           elif [ "${{ inputs.edition }}" = "ee" ]; then
-            if [ "$BUILD_SCOPE" = "app" ]; then
-              IMAGES=("teable")
-            elif [ "$BUILD_SCOPE" = "sandbox" ]; then
-              IMAGES=("teable-sandbox")
-            else
-              IMAGES=("teable" "teable-sandbox")
-            fi
+            IMAGES=("teable" "teable-sandbox")
             SUFFIXES=("" "-ee")
 
             for image in "${IMAGES[@]}"; do

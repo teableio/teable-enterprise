@@ -13,15 +13,6 @@ env:
 on:
   workflow_dispatch:
     inputs:
-      build_scope:
-        description: 'Build scope for smoke testing or full release'
-        required: false
-        default: 'all'
-        type: choice
-        options:
-          - sandbox
-          - app
-          - all
       release_timestamp:
         description: 'Optional UTC timestamp for release id (e.g. 2026-04-20T10:38:57Z)'
         required: false
@@ -38,7 +29,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       target_matrix_json: ${{ steps.release.outputs.target_matrix_json }}
-      build_scope: ${{ steps.release.outputs.build_scope }}
       matrix_json: ${{ steps.release.outputs.matrix_json }}
       release_id: ${{ steps.release.outputs.release_id }}
       release_timestamp: ${{ steps.release.outputs.release_timestamp }}
@@ -64,30 +54,12 @@ jobs:
       - name: Compute release id
         id: release
         env:
-          INPUT_BUILD_SCOPE: ${{ github.event.client_payload.build_scope || inputs.build_scope }}
           INPUT_RELEASE_ID: ${{ github.event.client_payload.release_id }}
           INPUT_RELEASE_TIMESTAMP: ${{ github.event.client_payload.release_timestamp || inputs.release_timestamp }}
           INPUT_RELEASE_SEQUENCE: ${{ github.event.client_payload.release_sequence || inputs.release_sequence }}
         run: |
-          BUILD_SCOPE="${INPUT_BUILD_SCOPE:-all}"
-          case "$BUILD_SCOPE" in
-            app)
-              TARGET_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable"}]}'
-              MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"app","file":"Dockerfile","image":"teable","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"}]}'
-              ;;
-            sandbox)
-              TARGET_MATRIX_JSON='{"include":[{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox"}]}'
-              MATRIX_JSON='{"include":[{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"}]}'
-              ;;
-            all)
-              TARGET_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox"}]}'
-              MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"app","file":"Dockerfile","image":"teable","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"}]}'
-              ;;
-            *)
-              echo "Unsupported build_scope: $BUILD_SCOPE" >&2
-              exit 1
-              ;;
-          esac
+          TARGET_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox"}]}'
+          MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"app","file":"Dockerfile","image":"teable","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"}]}'
 
           if [ -n "$INPUT_RELEASE_ID" ]; then
             RELEASE_ID="$INPUT_RELEASE_ID"
@@ -113,13 +85,11 @@ jobs:
             RELEASE_TIMESTAMP="$RELEASE_TIMESTAMP_NO_MS"
           fi
 
-          echo "build_scope=$BUILD_SCOPE" >> "$GITHUB_OUTPUT"
           echo "target_matrix_json=$TARGET_MATRIX_JSON" >> "$GITHUB_OUTPUT"
           echo "matrix_json=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
           echo "release_timestamp=$RELEASE_TIMESTAMP" >> "$GITHUB_OUTPUT"
           echo "release_sequence=$RELEASE_SEQUENCE" >> "$GITHUB_OUTPUT"
-          echo "Build scope: $BUILD_SCOPE"
           echo "Release id: $RELEASE_ID"
 
   track-start:
@@ -279,19 +249,12 @@ jobs:
         env:
           SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
           DST_CREDS: ${{ vars.DOCKER_HUB_NAME }}:${{ secrets.DOCKER_HUB_AK }}
-          BUILD_SCOPE: ${{ needs.prepare-release.outputs.build_scope }}
           TAGS: beta,${{ needs.prepare-release.outputs.source_sha }},${{ needs.prepare-release.outputs.release_id }}
         run: |
           set -euo pipefail
 
           IFS=',' read -ra TAG_LIST <<< "$TAGS"
-          if [ "$BUILD_SCOPE" = "app" ]; then
-            IMAGES=("teable" "teable-ee")
-          elif [ "$BUILD_SCOPE" = "sandbox" ]; then
-            IMAGES=("teable-sandbox" "teable-sandbox-ee")
-          else
-            IMAGES=("teable" "teable-ee" "teable-sandbox" "teable-sandbox-ee")
-          fi
+          IMAGES=("teable" "teable-ee" "teable-sandbox" "teable-sandbox-ee")
 
           for image in "${IMAGES[@]}"; do
             for tag in "${TAG_LIST[@]}"; do
@@ -309,7 +272,6 @@ jobs:
     if: needs.merge-manifests.result == 'success'
     uses: ./.github/workflows/sync-aliyun.yaml
     with:
-      build_scope: ${{ needs.prepare-release.outputs.build_scope }}
       edition: ee
       tags: "beta,${{ needs.prepare-release.outputs.source_sha }},${{ needs.prepare-release.outputs.release_id }}"
     secrets: inherit
