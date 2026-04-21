@@ -149,8 +149,6 @@ jobs:
             BUILD_VERSION=${{ needs.prepare-release.outputs.release_id }}
             FRONTEND_RELEASE=${{ needs.prepare-release.outputs.release_id }}
             GIT_COMMIT_SHA=${{ needs.prepare-release.outputs.source_sha }}
-          cache-from: type=gha,scope=release-ee-${{ matrix.target }}-${{ matrix.platform_key }}
-          cache-to: type=gha,mode=max,scope=release-ee-${{ matrix.target }}-${{ matrix.platform_key }},ignore-error=true
           outputs: type=image,name=${{ env.REGISTRY_GITHUB }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           provenance: false
 
