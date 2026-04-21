@@ -6,6 +6,10 @@ concurrency:
 on:
   workflow_dispatch:
     inputs:
+      source_ref:
+        description: 'Optional teable-ee ref to build from'
+        required: false
+        type: string
       release_timestamp:
         description: 'Optional UTC timestamp for release id (e.g. 2026-04-20T10:38:57Z)'
         required: false
@@ -33,6 +37,7 @@ jobs:
         with:
           repository: teableio/teable-ee
           token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ github.event.client_payload.source_ref || inputs.source_ref || 'develop' }}
 
       - name: Resolve source SHA
         id: source
@@ -130,6 +135,40 @@ jobs:
         if: matrix.file == 'Dockerfile'
         run: node ./scripts/generate-docker-contexts.mjs
 
+      - name: Prepare upload assets config
+        if: matrix.file == 'Dockerfile'
+        id: upload_assets
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          SEALOS_OBJECTSTORAGE_ACCESS_KEY: ${{ secrets.SEALOS_OBJECTSTORAGE_ACCESS_KEY }}
+          SEALOS_OBJECTSTORAGE_SECRET_KEY: ${{ secrets.SEALOS_OBJECTSTORAGE_SECRET_KEY }}
+        run: |
+          node <<'EOF'
+          const fs = require('node:fs');
+
+          const uploadAssetsList = [
+            [
+              'aws-objectstorage',
+              'https://s3.us-west-2.amazonaws.com',
+              process.env.AWS_ACCESS_KEY_ID,
+              process.env.AWS_SECRET_ACCESS_KEY,
+              'teable-next-asset',
+            ],
+            [
+              'sealos-objectstorage',
+              'https://objectstorageapi.hzh.sealos.run',
+              process.env.SEALOS_OBJECTSTORAGE_ACCESS_KEY,
+              process.env.SEALOS_OBJECTSTORAGE_SECRET_KEY,
+              '38puz7wo-teable-public',
+            ],
+          ];
+
+          const encoded = Buffer.from(JSON.stringify(uploadAssetsList)).toString('base64');
+          process.stdout.write(`::add-mask::${encoded}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `list_b64=${encoded}\n`);
+          EOF
+
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
@@ -145,7 +184,7 @@ jobs:
             SENTRY_AUTH_TOKEN=${{ secrets.SENTRY_AUTH_TOKEN }}
             SENTRY_SOURCEMAPS_UPLOAD=true
             NEXT_BUILD_ENV_ASSET_PREFIX=${{ vars.NEXT_BUILD_ENV_ASSET_PREFIX }}
-            UPLOAD_ASSETS_LIST=[["aws-objectstorage","https://s3.us-west-2.amazonaws.com","${{ secrets.AWS_ACCESS_KEY_ID }}","${{ secrets.AWS_SECRET_ACCESS_KEY }}","teable-next-asset"],["sealos-objectstorage","https://objectstorageapi.hzh.sealos.run","${{ secrets.SEALOS_OBJECTSTORAGE_ACCESS_KEY }}","${{ secrets.SEALOS_OBJECTSTORAGE_SECRET_KEY }}","38puz7wo-teable-public"]]
+            UPLOAD_ASSETS_LIST_B64=${{ steps.upload_assets.outputs.list_b64 }}
             BUILD_VERSION=${{ needs.prepare-release.outputs.release_id }}
             FRONTEND_RELEASE=${{ needs.prepare-release.outputs.release_id }}
             GIT_COMMIT_SHA=${{ needs.prepare-release.outputs.source_sha }}
