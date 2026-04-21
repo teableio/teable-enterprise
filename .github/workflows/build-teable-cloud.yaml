@@ -131,6 +131,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Docker meta for image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/teableio/${{ matrix.image }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ needs.prepare-release.outputs.source_sha }}
+            type=raw,value=${{ needs.prepare-release.outputs.release_id }}
+
       - name: Prepare generated Docker contexts
         if: matrix.file == 'Dockerfile'
         run: node ./scripts/generate-docker-contexts.mjs
@@ -176,6 +186,7 @@ jobs:
           context: .
           file: dockers/teable/${{ matrix.file }}
           platforms: ${{ matrix.platform }}
+          tags: ${{ steps.meta.outputs.tags }}
           build-args: |
             ENABLE_CSP=false
             NEXT_BUILD_ENV_EDITION=CLOUD
@@ -188,91 +199,12 @@ jobs:
             BUILD_VERSION=${{ needs.prepare-release.outputs.release_id }}
             FRONTEND_RELEASE=${{ needs.prepare-release.outputs.release_id }}
             GIT_COMMIT_SHA=${{ needs.prepare-release.outputs.source_sha }}
-          cache-from: type=gha,scope=release-cloud-${{ matrix.target }}-${{ matrix.platform_key }}
-          cache-to: type=gha,mode=max,scope=release-cloud-${{ matrix.target }}-${{ matrix.platform_key }},ignore-error=true
-          outputs: type=image,name=ghcr.io/teableio/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+          push: true
           provenance: false
 
-      - name: Export digest artifact
-        run: |
-          mkdir -p /tmp/digests
-          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.platform_key }}.digest"
-
-      - name: Upload digest artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: digests-${{ matrix.target }}-${{ matrix.platform_key }}
-          path: /tmp/digests/${{ matrix.platform_key }}.digest
-          if-no-files-found: error
-          retention-days: 1
-
-  merge-manifests:
+  sync-ecr:
     needs: [prepare-release, track-start, build-push]
     if: needs.build-push.result == 'success'
-    runs-on: ubuntu-latest
-    strategy:
-      matrix: ${{ fromJson(needs.prepare-release.outputs.target_matrix_json) }}
-
-    steps:
-      - name: Login to GitHub container registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.PACKAGES_KEY }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Docker meta for canonical image
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/teableio/${{ matrix.image }}
-          tags: |
-            type=raw,value=latest
-            type=raw,value=${{ needs.prepare-release.outputs.source_sha }}
-            type=raw,value=${{ needs.prepare-release.outputs.release_id }}
-
-      - name: Download digest artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: /tmp/digests/${{ matrix.target }}
-          pattern: digests-${{ matrix.target }}-*
-          merge-multiple: true
-
-      - name: Create manifests
-        env:
-          META_JSON: ${{ steps.meta.outputs.json }}
-          CANONICAL_IMAGE: ghcr.io/teableio/${{ matrix.image }}
-        run: |
-          mapfile -t TAGS < <(jq -r '.tags[]' <<<"$META_JSON")
-          mapfile -t DIGEST_FILES < <(find "/tmp/digests/${{ matrix.target }}" -type f -name '*.digest' | sort)
-
-          if [ "${#DIGEST_FILES[@]}" -eq 0 ]; then
-            echo "No digest artifacts found for ${{ matrix.target }}" >&2
-            exit 1
-          fi
-
-          SOURCES=()
-          for digest_file in "${DIGEST_FILES[@]}"; do
-            digest="$(tr -d '\n' < "$digest_file")"
-            SOURCES+=("${CANONICAL_IMAGE}@${digest}")
-          done
-
-          for full_tag in "${TAGS[@]}"; do
-            tag_name="${full_tag##*:}"
-            if [ -z "$tag_name" ]; then
-              continue
-            fi
-            docker buildx imagetools create \
-              --tag "${CANONICAL_IMAGE}:${tag_name}" \
-              "${SOURCES[@]}"
-          done
-
-  sync-ecr:
-    needs: [prepare-release, track-start, merge-manifests]
-    if: needs.merge-manifests.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Install skopeo
@@ -311,8 +243,8 @@ jobs:
           done
 
   sync-aliyun:
-    needs: [prepare-release, track-start, merge-manifests]
-    if: needs.merge-manifests.result == 'success'
+    needs: [prepare-release, track-start, build-push]
+    if: needs.build-push.result == 'success'
     uses: ./.github/workflows/sync-aliyun.yaml
     with:
       edition: cloud
@@ -320,7 +252,7 @@ jobs:
     secrets: inherit
 
   determine-status:
-    needs: [track-start, build-push, merge-manifests, sync-ecr, sync-aliyun]
+    needs: [track-start, build-push, sync-ecr, sync-aliyun]
     if: always()
     runs-on: ubuntu-latest
     outputs:
@@ -329,14 +261,14 @@ jobs:
       - name: Determine final status
         id: status
         run: |
-          if [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.merge-manifests.result }}" == "success" ] && [ "${{ needs.sync-ecr.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ]; then
+          if [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.sync-ecr.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ]; then
             echo "status=Released" >> $GITHUB_OUTPUT
           else
             echo "status=Fail" >> $GITHUB_OUTPUT
           fi
 
   track-complete:
-    needs: [track-start, build-push, merge-manifests, sync-ecr, sync-aliyun, determine-status]
+    needs: [track-start, build-push, sync-ecr, sync-aliyun, determine-status]
     if: always()
     uses: ./.github/workflows/track-build-teable.yaml
     with:
