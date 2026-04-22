@@ -87,17 +87,24 @@ jobs:
         id: get_ee_commit
         run: |
           commit_sha=$(git rev-parse HEAD)
-          commit_message=$(git log -1 --pretty=format:'%s')
+          commit_subject=$(git log -1 --pretty=format:'%s')
+          commit_message=$(git log -1 --pretty=format:'%B')
           commit_author=$(git log -1 --pretty=format:'%an')
+          output_delimiter="COMMIT_MESSAGE_$(date +%s%N)"
           
           echo "sha=${commit_sha}" >> $GITHUB_OUTPUT
-          echo "message=${commit_message}" >> $GITHUB_OUTPUT
+          echo "subject=${commit_subject}" >> $GITHUB_OUTPUT
+          {
+            echo "message<<${output_delimiter}"
+            printf '%s\n' "$commit_message"
+            echo "${output_delimiter}"
+          } >> "$GITHUB_OUTPUT"
           echo "author=${commit_author}" >> $GITHUB_OUTPUT
 
       - name: Extract PR number
         id: extract_pr
         run: |
-          commit_message="${{ steps.get_ee_commit.outputs.message }}"
+          commit_message="${{ steps.get_ee_commit.outputs.subject }}"
           # Try to extract PR number from commit message
           # Support format 1: (#456)
           # Support format 2: Merge pull request #735 from ...
