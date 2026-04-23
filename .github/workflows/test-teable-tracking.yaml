@@ -107,3 +107,40 @@ jobs:
         run: |
           echo "Updated record ${{ needs.test-create-fail.outputs.record_id }} to Fail"
 
+  test-create-cancelled:
+    uses: ./.github/workflows/track-build-teable.yaml
+    with:
+      action: create
+      edition: ${{ inputs.edition }}
+      status: Building
+    secrets:
+      TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+
+  wait-before-update-cancelled:
+    needs: test-create-cancelled
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait a moment
+        run: sleep 10
+
+  test-update-cancelled:
+    needs: [test-create-cancelled, wait-before-update-cancelled]
+    uses: ./.github/workflows/track-build-teable.yaml
+    with:
+      action: update
+      edition: ${{ inputs.edition }}
+      record_id: ${{ needs.test-create-cancelled.outputs.record_id }}
+      status: Cancelled
+      start_time: ${{ needs.test-create-cancelled.outputs.start_time }}
+    secrets:
+      TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+
+  display-update-cancelled:
+    needs: [test-create-cancelled, test-update-cancelled]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Display update info
+        run: |
+          echo "Updated record ${{ needs.test-create-cancelled.outputs.record_id }} to Cancelled"

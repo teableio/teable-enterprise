@@ -284,7 +284,9 @@ jobs:
       - name: Determine final status
         id: status
         run: |
-          if [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.merge-manifests.result }}" == "success" ] && [ "${{ needs.sync-dockerhub.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ]; then
+          if [ "${{ needs.build-push.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests.result }}" == "cancelled" ] || [ "${{ needs.sync-dockerhub.result }}" == "cancelled" ] || [ "${{ needs.sync-aliyun.result }}" == "cancelled" ]; then
+            echo "status=Cancelled" >> $GITHUB_OUTPUT
+          elif [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.merge-manifests.result }}" == "success" ] && [ "${{ needs.sync-dockerhub.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ]; then
             echo "status=Released" >> $GITHUB_OUTPUT
           else
             echo "status=Fail" >> $GITHUB_OUTPUT

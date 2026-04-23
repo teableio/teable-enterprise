@@ -16,7 +16,7 @@ on:
         required: false
         type: string
       status:
-        description: 'Status: Building, Released, or Fail'
+        description: 'Status: Building, Released, Fail, or Cancelled'
         required: false
         type: string
         default: 'Building'
