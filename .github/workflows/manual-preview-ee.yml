@@ -150,7 +150,13 @@ jobs:
           SANDBOX_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-ee-preview
           IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}
           ENABLE_TRACING: ${{ steps.labels.outputs.enable_tracing }}
+          PREVIEW_EE_ENTERPRISE_LICENSE_KEY: ${{ secrets.PREVIEW_EE_ENTERPRISE_LICENSE_KEY }}
         run: |
+          if [ -z "${PREVIEW_EE_ENTERPRISE_LICENSE_KEY}" ]; then
+            echo "::error::Missing PREVIEW_EE_ENTERPRISE_LICENSE_KEY secret"
+            exit 1
+          fi
+
           if [ "${ENABLE_TRACING}" = "true" ]; then
             OTEL_EXPORTER_OTLP_ENDPOINT="http://teable-${{ env.INSTANCE_NAME }}-jaeger:4318/v1/traces"
             TRACE_LINK_BASE_URL="https://jaeger-${{ env.INSTANCE_DOMAIN }}.sealoshzh.site"
@@ -169,6 +175,7 @@ jobs:
           sed -i "s#__DISPLAY_NAME__#${{ env.DISPLAY_NAME }}#g" deploy.yaml
           sed -i "s#__OTEL_EXPORTER_OTLP_ENDPOINT__#${OTEL_EXPORTER_OTLP_ENDPOINT}#g" deploy.yaml
           sed -i "s#__TRACE_LINK_BASE_URL__#${TRACE_LINK_BASE_URL}#g" deploy.yaml
+          sed -i "s#__ENTERPRISE_LICENSE_KEY__#${PREVIEW_EE_ENTERPRISE_LICENSE_KEY}#g" deploy.yaml
 
           if [ "${ENABLE_TRACING}" = "true" ]; then
             sed -i '/^#__JAEGER_ENABLED_/d' deploy.yaml

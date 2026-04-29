@@ -158,7 +158,13 @@ jobs:
           SANDBOX_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-ee-preview
           IMAGE_TAG: ${{ needs.build-push.outputs.main_commit_sha }}
           ENABLE_TRACING: ${{ steps.labels.outputs.enable_tracing }}
+          PREVIEW_EE_ENTERPRISE_LICENSE_KEY: ${{ secrets.PREVIEW_EE_ENTERPRISE_LICENSE_KEY }}
         run: |
+          if [ -z "${PREVIEW_EE_ENTERPRISE_LICENSE_KEY}" ]; then
+            echo "::error::Missing PREVIEW_EE_ENTERPRISE_LICENSE_KEY secret"
+            exit 1
+          fi
+
           if [ "${ENABLE_TRACING}" = "true" ]; then
             OTEL_EXPORTER_OTLP_ENDPOINT="http://teable-${{ env.INSTANCE_NAME }}-jaeger:4318/v1/traces"
             TRACE_LINK_BASE_URL="https://jaeger-${{ env.INSTANCE_DOMAIN }}.sealoshzh.site"
@@ -177,6 +183,7 @@ jobs:
           sed -i "s#__DISPLAY_NAME__#${{ env.DISPLAY_NAME }}#g" deploy.yaml
           sed -i "s#__OTEL_EXPORTER_OTLP_ENDPOINT__#${OTEL_EXPORTER_OTLP_ENDPOINT}#g" deploy.yaml
           sed -i "s#__TRACE_LINK_BASE_URL__#${TRACE_LINK_BASE_URL}#g" deploy.yaml
+          sed -i "s#__ENTERPRISE_LICENSE_KEY__#${PREVIEW_EE_ENTERPRISE_LICENSE_KEY}#g" deploy.yaml
 
           if [ "${ENABLE_TRACING}" = "true" ]; then
             sed -i '/^#__JAEGER_ENABLED_/d' deploy.yaml
@@ -193,6 +200,33 @@ jobs:
           args: apply -f deploy.yaml
 
       # --- Normal update path if deployment exists ---
+      - name: Ensure enterprise license env
+        if: steps.check_deploy.outcome == 'success'
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          PREVIEW_EE_ENTERPRISE_LICENSE_KEY: ${{ secrets.PREVIEW_EE_ENTERPRISE_LICENSE_KEY }}
+        run: |
+          if [ -z "${PREVIEW_EE_ENTERPRISE_LICENSE_KEY}" ]; then
+            echo "::error::Missing PREVIEW_EE_ENTERPRISE_LICENSE_KEY secret"
+            exit 1
+          fi
+
+          mkdir -p ~/.kube
+          echo "${KUBE_CONFIG}" | base64 -d > ~/.kube/config
+
+          kubectl -n ns-${{ env.NAMESPACE }} create secret generic teable-${{ env.INSTANCE_NAME }}-enterprise-license \
+            --from-literal=LICENSE_KEY="${PREVIEW_EE_ENTERPRISE_LICENSE_KEY}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl -n ns-${{ env.NAMESPACE }} set env deployment/teable-${{ env.INSTANCE_NAME }} \
+            --from=secret/teable-${{ env.INSTANCE_NAME }}-enterprise-license \
+            --prefix=BACKEND_ENTERPRISE_
+
+          kubectl -n ns-${{ env.NAMESPACE }} set env deployment/teable-${{ env.INSTANCE_NAME }} \
+            BACKEND_ENTERPRISE_LICENSE_AUTO_ACTIVATE_STRICT=true
+
+          rm -f ~/.kube/config
+
       - name: Update sandbox deployment image
         if: steps.check_deploy.outcome == 'success'
         uses: actions-hub/kubectl@master
