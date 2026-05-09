@@ -183,13 +183,39 @@ jobs:
           sed -i "s#__DISPLAY_NAME__#${{ env.DISPLAY_NAME }}#g" deploy.yaml
           sed -i "s#__OTEL_EXPORTER_OTLP_ENDPOINT__#${OTEL_EXPORTER_OTLP_ENDPOINT}#g" deploy.yaml
           sed -i "s#__TRACE_LINK_BASE_URL__#${TRACE_LINK_BASE_URL}#g" deploy.yaml
-          sed -i "s#__ENTERPRISE_LICENSE_KEY__#${PREVIEW_EE_ENTERPRISE_LICENSE_KEY}#g" deploy.yaml
 
           if [ "${ENABLE_TRACING}" = "true" ]; then
             sed -i '/^#__JAEGER_ENABLED_/d' deploy.yaml
           else
             sed -i '/^#__JAEGER_ENABLED_START__$/, /^#__JAEGER_ENABLED_END__$/d' deploy.yaml
           fi
+
+          LICENSE_SECRET=$(cat <<EOF
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: teable-${{ env.INSTANCE_NAME }}-enterprise-license
+            labels:
+              cloud.sealos.io/app-deploy-manager: teable-${{ env.INSTANCE_NAME }}
+              cloud.sealos.io/deploy-on-sealos: teable-${{ env.INSTANCE_NAME }}
+          type: Opaque
+          stringData:
+            LICENSE_KEY: ${PREVIEW_EE_ENTERPRISE_LICENSE_KEY}
+
+          ---
+          EOF
+          )
+          LICENSE_ENV=$(cat <<EOF
+                      - name: BACKEND_ENTERPRISE_LICENSE_KEY
+                        valueFrom:
+                          secretKeyRef:
+                            name: teable-${{ env.INSTANCE_NAME }}-enterprise-license
+                            key: LICENSE_KEY
+                      - name: BACKEND_ENTERPRISE_LICENSE_AUTO_ACTIVATE_STRICT
+                        value: 'true'
+          EOF
+          )
+          LICENSE_SECRET="${LICENSE_SECRET}" LICENSE_ENV="${LICENSE_ENV}" perl -0pi -e 's/__PREVIEW_EXTRA_RESOURCES__/$ENV{LICENSE_SECRET}/g; s/            #__PREVIEW_EXTRA_ENV__/$ENV{LICENSE_ENV}/g' deploy.yaml
 
       - name: Apply deploy job (fallback create)
         if: steps.check_deploy.outcome == 'failure'

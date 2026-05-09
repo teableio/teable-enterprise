@@ -176,6 +176,9 @@ jobs:
             sed -i '/^#__JAEGER_ENABLED_START__$/, /^#__JAEGER_ENABLED_END__$/d' deploy.yaml
           fi
 
+          sed -i '/__PREVIEW_EXTRA_RESOURCES__/d' deploy.yaml
+          sed -i '/#__PREVIEW_EXTRA_ENV__/d' deploy.yaml
+
       - name: Apply deploy job
         uses: actions-hub/kubectl@master
         env:
