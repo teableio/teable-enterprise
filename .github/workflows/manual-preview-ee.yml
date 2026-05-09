@@ -207,7 +207,7 @@ jobs:
                         value: 'true'
           EOF
           )
-          LICENSE_SECRET="${LICENSE_SECRET}" LICENSE_ENV="${LICENSE_ENV}" perl -0pi -e 's/__PREVIEW_EXTRA_RESOURCES__/$ENV{LICENSE_SECRET}/g; s/            #__PREVIEW_EXTRA_ENV__/$ENV{LICENSE_ENV}/g' deploy.yaml
+          LICENSE_SECRET="${LICENSE_SECRET}" LICENSE_ENV="${LICENSE_ENV}" perl -0pi -e 's/# __PREVIEW_EXTRA_RESOURCES__/$ENV{LICENSE_SECRET}/g; s/            #__PREVIEW_EXTRA_ENV__/$ENV{LICENSE_ENV}/g' deploy.yaml
 
       - name: Apply deploy job
         uses: actions-hub/kubectl@master
