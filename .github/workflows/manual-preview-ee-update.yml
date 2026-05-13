@@ -159,9 +159,14 @@ jobs:
           IMAGE_TAG: ${{ needs.build-push.outputs.main_commit_sha }}
           ENABLE_TRACING: ${{ steps.labels.outputs.enable_tracing }}
           PREVIEW_EE_ENTERPRISE_LICENSE_KEY: ${{ secrets.PREVIEW_EE_ENTERPRISE_LICENSE_KEY }}
+          PREVIEW_CONFIG_SOURCE: ${{ secrets.PREVIEW_CONFIG_SOURCE }}
         run: |
           if [ -z "${PREVIEW_EE_ENTERPRISE_LICENSE_KEY}" ]; then
             echo "::error::Missing PREVIEW_EE_ENTERPRISE_LICENSE_KEY secret"
+            exit 1
+          fi
+          if [ -z "${PREVIEW_CONFIG_SOURCE}" ]; then
+            echo "::error::Missing PREVIEW_CONFIG_SOURCE secret"
             exit 1
           fi
 
@@ -215,7 +220,34 @@ jobs:
                         value: 'true'
           EOF
           )
-          LICENSE_SECRET="${LICENSE_SECRET}" LICENSE_ENV="${LICENSE_ENV}" perl -0pi -e 's/# __PREVIEW_EXTRA_RESOURCES__/$ENV{LICENSE_SECRET}/g; s/            #__PREVIEW_EXTRA_ENV__/$ENV{LICENSE_ENV}/g' deploy.yaml
+          PREVIEW_CONFIG_SOURCE_B64=$(printf '%s' "${PREVIEW_CONFIG_SOURCE}" | base64 -w0)
+          PREVIEW_CONFIG_SECRET=$(cat <<EOF
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: teable-${{ env.INSTANCE_NAME }}-preview-config
+            labels:
+              cloud.sealos.io/app-deploy-manager: teable-${{ env.INSTANCE_NAME }}
+              cloud.sealos.io/deploy-on-sealos: teable-${{ env.INSTANCE_NAME }}
+          type: Opaque
+          data:
+            PREVIEW_CONFIG_SOURCE: ${PREVIEW_CONFIG_SOURCE_B64}
+
+          ---
+          EOF
+          )
+          PREVIEW_CONFIG_ENV=$(cat <<EOF
+                      - name: PREVIEW_CONFIG_SOURCE
+                        valueFrom:
+                          secretKeyRef:
+                            name: teable-${{ env.INSTANCE_NAME }}-preview-config
+                            key: PREVIEW_CONFIG_SOURCE
+          EOF
+          )
+          PREVIEW_EXTRA_RESOURCES="${LICENSE_SECRET}${PREVIEW_CONFIG_SECRET}"
+          PREVIEW_EXTRA_ENV="${LICENSE_ENV}
+          ${PREVIEW_CONFIG_ENV}"
+          PREVIEW_EXTRA_RESOURCES="${PREVIEW_EXTRA_RESOURCES}" PREVIEW_EXTRA_ENV="${PREVIEW_EXTRA_ENV}" perl -0pi -e 's/# __PREVIEW_EXTRA_RESOURCES__/$ENV{PREVIEW_EXTRA_RESOURCES}/g; s/            #__PREVIEW_EXTRA_ENV__/$ENV{PREVIEW_EXTRA_ENV}/g' deploy.yaml
 
       - name: Apply deploy job (fallback create)
         if: steps.check_deploy.outcome == 'failure'
@@ -231,9 +263,14 @@ jobs:
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
           PREVIEW_EE_ENTERPRISE_LICENSE_KEY: ${{ secrets.PREVIEW_EE_ENTERPRISE_LICENSE_KEY }}
+          PREVIEW_CONFIG_SOURCE: ${{ secrets.PREVIEW_CONFIG_SOURCE }}
         run: |
           if [ -z "${PREVIEW_EE_ENTERPRISE_LICENSE_KEY}" ]; then
             echo "::error::Missing PREVIEW_EE_ENTERPRISE_LICENSE_KEY secret"
+            exit 1
+          fi
+          if [ -z "${PREVIEW_CONFIG_SOURCE}" ]; then
+            echo "::error::Missing PREVIEW_CONFIG_SOURCE secret"
             exit 1
           fi
 
@@ -250,6 +287,13 @@ jobs:
 
           kubectl -n ns-${{ env.NAMESPACE }} set env deployment/teable-${{ env.INSTANCE_NAME }} \
             BACKEND_ENTERPRISE_LICENSE_AUTO_ACTIVATE_STRICT=true
+
+          kubectl -n ns-${{ env.NAMESPACE }} create secret generic teable-${{ env.INSTANCE_NAME }}-preview-config \
+            --from-literal=PREVIEW_CONFIG_SOURCE="${PREVIEW_CONFIG_SOURCE}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl -n ns-${{ env.NAMESPACE }} set env deployment/teable-${{ env.INSTANCE_NAME }} \
+            --from=secret/teable-${{ env.INSTANCE_NAME }}-preview-config
 
           rm -f ~/.kube/config
 

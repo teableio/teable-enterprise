@@ -151,9 +151,14 @@ jobs:
           IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}
           ENABLE_TRACING: ${{ steps.labels.outputs.enable_tracing }}
           PREVIEW_EE_ENTERPRISE_LICENSE_KEY: ${{ secrets.PREVIEW_EE_ENTERPRISE_LICENSE_KEY }}
+          PREVIEW_CONFIG_SOURCE: ${{ secrets.PREVIEW_CONFIG_SOURCE }}
         run: |
           if [ -z "${PREVIEW_EE_ENTERPRISE_LICENSE_KEY}" ]; then
             echo "::error::Missing PREVIEW_EE_ENTERPRISE_LICENSE_KEY secret"
+            exit 1
+          fi
+          if [ -z "${PREVIEW_CONFIG_SOURCE}" ]; then
+            echo "::error::Missing PREVIEW_CONFIG_SOURCE secret"
             exit 1
           fi
 
@@ -207,7 +212,34 @@ jobs:
                         value: 'true'
           EOF
           )
-          LICENSE_SECRET="${LICENSE_SECRET}" LICENSE_ENV="${LICENSE_ENV}" perl -0pi -e 's/# __PREVIEW_EXTRA_RESOURCES__/$ENV{LICENSE_SECRET}/g; s/            #__PREVIEW_EXTRA_ENV__/$ENV{LICENSE_ENV}/g' deploy.yaml
+          PREVIEW_CONFIG_SOURCE_B64=$(printf '%s' "${PREVIEW_CONFIG_SOURCE}" | base64 -w0)
+          PREVIEW_CONFIG_SECRET=$(cat <<EOF
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: teable-${{ env.INSTANCE_NAME }}-preview-config
+            labels:
+              cloud.sealos.io/app-deploy-manager: teable-${{ env.INSTANCE_NAME }}
+              cloud.sealos.io/deploy-on-sealos: teable-${{ env.INSTANCE_NAME }}
+          type: Opaque
+          data:
+            PREVIEW_CONFIG_SOURCE: ${PREVIEW_CONFIG_SOURCE_B64}
+
+          ---
+          EOF
+          )
+          PREVIEW_CONFIG_ENV=$(cat <<EOF
+                      - name: PREVIEW_CONFIG_SOURCE
+                        valueFrom:
+                          secretKeyRef:
+                            name: teable-${{ env.INSTANCE_NAME }}-preview-config
+                            key: PREVIEW_CONFIG_SOURCE
+          EOF
+          )
+          PREVIEW_EXTRA_RESOURCES="${LICENSE_SECRET}${PREVIEW_CONFIG_SECRET}"
+          PREVIEW_EXTRA_ENV="${LICENSE_ENV}
+          ${PREVIEW_CONFIG_ENV}"
+          PREVIEW_EXTRA_RESOURCES="${PREVIEW_EXTRA_RESOURCES}" PREVIEW_EXTRA_ENV="${PREVIEW_EXTRA_ENV}" perl -0pi -e 's/# __PREVIEW_EXTRA_RESOURCES__/$ENV{PREVIEW_EXTRA_RESOURCES}/g; s/            #__PREVIEW_EXTRA_ENV__/$ENV{PREVIEW_EXTRA_ENV}/g' deploy.yaml
 
       - name: Apply deploy job
         uses: actions-hub/kubectl@master

@@ -150,7 +150,13 @@ jobs:
           SANDBOX_IMAGE_REPOSITORY: registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-cloud-preview
           IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}
           ENABLE_TRACING: ${{ steps.labels.outputs.enable_tracing }}
+          PREVIEW_CONFIG_SOURCE: ${{ secrets.PREVIEW_CONFIG_SOURCE }}
         run: |
+          if [ -z "${PREVIEW_CONFIG_SOURCE}" ]; then
+            echo "::error::Missing PREVIEW_CONFIG_SOURCE secret"
+            exit 1
+          fi
+
           if [ "${ENABLE_TRACING}" = "true" ]; then
             OTEL_EXPORTER_OTLP_ENDPOINT="http://teable-${{ env.INSTANCE_NAME }}-jaeger:4318/v1/traces"
             TRACE_LINK_BASE_URL="https://jaeger-${{ env.INSTANCE_DOMAIN }}.sealoshzh.site"
@@ -176,8 +182,31 @@ jobs:
             sed -i '/^#__JAEGER_ENABLED_START__$/, /^#__JAEGER_ENABLED_END__$/d' deploy.yaml
           fi
 
-          sed -i '/__PREVIEW_EXTRA_RESOURCES__/d' deploy.yaml
-          sed -i '/#__PREVIEW_EXTRA_ENV__/d' deploy.yaml
+          PREVIEW_CONFIG_SOURCE_B64=$(printf '%s' "${PREVIEW_CONFIG_SOURCE}" | base64 -w0)
+          PREVIEW_CONFIG_SECRET=$(cat <<EOF
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: teable-${{ env.INSTANCE_NAME }}-preview-config
+            labels:
+              cloud.sealos.io/app-deploy-manager: teable-${{ env.INSTANCE_NAME }}
+              cloud.sealos.io/deploy-on-sealos: teable-${{ env.INSTANCE_NAME }}
+          type: Opaque
+          data:
+            PREVIEW_CONFIG_SOURCE: ${PREVIEW_CONFIG_SOURCE_B64}
+
+          ---
+          EOF
+          )
+          PREVIEW_CONFIG_ENV=$(cat <<EOF
+                      - name: PREVIEW_CONFIG_SOURCE
+                        valueFrom:
+                          secretKeyRef:
+                            name: teable-${{ env.INSTANCE_NAME }}-preview-config
+                            key: PREVIEW_CONFIG_SOURCE
+          EOF
+          )
+          PREVIEW_CONFIG_SECRET="${PREVIEW_CONFIG_SECRET}" PREVIEW_CONFIG_ENV="${PREVIEW_CONFIG_ENV}" perl -0pi -e 's/# __PREVIEW_EXTRA_RESOURCES__/$ENV{PREVIEW_CONFIG_SECRET}/g; s/            #__PREVIEW_EXTRA_ENV__/$ENV{PREVIEW_CONFIG_ENV}/g' deploy.yaml
 
       - name: Apply deploy job
         uses: actions-hub/kubectl@master
