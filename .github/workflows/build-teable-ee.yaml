@@ -129,12 +129,36 @@ jobs:
         with:
           node-version: 22.18.0
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: Prepare generated Docker contexts
         if: matrix.file == 'Dockerfile'
         run: node ./scripts/generate-docker-contexts.mjs
+
+      - name: Free runner disk space for app build
+        if: matrix.file == 'Dockerfile'
+        run: |
+          set -euxo pipefail
+
+          echo "Disk before cleanup:"
+          df -h /
+
+          sudo rm -rf \
+            /opt/ghc \
+            /opt/hostedtoolcache \
+            /usr/local/.ghcup \
+            /usr/local/lib/android \
+            /usr/local/share/boost \
+            /usr/local/share/chromium \
+            /usr/share/dotnet \
+            /usr/share/swift
+
+          sudo apt-get clean
+          sudo docker system prune -af --volumes || true
+
+          echo "Disk after cleanup:"
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Build and push by digest
         id: build
