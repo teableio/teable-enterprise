@@ -56,8 +56,8 @@ jobs:
           INPUT_RELEASE_TIMESTAMP: ${{ github.event.client_payload.release_timestamp || inputs.release_timestamp }}
           INPUT_RELEASE_SEQUENCE: ${{ github.event.client_payload.release_sequence || inputs.release_sequence }}
         run: |
-          TARGET_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud"}]}'
-          MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"}]}'
+          TARGET_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud"},{"target":"sandbox-agent","file":"Dockerfile.sandbox-agent","image":"teable-sandbox-agent-cloud"}]}'
+          MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox-agent","file":"Dockerfile.sandbox-agent","image":"teable-sandbox-agent-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"}]}'
 
           if [ -n "$INPUT_RELEASE_ID" ]; then
             RELEASE_ID="$INPUT_RELEASE_ID"
@@ -253,7 +253,7 @@ jobs:
 
           ECR_PASSWORD="$(aws ecr get-login-password --region us-west-2)"
           IFS=',' read -ra TAG_LIST <<< "$TAGS"
-          IMAGES=("teable-cloud" "teable-sandbox-cloud")
+          IMAGES=("teable-cloud" "teable-sandbox-cloud" "teable-sandbox-agent-cloud")
 
           for image in "${IMAGES[@]}"; do
             for tag in "${TAG_LIST[@]}"; do

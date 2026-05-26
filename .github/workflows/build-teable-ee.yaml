@@ -58,8 +58,8 @@ jobs:
           INPUT_RELEASE_TIMESTAMP: ${{ github.event.client_payload.release_timestamp || inputs.release_timestamp }}
           INPUT_RELEASE_SEQUENCE: ${{ github.event.client_payload.release_sequence || inputs.release_sequence }}
         run: |
-          TARGET_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox"}]}'
-          MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"app","file":"Dockerfile","image":"teable","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"}]}'
+          TARGET_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox"},{"target":"sandbox-agent","file":"Dockerfile.sandbox-agent","image":"teable-sandbox-agent"}]}'
+          MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"app","file":"Dockerfile","image":"teable","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"},{"target":"sandbox-agent","file":"Dockerfile.sandbox-agent","image":"teable-sandbox-agent","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox-agent","file":"Dockerfile.sandbox-agent","image":"teable-sandbox-agent","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"}]}'
 
           if [ -n "$INPUT_RELEASE_ID" ]; then
             RELEASE_ID="$INPUT_RELEASE_ID"
@@ -276,7 +276,7 @@ jobs:
           set -euo pipefail
 
           IFS=',' read -ra TAG_LIST <<< "$TAGS"
-          IMAGES=("teable" "teable-ee" "teable-sandbox" "teable-sandbox-ee")
+          IMAGES=("teable" "teable-ee" "teable-sandbox" "teable-sandbox-ee" "teable-sandbox-agent" "teable-sandbox-agent-ee")
 
           for image in "${IMAGES[@]}"; do
             for tag in "${TAG_LIST[@]}"; do
