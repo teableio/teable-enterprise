@@ -172,6 +172,16 @@ jobs:
         with:
           args: annotate deployment/teable-cloud originImageName="registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud:${{ inputs.image_tag }}" --overwrite
 
+      - name: Ensure BYODB migration worker deployment
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          APP_DEPLOYMENT: teable-cloud
+          APP_CONTAINER: teable-cloud
+          WORKER_DEPLOYMENT: teable-cloud-byodb-migration-worker
+          WORKER_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud:${{ inputs.image_tag }}
+          WORKER_OTEL_SERVICE_NAME: teable-cloud-byodb-migration-worker
+        run: .github/scripts/ensure-byodb-migration-worker.sh
+
       - name: Rollout status
         uses: actions-hub/kubectl@master
         env:
