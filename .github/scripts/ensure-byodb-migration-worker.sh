@@ -79,6 +79,23 @@ jq \
   def without_worker_env:
     map(select(.name != "BYODB_SPACE_DATA_DB_MIGRATION_WORKER_ID" and .name != "OTEL_SERVICE_NAME"));
 
+  def non_root_id($value):
+    if ($value // 0) == 0 then 1001 else $value end;
+
+  def worker_security_context:
+    (.securityContext // {}) as $securityContext
+    | $securityContext + {
+        allowPrivilegeEscalation: false,
+        privileged: false,
+        runAsNonRoot: true,
+        runAsUser: non_root_id($securityContext.runAsUser),
+        runAsGroup: non_root_id($securityContext.runAsGroup),
+        seccompProfile: (($securityContext.seccompProfile // {}) + { type: "RuntimeDefault" }),
+        capabilities: ((($securityContext.capabilities // {}) | del(.add)) + {
+          drop: ((($securityContext.capabilities.drop // []) + ["ALL"]) | unique)
+        })
+      };
+
   (.spec.template.spec.containers[] | select(.name == $appContainer)) as $appContainerSpec
   | {
       apiVersion: "apps/v1",
@@ -123,6 +140,7 @@ jq \
                   | .args = [$workerArg]
                   | del(.command, .ports, .livenessProbe, .readinessProbe, .startupProbe, .lifecycle)
                   | .env = (((.env // []) | without_worker_env) + worker_env)
+                  | .securityContext = worker_security_context
                 )
               ]
           )
