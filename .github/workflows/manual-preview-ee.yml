@@ -208,7 +208,7 @@ jobs:
                           secretKeyRef:
                             name: teable-${{ env.INSTANCE_NAME }}-enterprise-license
                             key: LICENSE_KEY
-                      - name: BACKEND_ENTERPRISE_LICENSE_AUTO_ACTIVATE_STRICT
+                      - name: BACKEND_ENTERPRISE_LICENSE_AUTO_RESET_INSTANCE_ID
                         value: 'true'
           EOF
           )
