@@ -32,6 +32,8 @@ jobs:
             file: Dockerfile
           - image: teable-sandbox-ee-preview
             file: Dockerfile.sandbox
+          - image: teable-sandbox-agent-ee-preview
+            file: Dockerfile.sandbox-agent
     steps:
       - name: Record start time
         id: start_time
