@@ -1,0 +1,90 @@
+name: Manual Preview BYODB PVC Resize
+
+on:
+  workflow_dispatch:
+    inputs:
+      size:
+        description: 'New storage request for ns-38puz7wo/data-byodb-2-postgresql-0, for example 30Gi'
+        required: true
+      confirm:
+        description: 'Type resize-byodb-2-pvc to confirm this storage operation'
+        required: true
+
+jobs:
+  resize:
+    name: Resize PVC
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+
+          if [ "${{ inputs.confirm }}" != "resize-byodb-2-pvc" ]; then
+            echo "::error::confirm must be exactly resize-byodb-2-pvc"
+            exit 1
+          fi
+
+          if ! printf '%s' "${{ inputs.size }}" | grep -Eq '^[1-9][0-9]*(Gi|Ti)$'; then
+            echo "::error::size must be a whole Gi or Ti quantity, for example 30Gi"
+            exit 1
+          fi
+
+      - name: Resize PVC and report status
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          NAMESPACE: ns-38puz7wo
+          PVC_NAME: data-byodb-2-postgresql-0
+          SIZE: ${{ inputs.size }}
+          POD_NAME: byodb-2-postgresql-0
+          MOUNT_PATH: /home/postgres/pgdata
+        run: |
+          set -euo pipefail
+
+          mkdir -p ~/.kube
+          echo "${KUBE_CONFIG}" | base64 -d > ~/.kube/config
+
+          echo "Before resize:"
+          kubectl -n "${NAMESPACE}" get pvc "${PVC_NAME}" -o wide
+          kubectl -n "${NAMESPACE}" get pvc "${PVC_NAME}" -o jsonpath='{.spec.resources.requests.storage}{" requested, "}{.status.capacity.storage}{" capacity, phase="}{.status.phase}{"\n"}'
+
+          kubectl -n "${NAMESPACE}" patch pvc "${PVC_NAME}" \
+            --type=merge \
+            -p "{\"spec\":{\"resources\":{\"requests\":{\"storage\":\"${SIZE}\"}}}}"
+
+          echo "Waiting for PVC request to become ${SIZE}:"
+          for i in $(seq 1 60); do
+            requested="$(kubectl -n "${NAMESPACE}" get pvc "${PVC_NAME}" -o jsonpath='{.spec.resources.requests.storage}')"
+            capacity="$(kubectl -n "${NAMESPACE}" get pvc "${PVC_NAME}" -o jsonpath='{.status.capacity.storage}')"
+            echo "attempt=${i} requested=${requested} capacity=${capacity}"
+            if [ "${requested}" = "${SIZE}" ]; then
+              break
+            fi
+            sleep 10
+          done
+
+          echo "After resize request:"
+          kubectl -n "${NAMESPACE}" get pvc "${PVC_NAME}" -o wide
+          kubectl -n "${NAMESPACE}" describe pvc "${PVC_NAME}"
+
+          if [ -n "${POD_NAME}" ]; then
+            echo "Pod filesystem before optional wait:"
+            kubectl -n "${NAMESPACE}" exec "${POD_NAME}" -- df -h "${MOUNT_PATH}" || true
+
+            echo "Waiting for pod filesystem capacity to reflect the new size:"
+            for i in $(seq 1 60); do
+              df_output="$(kubectl -n "${NAMESPACE}" exec "${POD_NAME}" -- df -B1 "${MOUNT_PATH}" 2>/dev/null || true)"
+              echo "${df_output}"
+              available_bytes="$(printf '%s\n' "${df_output}" | awk 'NR==2 {print $4}')"
+              size_bytes="$(printf '%s\n' "${df_output}" | awk 'NR==2 {print $2}')"
+              if [ -n "${size_bytes}" ] && [ "${size_bytes}" -ge 25000000000 ]; then
+                break
+              fi
+              sleep 10
+            done
+
+            echo "Pod filesystem after wait:"
+            kubectl -n "${NAMESPACE}" exec "${POD_NAME}" -- df -h "${MOUNT_PATH}"
+            kubectl -n "${NAMESPACE}" exec "${POD_NAME}" -- df -B1 "${MOUNT_PATH}"
+          fi
+
+          rm -f ~/.kube/config
