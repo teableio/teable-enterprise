@@ -233,6 +233,18 @@ jobs:
           cluster: teable
           wait-for-service-stability: true
 
+      - name: Ensure BYODB migration worker ECS service
+        env:
+          AWS_REGION: us-west-2
+          ECS_CLUSTER: teable
+          APP_SERVICE: teable-service-1
+          APP_CONTAINER: teable
+          APP_TASK_DEFINITION_FILE: task-definition-skip-migrate.json
+          WORKER_TASK_FAMILY: teable-byodb-migration-worker
+          WORKER_SERVICE: teable-byodb-migration-worker
+          WORKER_OTEL_SERVICE_NAME: teable-ai-byodb-migration-worker
+        run: .github/scripts/ensure-byodb-migration-worker-ecs.sh
+
   promote-latest:
     name: Promote Release Tag to Latest
     needs: [prepare, deploy-sandbox, deploy-app]
