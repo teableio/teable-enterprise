@@ -221,7 +221,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: /tmp/digests/${{ matrix.target }}
-          pattern: digests-${{ matrix.target }}-*
+          pattern: digests-${{ matrix.target }}-linux-*
           merge-multiple: true
 
       - name: Create canonical and EE alias manifests
