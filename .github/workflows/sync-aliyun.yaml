@@ -73,7 +73,7 @@ jobs:
           FAILED=0
 
           if [ "${{ inputs.edition }}" = "cloud" ]; then
-            IMAGES=("teable-cloud" "teable-sandbox-cloud")
+            IMAGES=("teable-cloud" "teable-sandbox-cloud" "teable-sandbox-agent-cloud")
             for image in "${IMAGES[@]}"; do
               for tag in "${TAGS[@]}"; do
                 [ -n "$tag" ] || continue
@@ -85,7 +85,7 @@ jobs:
               done
             done
           elif [ "${{ inputs.edition }}" = "ee" ]; then
-            IMAGES=("teable" "teable-sandbox")
+            IMAGES=("teable" "teable-sandbox" "teable-sandbox-agent")
             SUFFIXES=("" "-ee")
 
             for image in "${IMAGES[@]}"; do
