@@ -275,8 +275,16 @@ jobs:
       tags: "latest,${{ needs.prepare-release.outputs.source_sha }},${{ needs.prepare-release.outputs.release_id }}"
     secrets: inherit
 
+  preheat-sandbox-agent:
+    needs: [prepare-release, track-start, build-push, sync-ecr, sync-aliyun]
+    if: needs.build-push.result == 'success' && needs.sync-ecr.result == 'success' && needs.sync-aliyun.result == 'success'
+    uses: ./.github/workflows/preheat-sandbox-agent-cloud.yaml
+    with:
+      image_tag: ${{ needs.prepare-release.outputs.release_id }}
+    secrets: inherit
+
   determine-status:
-    needs: [track-start, build-push, sync-ecr, sync-aliyun]
+    needs: [track-start, build-push, sync-ecr, sync-aliyun, preheat-sandbox-agent]
     if: always()
     runs-on: ubuntu-latest
     outputs:
@@ -285,16 +293,16 @@ jobs:
       - name: Determine final status
         id: status
         run: |
-          if [ "${{ needs.build-push.result }}" == "cancelled" ] || [ "${{ needs.sync-ecr.result }}" == "cancelled" ] || [ "${{ needs.sync-aliyun.result }}" == "cancelled" ]; then
+          if [ "${{ needs.build-push.result }}" == "cancelled" ] || [ "${{ needs.sync-ecr.result }}" == "cancelled" ] || [ "${{ needs.sync-aliyun.result }}" == "cancelled" ] || [ "${{ needs.preheat-sandbox-agent.result }}" == "cancelled" ]; then
             echo "status=Cancelled" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.sync-ecr.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ]; then
+          elif [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.sync-ecr.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ] && [ "${{ needs.preheat-sandbox-agent.result }}" == "success" ]; then
             echo "status=Released" >> $GITHUB_OUTPUT
           else
             echo "status=Fail" >> $GITHUB_OUTPUT
           fi
 
   track-complete:
-    needs: [track-start, build-push, sync-ecr, sync-aliyun, determine-status]
+    needs: [track-start, build-push, sync-ecr, sync-aliyun, preheat-sandbox-agent, determine-status]
     if: always()
     uses: ./.github/workflows/track-build-teable.yaml
     with:
