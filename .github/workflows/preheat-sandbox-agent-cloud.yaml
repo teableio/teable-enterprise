@@ -1,0 +1,74 @@
+name: Preheat sandbox agent cloud image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Release image tag (e.g., release.2026-06-11T01-53-35Z.1879)'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      image_tag:
+        required: true
+        type: string
+    secrets:
+      INFRA_TEABLE_AI_PREHEAT_TOKEN:
+        required: true
+      INFRA_TEABLE_CN_PREHEAT_TOKEN:
+        required: true
+
+jobs:
+  preheat:
+    name: Preheat sandbox agent image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Preheat teable.ai sandbox agent image
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          PREHEAT_TOKEN: ${{ secrets.INFRA_TEABLE_AI_PREHEAT_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          image="ghcr.io/teableio/teable-sandbox-agent-cloud:${IMAGE_TAG}"
+          payload="$(jq -n --arg image "$image" '{image: $image}')"
+          http_code="$(curl -sS -w "%{http_code}" -o /tmp/preheat-ai-response.json \
+            -X POST 'https://infra.teable.ai/api/image-preheats' \
+            -H "Authorization: Bearer ${PREHEAT_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            --data "$payload")"
+
+          response="$(cat /tmp/preheat-ai-response.json)"
+          echo "Preheat image: ${image}"
+          echo "HTTP status: ${http_code}"
+          echo "Response: ${response}"
+
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "::error::teable.ai image preheat failed with HTTP ${http_code}"
+            exit 1
+          fi
+
+      - name: Preheat teable.cn sandbox agent image
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          PREHEAT_TOKEN: ${{ secrets.INFRA_TEABLE_CN_PREHEAT_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          image="registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-agent-cloud:${IMAGE_TAG}"
+          payload="$(jq -n --arg image "$image" '{image: $image}')"
+          http_code="$(curl -sS -w "%{http_code}" -o /tmp/preheat-cn-response.json \
+            -X POST 'https://infra.teable.cn/api/image-preheats' \
+            -H "Authorization: Bearer ${PREHEAT_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            --data "$payload")"
+
+          response="$(cat /tmp/preheat-cn-response.json)"
+          echo "Preheat image: ${image}"
+          echo "HTTP status: ${http_code}"
+          echo "Response: ${response}"
+
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "::error::teable.cn image preheat failed with HTTP ${http_code}"
+            exit 1
+          fi
