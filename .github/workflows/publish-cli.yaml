@@ -1,0 +1,197 @@
+name: Publish @teable/cli
+
+on:
+  repository_dispatch:
+    types: [publish-cli]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Git SHA from teable-ee to checkout'
+        required: true
+        type: string
+      npm_tag:
+        description: 'npm dist-tag (latest or beta)'
+        required: false
+        default: 'latest'
+        type: string
+      dry_run:
+        description: 'Skip actual publish'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: publish-cli
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve inputs
+        id: inputs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_SOURCE_REF: ${{ github.event.client_payload.source_ref }}
+          DISPATCH_NPM_TAG: ${{ github.event.client_payload.npm_tag }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+          INPUT_NPM_TAG: ${{ inputs.npm_tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "repository_dispatch" ]; then
+            SOURCE_REF="$DISPATCH_SOURCE_REF"
+            NPM_TAG="$DISPATCH_NPM_TAG"
+            DRY_RUN="false"
+          else
+            SOURCE_REF="$INPUT_SOURCE_REF"
+            NPM_TAG="$INPUT_NPM_TAG"
+            DRY_RUN="$INPUT_DRY_RUN"
+          fi
+
+          if ! [[ "$SOURCE_REF" =~ ^[A-Za-z0-9._/+-]+$ ]] || [[ "$SOURCE_REF" == -* ]] || [[ "$SOURCE_REF" == *..* ]]; then
+            echo "::error::Invalid source_ref"
+            exit 1
+          fi
+
+          if [ -n "$NPM_TAG" ] && [ "$NPM_TAG" != "null" ] && ! [[ "$NPM_TAG" =~ ^[A-Za-z][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::Invalid npm_tag"
+            exit 1
+          fi
+
+          if [ "$DRY_RUN" != "true" ] && [ "$DRY_RUN" != "false" ]; then
+            echo "::error::Invalid dry_run"
+            exit 1
+          fi
+
+          printf 'source_ref=%s\n' "$SOURCE_REF" >> "$GITHUB_OUTPUT"
+          printf 'npm_tag=%s\n' "$NPM_TAG" >> "$GITHUB_OUTPUT"
+          printf 'dry_run=%s\n' "$DRY_RUN" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ steps.inputs.outputs.source_ref }}
+          token: ${{ secrets.PACKAGES_KEY }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+
+          corepack enable
+          npm install -g npm@^11.5.1
+          pnpm install --frozen-lockfile
+
+      - name: Read version
+        id: version
+        env:
+          REQUESTED_NPM_TAG: ${{ steps.inputs.outputs.npm_tag }}
+        run: |
+          set -euo pipefail
+
+          VERSION=$(jq -r '.version' packages/ai-tools-cli/package.json)
+
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid package version"
+            exit 1
+          fi
+
+          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+
+          NPM_TAG="$REQUESTED_NPM_TAG"
+          if [ -z "$NPM_TAG" ] || [ "$NPM_TAG" = "null" ]; then
+            if echo "$VERSION" | grep -q '-'; then
+              NPM_TAG="beta"
+            else
+              NPM_TAG="latest"
+            fi
+          fi
+          printf 'npm_tag=%s\n' "$NPM_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check if already published
+        id: guard
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if npm view "@teable/cli@$VERSION" version > /dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Version $VERSION already published, skipping"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build CLI
+        if: steps.guard.outputs.skip != 'true'
+        run: pnpm --filter @teable/cli build
+
+      - name: Verify artifacts
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+
+          test -f packages/ai-tools-cli/dist/index.js || { echo "::error::dist/index.js not found"; exit 1; }
+          test -f packages/ai-tools-cli/bin/teable.js || { echo "::error::bin/teable.js not found"; exit 1; }
+
+      - name: Publish
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          NPM_TAG: ${{ steps.version.outputs.npm_tag }}
+          DRY_RUN: ${{ steps.inputs.outputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          cd packages/ai-tools-cli
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "::notice::Dry run — would publish @teable/cli@$VERSION with --tag $NPM_TAG"
+            npm publish --tag "$NPM_TAG" --dry-run
+          else
+            npm publish --tag "$NPM_TAG" --provenance
+          fi
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          NPM_TAG: ${{ steps.version.outputs.npm_tag }}
+          SKIP: ${{ steps.guard.outputs.skip }}
+          DRY_RUN: ${{ steps.inputs.outputs.dry_run }}
+          SOURCE_REF: ${{ steps.inputs.outputs.source_ref }}
+        run: |
+          set -euo pipefail
+
+          if [ "$SKIP" = "true" ]; then
+            STATUS="⏭️ Skipped (already published)"
+          elif [ "$DRY_RUN" = "true" ]; then
+            STATUS="🧪 Dry run (not published)"
+          else
+            STATUS="✅ Published"
+          fi
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## @teable/cli publish
+
+          | Field | Value |
+          |-------|-------|
+          | Version | \`$VERSION\` |
+          | Tag | \`$NPM_TAG\` |
+          | Status | $STATUS |
+          | Source | \`$SOURCE_REF\` |
+          EOF
