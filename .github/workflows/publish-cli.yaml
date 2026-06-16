@@ -150,6 +150,14 @@ jobs:
           test -f packages/ai-tools-cli/dist/index.js || { echo "::error::dist/index.js not found"; exit 1; }
           test -f packages/ai-tools-cli/bin/teable.js || { echo "::error::bin/teable.js not found"; exit 1; }
 
+      - name: Patch repository URL for provenance
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          cd packages/ai-tools-cli
+          jq '.repository.url = "git+https://github.com/teableio/teable-enterprise.git"' package.json > package.json.tmp
+          mv package.json.tmp package.json
+
       - name: Publish
         if: steps.guard.outputs.skip != 'true'
         env:
