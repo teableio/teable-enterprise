@@ -20,8 +20,6 @@ WORKER_SERVICE="${WORKER_SERVICE:-teable-byodb-migration-worker}"
 WORKER_CONTAINER="${WORKER_CONTAINER:-teable}"
 WORKER_COMMAND="${WORKER_COMMAND:-byodb-migration-worker-skip-migrate}"
 WORKER_DESIRED_COUNT="${WORKER_DESIRED_COUNT:-1}"
-WORKER_TASK_CPU="${WORKER_TASK_CPU:-512}"
-WORKER_TASK_MEMORY="${WORKER_TASK_MEMORY:-1024}"
 WORKER_OTEL_SERVICE_NAME="${WORKER_OTEL_SERVICE_NAME:-${WORKER_SERVICE}}"
 
 tmp_dir="$(mktemp -d)"
@@ -45,6 +43,11 @@ if ! jq -e --arg appContainer "${APP_CONTAINER}" \
   echo "::error::Container ${APP_CONTAINER} was not found in task definition ${APP_TASK_DEFINITION_FILE}"
   exit 1
 fi
+
+APP_TASK_CPU="$(jq -r '.cpu // empty' "${APP_TASK_DEFINITION_FILE}")"
+APP_TASK_MEMORY="$(jq -r '.memory // empty' "${APP_TASK_DEFINITION_FILE}")"
+WORKER_TASK_CPU="${WORKER_TASK_CPU:-${APP_TASK_CPU}}"
+WORKER_TASK_MEMORY="${WORKER_TASK_MEMORY:-${APP_TASK_MEMORY}}"
 
 jq \
   --arg appContainer "${APP_CONTAINER}" \
