@@ -1,0 +1,302 @@
+name: Preview Reaper
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      max_age_days:
+        description: 'Delete preview environments older than this many days'
+        required: true
+        default: '7'
+      dry_run:
+        description: 'Only list candidates without deleting resources'
+        required: true
+        type: choice
+        default: 'false'
+        options:
+          - 'false'
+          - 'true'
+      target:
+        description: 'Preview type to reap'
+        required: true
+        type: choice
+        default: all
+        options:
+          - all
+          - cloud
+          - ee
+
+concurrency:
+  group: preview-reaper
+  cancel-in-progress: false
+
+jobs:
+  reap:
+    name: Delete expired preview environments
+    runs-on: ubuntu-latest
+    env:
+      KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+      NAMESPACE: ns-38puz7wo
+      MAX_AGE_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_age_days || '7' }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+      TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.target || 'all' }}
+      PREVIEW_LABEL: cloud.sealos.io/deploy-on-sealos
+      GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+    steps:
+      - name: Reap expired previews
+        run: |
+          set -euo pipefail
+
+          if ! printf '%s' "${MAX_AGE_DAYS}" | grep -Eq '^[1-9][0-9]*$'; then
+            echo "::error::max_age_days must be a positive integer"
+            exit 1
+          fi
+
+          if [ "${DRY_RUN}" != "true" ] && [ "${DRY_RUN}" != "false" ]; then
+            echo "::error::dry_run must be true or false"
+            exit 1
+          fi
+
+          case "${TARGET}" in
+            all|cloud|ee) ;;
+            *)
+              echo "::error::target must be all, cloud, or ee"
+              exit 1
+              ;;
+          esac
+
+          mkdir -p ~/.kube
+          echo "${KUBE_CONFIG}" | base64 -d > ~/.kube/config
+          trap 'rm -f ~/.kube/config' EXIT
+
+          cutoff_epoch="$(
+            python3 - "${MAX_AGE_DAYS}" <<'PY'
+          import datetime
+          import sys
+
+          max_age_days = int(sys.argv[1])
+          cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=max_age_days)
+          print(int(cutoff.timestamp()))
+          PY
+          )"
+          now_epoch="$(date -u +%s)"
+          now_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          previews_file="$(mktemp)"
+          candidates_file="$(mktemp)"
+          resource_names_file="$(mktemp)"
+
+          iso_epoch() {
+            python3 - "$1" <<'PY'
+          import datetime
+          import sys
+
+          value = sys.argv[1].replace("Z", "+00:00")
+          print(int(datetime.datetime.fromisoformat(value).timestamp()))
+          PY
+          }
+
+          kubectl -n "${NAMESPACE}" get deployments \
+            -l "${PREVIEW_LABEL}" \
+            -o json |
+            jq -r \
+              --arg target "${TARGET}" \
+              --arg previewLabel "${PREVIEW_LABEL}" '
+                .items[]
+                | .metadata as $metadata
+                | ($metadata.labels[$previewLabel] // "") as $instance
+                | select($instance | test("^teable-pr-(cloud|ee)-[0-9]+$"))
+                | select($metadata.name == $instance)
+                | ($instance | capture("^teable-pr-(?<kind>cloud|ee)-(?<pr>[0-9]+)$")) as $preview
+                | select($target == "all" or $target == $preview.kind)
+                | [
+                    $instance,
+                    $preview.kind,
+                    $preview.pr,
+                    $metadata.creationTimestamp
+                  ]
+                | @tsv
+              ' > "${previews_file}"
+
+          {
+            echo "### Preview Reaper"
+            echo ""
+            echo "- Namespace: \`${NAMESPACE}\`"
+            echo "- Max inactive age: \`${MAX_AGE_DAYS}\` days"
+            echo "- Target: \`${TARGET}\`"
+            echo "- Dry run: \`${DRY_RUN}\`"
+            echo "- Checked at: \`${now_utc}\`"
+            echo ""
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [ ! -s "${previews_file}" ]; then
+            echo "No preview environments found."
+            echo "No preview environments found." >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          echo "Found preview environments:"
+          printf '%-28s %-7s %-8s %-25s\n' "instance" "type" "pr" "env_created_at"
+          while IFS=$'\t' read -r instance kind pr_number env_created_at; do
+            printf '%-28s %-7s %-8s %-25s\n' "${instance}" "${kind}" "#${pr_number}" "${env_created_at}"
+          done < "${previews_file}"
+
+          while IFS=$'\t' read -r instance kind pr_number env_created_at; do
+            pr_json="$(gh api "repos/teableio/teable-ee/pulls/${pr_number}" 2>/tmp/preview-reaper-gh-error || true)"
+
+            if [ -z "${pr_json}" ]; then
+              echo "::warning::skipping ${instance}: failed to fetch teable-ee PR #${pr_number}: $(cat /tmp/preview-reaper-gh-error)"
+              continue
+            fi
+
+            pr_state="$(printf '%s' "${pr_json}" | jq -r '.state')"
+            pr_created_at="$(printf '%s' "${pr_json}" | jq -r '.created_at')"
+            pr_updated_at="$(printf '%s' "${pr_json}" | jq -r '.updated_at')"
+            pr_url="$(printf '%s' "${pr_json}" | jq -r '.html_url')"
+            pr_title="$(printf '%s' "${pr_json}" | jq -r '.title')"
+
+            updated_epoch="$(iso_epoch "${pr_updated_at}")"
+            inactive_days="$(( (now_epoch - updated_epoch) / 86400 ))"
+            reason=""
+
+            if [ "${pr_state}" != "open" ]; then
+              reason="pr_${pr_state}"
+            elif [ "${updated_epoch}" -le "${cutoff_epoch}" ]; then
+              reason="open_pr_inactive_${inactive_days}d"
+            fi
+
+            if [ -z "${reason}" ]; then
+              echo "Keeping ${instance}: PR #${pr_number} is open and active (updated_at=${pr_updated_at}, inactive_days=${inactive_days})"
+              continue
+            fi
+
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "${instance}" \
+              "${kind}" \
+              "${pr_number}" \
+              "${env_created_at}" \
+              "${pr_state}" \
+              "${pr_created_at}" \
+              "${pr_updated_at}" \
+              "${inactive_days}" \
+              "${reason}" >> "${candidates_file}"
+
+            echo "Candidate ${instance}: PR #${pr_number} (${pr_state}) ${reason} - ${pr_title} (${pr_url})"
+          done < "${previews_file}"
+
+          if [ ! -s "${candidates_file}" ]; then
+            echo "No expired preview environments found."
+            echo "No expired preview environments found." >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          echo "Expired preview environments:"
+          printf '%-28s %-7s %-8s %-8s %-25s %-25s %-14s %s\n' "instance" "type" "pr" "state" "env_created_at" "pr_updated_at" "inactive_days" "reason"
+          while IFS=$'\t' read -r instance kind pr_number env_created_at pr_state pr_created_at pr_updated_at inactive_days reason; do
+            printf '%-28s %-7s %-8s %-8s %-25s %-25s %-14s %s\n' \
+              "${instance}" \
+              "${kind}" \
+              "#${pr_number}" \
+              "${pr_state}" \
+              "${env_created_at}" \
+              "${pr_updated_at}" \
+              "${inactive_days}" \
+              "${reason}"
+          done < "${candidates_file}"
+
+          {
+            echo "| Instance | Type | PR | State | Env created at | PR updated at | Inactive days | Reason |"
+            echo "| --- | --- | --- | --- | --- | --- | ---: | --- |"
+            while IFS=$'\t' read -r instance kind pr_number env_created_at pr_state pr_created_at pr_updated_at inactive_days reason; do
+              echo "| \`${instance}\` | ${kind} | #${pr_number} | ${pr_state} | \`${env_created_at}\` | \`${pr_updated_at}\` | ${inactive_days} | ${reason} |"
+            done < "${candidates_file}"
+            echo ""
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          kubectl api-resources --namespaced=true --verbs=list,delete -o name > "${resource_names_file}"
+
+          resources=(
+            apps.app.sealos.io
+            instances.app.sealos.io
+            clusters.apps.kubeblocks.io
+            objectstoragebuckets.objectstorage.sealos.io
+            deployments.apps
+            statefulsets.apps
+            daemonsets.apps
+            replicasets.apps
+            pods
+            services
+            ingresses.networking.k8s.io
+            jobs.batch
+            cronjobs.batch
+            secrets
+            configmaps
+            serviceaccounts
+            roles.rbac.authorization.k8s.io
+            rolebindings.rbac.authorization.k8s.io
+            persistentvolumeclaims
+          )
+
+          available_resources=()
+          for resource in "${resources[@]}"; do
+            if grep -Fxq "${resource}" "${resource_names_file}"; then
+              available_resources+=("${resource}")
+            else
+              echo "Skipping unavailable resource type: ${resource}"
+            fi
+          done
+
+          delete_failures=0
+          while IFS=$'\t' read -r instance kind pr_number env_created_at pr_state pr_created_at pr_updated_at inactive_days reason; do
+            selector="${PREVIEW_LABEL}=${instance}"
+            echo ""
+            echo "Processing ${instance} (type=${kind}, pr=#${pr_number}, state=${pr_state}, inactive_days=${inactive_days}, reason=${reason})"
+
+            for resource in "${available_resources[@]}"; do
+              matches="$(kubectl -n "${NAMESPACE}" get "${resource}" -l "${selector}" -o name --ignore-not-found 2>/dev/null || true)"
+              if [ -z "${matches}" ]; then
+                continue
+              fi
+
+              echo "${resource}:"
+              echo "${matches}"
+
+              if [ "${DRY_RUN}" = "true" ]; then
+                continue
+              fi
+
+              if ! kubectl -n "${NAMESPACE}" delete "${resource}" -l "${selector}" --ignore-not-found --wait=false; then
+                echo "::warning::failed to delete ${resource} for ${instance}"
+                delete_failures=$((delete_failures + 1))
+              fi
+            done
+
+            if [ "${DRY_RUN}" = "false" ]; then
+              echo "Waiting for main deployment ${instance} to disappear..."
+              for attempt in $(seq 1 30); do
+                remaining="$(kubectl -n "${NAMESPACE}" get deployment "${instance}" -o name --ignore-not-found 2>/dev/null || true)"
+                if [ -z "${remaining}" ]; then
+                  echo "Main deployment ${instance} deleted."
+                  break
+                fi
+                if [ "${attempt}" = "30" ]; then
+                  echo "::warning::main deployment ${instance} still exists after waiting"
+                  delete_failures=$((delete_failures + 1))
+                  break
+                fi
+                sleep 2
+              done
+            fi
+          done < "${candidates_file}"
+
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "Dry run complete. No resources were deleted."
+            echo "Dry run complete. No resources were deleted." >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "Deletion complete. delete_failures=${delete_failures}"
+            echo "Deletion complete. delete_failures=${delete_failures}" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+          if [ "${delete_failures}" -gt 0 ]; then
+            exit 1
+          fi
