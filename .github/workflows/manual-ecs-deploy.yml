@@ -22,6 +22,14 @@ on:
         description: 'Comma-separated Teable release record IDs to link on the launch record'
         required: false
         default: ''
+      computed_outbox_trigger_provider:
+        description: 'Computed outbox trigger (use none when rolling back to DB polling)'
+        required: true
+        default: 'bullmq'
+        type: choice
+        options:
+          - bullmq
+          - none
   workflow_call:
     inputs:
       image_tag:
@@ -48,6 +56,10 @@ on:
         required: false
         type: string
         default: ''
+      computed_outbox_trigger_provider:
+        description: 'Computed outbox trigger: bullmq or none'
+        required: true
+        type: string
     outputs:
       start_time:
         description: 'Deployment start timestamp'
@@ -148,6 +160,44 @@ jobs:
           jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy, .enableFaultInjection, .faultInjectionPolicy)' \
             task-definition-raw.json > task-definition.json
 
+      - name: Validate computed outbox rollout
+        env:
+          COMPUTED_OUTBOX_TRIGGER_PROVIDER: ${{ inputs.computed_outbox_trigger_provider }}
+        run: |
+          if [[ "$COMPUTED_OUTBOX_TRIGGER_PROVIDER" != "bullmq" && "$COMPUTED_OUTBOX_TRIGGER_PROVIDER" != "none" ]]; then
+            echo "::error::computed_outbox_trigger_provider must be bullmq or none"
+            exit 1
+          fi
+
+          if [[ "$COMPUTED_OUTBOX_TRIGGER_PROVIDER" == "none" ]]; then
+            exit 0
+          fi
+
+          if ! jq -e '
+            .containerDefinitions[]
+            | select(.name == "teable")
+            | [
+                ((.environment // [])[] | select(.name == "BACKEND_CACHE_REDIS_URI") | .value),
+                ((.secrets // [])[] | select(.name == "BACKEND_CACHE_REDIS_URI") | .valueFrom)
+              ]
+            | first
+            | select(type == "string" and length > 0)
+            | select(test("(^|@|//)(127\\.0\\.0\\.1|localhost|0\\.0\\.0\\.0|\\[?::1\\]?)(:|/)") | not)
+          ' task-definition.json > /dev/null; then
+            echo "::error::BullMQ computed outbox requires a shared, non-loopback BACKEND_CACHE_REDIS_URI"
+            exit 1
+          fi
+
+          if jq -e '
+            .containerDefinitions[]
+            | select(.name == "teable")
+            | (.environment // [])[]
+            | select(.name == "V2_COMPUTED_UPDATE_MODE" and (.value | ascii_downcase) == "sync")
+          ' task-definition.json > /dev/null; then
+            echo "::error::Remove V2_COMPUTED_UPDATE_MODE=sync before enabling BullMQ computed outbox"
+            exit 1
+          fi
+
       - name: Render task definition with new image
         id: render-task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
@@ -155,6 +205,11 @@ jobs:
           task-definition: task-definition.json
           container-name: teable
           image: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-cloud:${{ inputs.image_tag }}
+          environment-variables: |
+            V2_COMPUTED_OUTBOX_TRIGGER_PROVIDER=${{ inputs.computed_outbox_trigger_provider }}
+            V2_COMPUTED_OUTBOX_TRIGGER_PRODUCER_ENABLED=${{ inputs.computed_outbox_trigger_provider == 'bullmq' }}
+            V2_COMPUTED_OUTBOX_TRIGGER_CONSUMER_ENABLED=${{ inputs.computed_outbox_trigger_provider == 'bullmq' }}
+            V2_COMPUTED_OUTBOX_POLL_FALLBACK_ENABLED=${{ inputs.computed_outbox_trigger_provider != 'bullmq' }}
 
       - name: Run database migration as one-off task
         run: |
