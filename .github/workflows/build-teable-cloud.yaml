@@ -56,8 +56,12 @@ jobs:
           INPUT_RELEASE_TIMESTAMP: ${{ github.event.client_payload.release_timestamp || inputs.release_timestamp }}
           INPUT_RELEASE_SEQUENCE: ${{ github.event.client_payload.release_sequence || inputs.release_sequence }}
         run: |
-          TARGET_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud"},{"target":"sandbox-agent","file":"Dockerfile.sandbox-agent","image":"teable-sandbox-agent-cloud"}]}'
-          MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox-agent","file":"Dockerfile.sandbox-agent","image":"teable-sandbox-agent-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"}]}'
+          # The sandbox agent is NOT built here anymore: it is content-identical
+          # across editions, so build-teable-ee.yaml builds it once (multi-arch)
+          # and publishes teable-sandbox-agent-cloud as a same-digest alias,
+          # including the ECR/Aliyun sync and the preheat call.
+          TARGET_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud"}]}'
+          MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"}]}'
 
           if [ -n "$INPUT_RELEASE_ID" ]; then
             RELEASE_ID="$INPUT_RELEASE_ID"
@@ -253,7 +257,7 @@ jobs:
 
           ECR_PASSWORD="$(aws ecr get-login-password --region us-west-2)"
           IFS=',' read -ra TAG_LIST <<< "$TAGS"
-          IMAGES=("teable-cloud" "teable-sandbox-cloud" "teable-sandbox-agent-cloud")
+          IMAGES=("teable-cloud" "teable-sandbox-cloud")
 
           for image in "${IMAGES[@]}"; do
             for tag in "${TAG_LIST[@]}"; do
@@ -275,16 +279,12 @@ jobs:
       tags: "latest,${{ needs.prepare-release.outputs.source_sha }},${{ needs.prepare-release.outputs.release_id }}"
     secrets: inherit
 
-  preheat-sandbox-agent:
-    needs: [prepare-release, track-start, build-push, sync-ecr, sync-aliyun]
-    if: needs.build-push.result == 'success' && needs.sync-ecr.result == 'success' && needs.sync-aliyun.result == 'success'
-    uses: ./.github/workflows/preheat-sandbox-agent-cloud.yaml
-    with:
-      image_tag: ${{ needs.prepare-release.outputs.release_id }}
-    secrets: inherit
+  # preheat-sandbox-agent moved to build-teable-ee.yaml together with the
+  # unified agent build (the preheat needs the agent image, which is no longer
+  # produced by this workflow).
 
   determine-status:
-    needs: [track-start, build-push, sync-ecr, sync-aliyun, preheat-sandbox-agent]
+    needs: [track-start, build-push, sync-ecr, sync-aliyun]
     if: always()
     runs-on: ubuntu-latest
     outputs:
@@ -293,16 +293,16 @@ jobs:
       - name: Determine final status
         id: status
         run: |
-          if [ "${{ needs.build-push.result }}" == "cancelled" ] || [ "${{ needs.sync-ecr.result }}" == "cancelled" ] || [ "${{ needs.sync-aliyun.result }}" == "cancelled" ] || [ "${{ needs.preheat-sandbox-agent.result }}" == "cancelled" ]; then
+          if [ "${{ needs.build-push.result }}" == "cancelled" ] || [ "${{ needs.sync-ecr.result }}" == "cancelled" ] || [ "${{ needs.sync-aliyun.result }}" == "cancelled" ]; then
             echo "status=Cancelled" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.sync-ecr.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ] && [ "${{ needs.preheat-sandbox-agent.result }}" == "success" ]; then
+          elif [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.sync-ecr.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ]; then
             echo "status=Released" >> $GITHUB_OUTPUT
           else
             echo "status=Fail" >> $GITHUB_OUTPUT
           fi
 
   track-complete:
-    needs: [track-start, build-push, sync-ecr, sync-aliyun, preheat-sandbox-agent, determine-status]
+    needs: [track-start, build-push, sync-ecr, sync-aliyun, determine-status]
     if: always()
     uses: ./.github/workflows/track-build-teable.yaml
     with:

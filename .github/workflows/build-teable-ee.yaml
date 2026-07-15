@@ -9,6 +9,11 @@ env:
   REGISTRY_DOCKERHUB: docker.io/teableio
   CE_IMAGE_SUFFIX: ""
   EE_IMAGE_SUFFIX: "-ee"
+  # Transitional alias for the unified sandbox agent image (same digest as the
+  # canonical build). The cloud build no longer builds its own agent; retire this
+  # alias after all cloud environments reference the canonical
+  # ghcr.io/teableio/teable-sandbox-agent prefix (target: 2 release cycles).
+  CLOUD_IMAGE_SUFFIX: "-cloud"
 
 on:
   workflow_dispatch:
@@ -257,6 +262,34 @@ jobs:
               "${CANONICAL_IMAGE}:${tag_name}"
           done
 
+      # The sandbox agent is content-identical across editions, so the cloud
+      # flavor is published from here as a same-digest alias instead of being
+      # built a second time in build-teable-cloud.yaml.
+      - name: Create cloud alias manifests for the unified sandbox agent
+        if: matrix.target == 'sandbox-agent'
+        env:
+          META_JSON: ${{ steps.meta.outputs.json }}
+          CANONICAL_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}
+          CLOUD_ALIAS_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}${{ env.CLOUD_IMAGE_SUFFIX }}
+          RELEASE_ID: ${{ needs.prepare-release.outputs.release_id }}
+        run: |
+          mapfile -t TAGS < <(jq -r '.tags[]' <<<"$META_JSON")
+
+          for full_tag in "${TAGS[@]}"; do
+            tag_name="${full_tag##*:}"
+            if [ -z "$tag_name" ]; then
+              continue
+            fi
+            docker buildx imagetools create \
+              --tag "${CLOUD_ALIAS_IMAGE}:${tag_name}" \
+              "${CANONICAL_IMAGE}:${tag_name}"
+          done
+
+          # Cloud consumers historically used a floating "latest" (the EE lane uses "beta").
+          docker buildx imagetools create \
+            --tag "${CLOUD_ALIAS_IMAGE}:latest" \
+            "${CANONICAL_IMAGE}:${RELEASE_ID}"
+
   sync-dockerhub:
     needs: [prepare-release, track-start, merge-manifests]
     if: needs.merge-manifests.result == 'success'
@@ -298,8 +331,65 @@ jobs:
       tags: "beta,${{ needs.prepare-release.outputs.source_sha }},${{ needs.prepare-release.outputs.release_id }}"
     secrets: inherit
 
+  # Cloud distribution of the unified sandbox agent (ECR copy of the -cloud
+  # alias). Lives here because this workflow now owns the only agent build;
+  # build-teable-cloud.yaml no longer builds or syncs the agent.
+  sync-ecr-agent:
+    needs: [prepare-release, track-start, merge-manifests]
+    if: needs.merge-manifests.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Sync unified sandbox agent alias to ECR
+        env:
+          SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
+          TAGS: latest,${{ needs.prepare-release.outputs.source_sha }},${{ needs.prepare-release.outputs.release_id }}
+          ECR_REGISTRY: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable
+        run: |
+          set -euo pipefail
+
+          ECR_PASSWORD="$(aws ecr get-login-password --region us-west-2)"
+          IFS=',' read -ra TAG_LIST <<< "$TAGS"
+
+          for tag in "${TAG_LIST[@]}"; do
+            [ -n "$tag" ] || continue
+            skopeo copy --all \
+              --src-creds="$SRC_CREDS" \
+              --dest-creds="AWS:${ECR_PASSWORD}" \
+              "docker://${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent-cloud:${tag}" \
+              "docker://${ECR_REGISTRY}/teable-sandbox-agent-cloud:${tag}"
+          done
+
+  preheat-sandbox-agent:
+    needs: [prepare-release, track-start, merge-manifests, sync-ecr-agent, sync-aliyun]
+    if: needs.merge-manifests.result == 'success' && needs.sync-ecr-agent.result == 'success' && needs.sync-aliyun.result == 'success'
+    uses: ./.github/workflows/preheat-sandbox-agent-cloud.yaml
+    with:
+      image_tag: ${{ needs.prepare-release.outputs.release_id }}
+    secrets: inherit
+
   determine-status:
-    needs: [track-start, build-push, merge-manifests, sync-dockerhub, sync-aliyun]
+    needs:
+      [
+        track-start,
+        build-push,
+        merge-manifests,
+        sync-dockerhub,
+        sync-aliyun,
+        sync-ecr-agent,
+        preheat-sandbox-agent,
+      ]
     if: always()
     runs-on: ubuntu-latest
     outputs:
@@ -308,16 +398,26 @@ jobs:
       - name: Determine final status
         id: status
         run: |
-          if [ "${{ needs.build-push.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests.result }}" == "cancelled" ] || [ "${{ needs.sync-dockerhub.result }}" == "cancelled" ] || [ "${{ needs.sync-aliyun.result }}" == "cancelled" ]; then
+          if [ "${{ needs.build-push.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests.result }}" == "cancelled" ] || [ "${{ needs.sync-dockerhub.result }}" == "cancelled" ] || [ "${{ needs.sync-aliyun.result }}" == "cancelled" ] || [ "${{ needs.sync-ecr-agent.result }}" == "cancelled" ] || [ "${{ needs.preheat-sandbox-agent.result }}" == "cancelled" ]; then
             echo "status=Cancelled" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.merge-manifests.result }}" == "success" ] && [ "${{ needs.sync-dockerhub.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ]; then
+          elif [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.merge-manifests.result }}" == "success" ] && [ "${{ needs.sync-dockerhub.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ] && [ "${{ needs.sync-ecr-agent.result }}" == "success" ] && [ "${{ needs.preheat-sandbox-agent.result }}" == "success" ]; then
             echo "status=Released" >> $GITHUB_OUTPUT
           else
             echo "status=Fail" >> $GITHUB_OUTPUT
           fi
 
   track-complete:
-    needs: [track-start, build-push, merge-manifests, sync-dockerhub, sync-aliyun, determine-status]
+    needs:
+      [
+        track-start,
+        build-push,
+        merge-manifests,
+        sync-dockerhub,
+        sync-aliyun,
+        sync-ecr-agent,
+        preheat-sandbox-agent,
+        determine-status,
+      ]
     if: always()
     uses: ./.github/workflows/track-build-teable.yaml
     with:
