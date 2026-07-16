@@ -43,7 +43,7 @@ on:
 env:
   # Push-trigger defaults (workflow_dispatch inputs override when present):
   BENCH_SOURCE_REF: 3c24aaf5efec8637710b49e2d04076f8187e945d
-  BENCH_MODE: populate
+  BENCH_MODE: warm
   BENCH_PLATFORM: linux/amd64
 
 jobs:
