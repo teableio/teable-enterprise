@@ -34,6 +34,7 @@ jobs:
       release_timestamp: ${{ steps.release.outputs.release_timestamp }}
       release_sequence: ${{ steps.release.outputs.release_sequence }}
       source_sha: ${{ steps.source.outputs.source_sha }}
+      agent_base_tag: ${{ steps.agent_base.outputs.tag }}
     steps:
       - name: Checkout private repository
         uses: actions/checkout@v4
@@ -50,6 +51,13 @@ jobs:
             exit 1
           fi
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Compute sandbox agent base tag (inputs-hash)
+        id: agent_base
+        run: |
+          tag="$(node scripts/sandbox-agent-base-hash.mjs)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Sandbox agent base tag: $tag"
 
       - name: Compute release id
         id: release
@@ -104,8 +112,65 @@ jobs:
       TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
       PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
 
+  # Build (or skip) the source-independent sandbox agent base image. The tag is
+  # the content hash of its inputs, so an existing tag means nothing changed —
+  # routine releases skip this entirely and only push the thin source layer.
+  ensure-agent-base:
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
+
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - name: Check for published base image
+        id: check
+        env:
+          BASE_REF: ${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent-base:${{ needs.prepare-release.outputs.agent_base_tag }}
+        run: |
+          if docker buildx imagetools inspect "$BASE_REF" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Base image already published: $BASE_REF"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Base image missing, will build: $BASE_REF"
+          fi
+
+      # QEMU must be registered before the Buildx builder is created, or the
+      # cold-base multi-arch rebuild gets a builder without the arm64 emulator.
+      - name: Set up QEMU (arm64 emulation for the rare base rebuild)
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push base image
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: dockers/teable/Dockerfile.sandbox-agent-base
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent-base:${{ needs.prepare-release.outputs.agent_base_tag }}
+            ${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent-base:latest
+          push: true
+          provenance: false
+
   build-push:
-    needs: [prepare-release, track-start]
+    needs: [prepare-release, track-start, ensure-agent-base]
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix: ${{ fromJson(needs.prepare-release.outputs.matrix_json) }}
@@ -173,6 +238,8 @@ jobs:
             BUILD_VERSION=${{ needs.prepare-release.outputs.release_id }}
             FRONTEND_RELEASE=${{ needs.prepare-release.outputs.release_id }}
             GIT_COMMIT_SHA=${{ needs.prepare-release.outputs.source_sha }}
+            SANDBOX_AGENT_BASE_IMAGE=${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent-base:${{ needs.prepare-release.outputs.agent_base_tag }}
+            SCAFFOLD_DRIFT=fail
           outputs: type=image,name=${{ env.REGISTRY_GITHUB }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           provenance: false
 
@@ -224,11 +291,10 @@ jobs:
           pattern: digests-${{ matrix.target }}-linux-*
           merge-multiple: true
 
-      - name: Create canonical and EE alias manifests
+      - name: Create canonical manifests
         env:
           META_JSON: ${{ steps.meta.outputs.json }}
           CANONICAL_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}
-          EE_ALIAS_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}${{ env.EE_IMAGE_SUFFIX }}
         run: |
           mapfile -t TAGS < <(jq -r '.tags[]' <<<"$META_JSON")
           mapfile -t DIGEST_FILES < <(find "/tmp/digests/${{ matrix.target }}" -type f -name '*.digest' | sort)
@@ -252,6 +318,25 @@ jobs:
             docker buildx imagetools create \
               --tag "${CANONICAL_IMAGE}:${tag_name}" \
               "${SOURCES[@]}"
+          done
+
+      # The sandbox agent is content-identical across editions and ships under
+      # the single canonical name (no -ee/-cloud aliases); only the edition app
+      # images (teable, teable-sandbox) carry the -ee alias.
+      - name: Create EE alias manifests
+        if: matrix.target != 'sandbox-agent'
+        env:
+          META_JSON: ${{ steps.meta.outputs.json }}
+          CANONICAL_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}
+          EE_ALIAS_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}${{ env.EE_IMAGE_SUFFIX }}
+        run: |
+          mapfile -t TAGS < <(jq -r '.tags[]' <<<"$META_JSON")
+
+          for full_tag in "${TAGS[@]}"; do
+            tag_name="${full_tag##*:}"
+            if [ -z "$tag_name" ]; then
+              continue
+            fi
             docker buildx imagetools create \
               --tag "${EE_ALIAS_IMAGE}:${tag_name}" \
               "${CANONICAL_IMAGE}:${tag_name}"
@@ -276,7 +361,7 @@ jobs:
           set -euo pipefail
 
           IFS=',' read -ra TAG_LIST <<< "$TAGS"
-          IMAGES=("teable" "teable-ee" "teable-sandbox" "teable-sandbox-ee" "teable-sandbox-agent" "teable-sandbox-agent-ee")
+          IMAGES=("teable" "teable-ee" "teable-sandbox" "teable-sandbox-ee" "teable-sandbox-agent")
 
           for image in "${IMAGES[@]}"; do
             for tag in "${TAG_LIST[@]}"; do
@@ -298,8 +383,24 @@ jobs:
       tags: "beta,${{ needs.prepare-release.outputs.source_sha }},${{ needs.prepare-release.outputs.release_id }}"
     secrets: inherit
 
+  preheat-sandbox-agent:
+    needs: [prepare-release, track-start, merge-manifests, sync-aliyun]
+    if: needs.merge-manifests.result == 'success' && needs.sync-aliyun.result == 'success'
+    uses: ./.github/workflows/preheat-sandbox-agent-cloud.yaml
+    with:
+      image_tag: ${{ needs.prepare-release.outputs.release_id }}
+    secrets: inherit
+
   determine-status:
-    needs: [track-start, build-push, merge-manifests, sync-dockerhub, sync-aliyun]
+    needs:
+      [
+        track-start,
+        build-push,
+        merge-manifests,
+        sync-dockerhub,
+        sync-aliyun,
+        preheat-sandbox-agent,
+      ]
     if: always()
     runs-on: ubuntu-latest
     outputs:
@@ -308,16 +409,25 @@ jobs:
       - name: Determine final status
         id: status
         run: |
-          if [ "${{ needs.build-push.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests.result }}" == "cancelled" ] || [ "${{ needs.sync-dockerhub.result }}" == "cancelled" ] || [ "${{ needs.sync-aliyun.result }}" == "cancelled" ]; then
+          if [ "${{ needs.build-push.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests.result }}" == "cancelled" ] || [ "${{ needs.sync-dockerhub.result }}" == "cancelled" ] || [ "${{ needs.sync-aliyun.result }}" == "cancelled" ] || [ "${{ needs.preheat-sandbox-agent.result }}" == "cancelled" ]; then
             echo "status=Cancelled" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.merge-manifests.result }}" == "success" ] && [ "${{ needs.sync-dockerhub.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ]; then
+          elif [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.merge-manifests.result }}" == "success" ] && [ "${{ needs.sync-dockerhub.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ] && [ "${{ needs.preheat-sandbox-agent.result }}" == "success" ]; then
             echo "status=Released" >> $GITHUB_OUTPUT
           else
             echo "status=Fail" >> $GITHUB_OUTPUT
           fi
 
   track-complete:
-    needs: [track-start, build-push, merge-manifests, sync-dockerhub, sync-aliyun, determine-status]
+    needs:
+      [
+        track-start,
+        build-push,
+        merge-manifests,
+        sync-dockerhub,
+        sync-aliyun,
+        preheat-sandbox-agent,
+        determine-status,
+      ]
     if: always()
     uses: ./.github/workflows/track-build-teable.yaml
     with:

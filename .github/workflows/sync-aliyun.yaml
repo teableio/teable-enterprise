@@ -73,7 +73,7 @@ jobs:
           FAILED=0
 
           if [ "${{ inputs.edition }}" = "cloud" ]; then
-            IMAGES=("teable-cloud" "teable-sandbox-cloud" "teable-sandbox-agent-cloud")
+            IMAGES=("teable-cloud" "teable-sandbox-cloud")
             for image in "${IMAGES[@]}"; do
               for tag in "${TAGS[@]}"; do
                 [ -n "$tag" ] || continue
@@ -84,8 +84,24 @@ jobs:
                   || FAILED=1
               done
             done
+
+            # The agent is built by the ee lane under its single canonical name
+            # (no -cloud alias), but it is synced in BOTH lanes so a manual
+            # cloud-only resync still refreshes the CN agent tag. skopeo copy
+            # is idempotent, so the double sync on the normal path is harmless.
+            # "latest" is skipped: the agent publishes no latest tag (its only
+            # consumers pull prefix + explicit app build tag).
+            for tag in "${TAGS[@]}"; do
+              [ -n "$tag" ] || continue
+              [ "$tag" = "latest" ] && continue
+              retry_copy \
+                "${SRC_REGISTRY}/teable-sandbox-agent:${tag}" \
+                "${DST_REGISTRY}/teable-sandbox-agent:${tag}" \
+                "--all" \
+                || FAILED=1
+            done
           elif [ "${{ inputs.edition }}" = "ee" ]; then
-            IMAGES=("teable" "teable-sandbox" "teable-sandbox-agent")
+            IMAGES=("teable" "teable-sandbox")
             SUFFIXES=("" "-ee")
 
             for image in "${IMAGES[@]}"; do
@@ -99,6 +115,17 @@ jobs:
                     || FAILED=1
                 done
               done
+            done
+
+            # Single canonical sandbox agent (no -ee/-cloud alias); both
+            # teable.ai and teable.cn preheat teable/teable-sandbox-agent.
+            for tag in "${TAGS[@]}"; do
+              [ -n "$tag" ] || continue
+              retry_copy \
+                "${SRC_REGISTRY}/teable-sandbox-agent:${tag}" \
+                "${DST_REGISTRY}/teable-sandbox-agent:${tag}" \
+                "--all" \
+                || FAILED=1
             done
           fi
 
