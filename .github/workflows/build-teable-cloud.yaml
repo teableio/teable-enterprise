@@ -271,9 +271,13 @@ jobs:
             done
           done
 
+  # Gated on verify-agent: the cloud lane's Aliyun sync also copies the
+  # canonical agent tag, which the EE lane may still be building — syncing
+  # before the agent exists on ghcr would burn the copy retries on a
+  # not-yet-published tag and fail a perfectly normal release.
   sync-aliyun:
-    needs: [prepare-release, track-start, build-push]
-    if: needs.build-push.result == 'success'
+    needs: [prepare-release, track-start, build-push, verify-agent]
+    if: needs.build-push.result == 'success' && needs.verify-agent.result == 'success'
     uses: ./.github/workflows/sync-aliyun.yaml
     with:
       edition: cloud
