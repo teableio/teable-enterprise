@@ -119,8 +119,12 @@ jobs:
 
             # Single canonical sandbox agent (no -ee/-cloud alias); both
             # teable.ai and teable.cn preheat teable/teable-sandbox-agent.
+            # "latest" is skipped: the agent publishes no latest tag (its only
+            # consumers pull prefix + explicit app build tag). Same rule as the
+            # cloud lane above; without it every ee latest-promotion sync fails.
             for tag in "${TAGS[@]}"; do
               [ -n "$tag" ] || continue
+              [ "$tag" = "latest" ] && continue
               retry_copy \
                 "${SRC_REGISTRY}/teable-sandbox-agent:${tag}" \
                 "${DST_REGISTRY}/teable-sandbox-agent:${tag}" \
