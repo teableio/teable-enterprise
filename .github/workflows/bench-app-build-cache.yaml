@@ -13,6 +13,10 @@ name: Bench app build cache
 #   warm     — full app build with --cache-from, then a steady-state re-export
 #              to prove routine-release export cost is ~zero
 #   baseline — full app build with no cache args (control group)
+#
+# workflow_dispatch only registers once the file reaches the default branch;
+# until then the bench is driven by pushes to its own branch, editing the
+# BENCH_* defaults below per phase.
 
 on:
   workflow_dispatch:
@@ -32,23 +36,68 @@ on:
         type: choice
         options: [linux/arm64, linux/amd64]
         default: linux/arm64
+  push:
+    branches: [ci/bench-app-build-cache]
+    paths: ['.github/workflows/bench-app-build-cache.yaml']
 
 env:
-  CACHE_IMAGE: ghcr.io/teableio/teable-build-cache
-  BENCH_IMAGE: ghcr.io/teableio/teable-build-bench
-  DEPS_TARGETS: frontend-deps backend-deps runtime-deps
+  # Push-trigger defaults (workflow_dispatch inputs override when present):
+  BENCH_SOURCE_REF: 3c24aaf5efec8637710b49e2d04076f8187e945d
+  BENCH_MODE: populate
+  BENCH_PLATFORM: linux/arm64
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      source_ref: ${{ steps.plan.outputs.source_ref }}
+      mode: ${{ steps.plan.outputs.mode }}
+      platform: ${{ steps.plan.outputs.platform }}
+      platform_key: ${{ steps.plan.outputs.platform_key }}
+      runner: ${{ steps.plan.outputs.runner }}
+    steps:
+      - name: Resolve bench parameters
+        id: plan
+        env:
+          IN_SOURCE_REF: ${{ inputs.source_ref }}
+          IN_MODE: ${{ inputs.mode }}
+          IN_PLATFORM: ${{ inputs.platform }}
+        run: |
+          source_ref="${IN_SOURCE_REF:-$BENCH_SOURCE_REF}"
+          mode="${IN_MODE:-$BENCH_MODE}"
+          platform="${IN_PLATFORM:-$BENCH_PLATFORM}"
+          case "$platform" in
+            linux/arm64) runner="ubuntu-24.04-arm" ;;
+            linux/amd64) runner="ubuntu-latest" ;;
+            *) echo "Unsupported platform: $platform" >&2; exit 1 ;;
+          esac
+          {
+            echo "source_ref=$source_ref"
+            echo "mode=$mode"
+            echo "platform=$platform"
+            echo "platform_key=${platform//\//-}"
+            echo "runner=$runner"
+          } >> "$GITHUB_OUTPUT"
+          echo "bench: mode=$mode platform=$platform source_ref=$source_ref"
+
   bench:
-    runs-on: ${{ inputs.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    needs: plan
+    runs-on: ${{ needs.plan.outputs.runner }}
     timeout-minutes: 90
+    env:
+      CACHE_IMAGE: ghcr.io/teableio/teable-build-cache
+      BENCH_IMAGE: ghcr.io/teableio/teable-build-bench
+      DEPS_TARGETS: frontend-deps backend-deps runtime-deps
+      MODE: ${{ needs.plan.outputs.mode }}
+      PLATFORM: ${{ needs.plan.outputs.platform }}
+      PLATFORM_KEY: ${{ needs.plan.outputs.platform_key }}
     steps:
       - name: Checkout teable-ee source
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
           token: ${{ secrets.PACKAGES_KEY }}
-          ref: ${{ inputs.source_ref }}
+          ref: ${{ needs.plan.outputs.source_ref }}
 
       - uses: actions/setup-node@v4
         with:
@@ -85,18 +134,8 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Resolve bench variables
-        id: vars
-        run: |
-          platform='${{ inputs.platform }}'
-          echo "platform_key=${platform//\//-}" >> "$GITHUB_OUTPUT"
-          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
       - name: Populate deps cache (cold seed)
-        if: inputs.mode == 'populate'
-        env:
-          PLATFORM: ${{ inputs.platform }}
-          PLATFORM_KEY: ${{ steps.vars.outputs.platform_key }}
+        if: needs.plan.outputs.mode == 'populate'
         run: |
           set -euo pipefail
           for target in $DEPS_TARGETS; do
@@ -112,12 +151,7 @@ jobs:
           done
 
       - name: Full app build
-        if: inputs.mode == 'warm' || inputs.mode == 'baseline'
-        env:
-          PLATFORM: ${{ inputs.platform }}
-          PLATFORM_KEY: ${{ steps.vars.outputs.platform_key }}
-          SOURCE_SHA: ${{ steps.vars.outputs.source_sha }}
-          MODE: ${{ inputs.mode }}
+        if: needs.plan.outputs.mode == 'warm' || needs.plan.outputs.mode == 'baseline'
         run: |
           set -euo pipefail
           CACHE_ARGS=()
@@ -135,7 +169,7 @@ jobs:
             --build-arg NEXT_BUILD_ENV_EDITION=EE \
             --build-arg "BUILD_VERSION=bench.${GITHUB_RUN_NUMBER}" \
             --build-arg "FRONTEND_RELEASE=bench.${GITHUB_RUN_NUMBER}" \
-            --build-arg "GIT_COMMIT_SHA=${SOURCE_SHA}" \
+            --build-arg "GIT_COMMIT_SHA=$(git rev-parse HEAD)" \
             --output "type=image,name=${BENCH_IMAGE},push-by-digest=true,name-canonical=true,push=true" \
             --provenance=false \
             .
@@ -145,10 +179,7 @@ jobs:
       # unchanged every blob already exists in the registry, so this should
       # cost seconds. Measure it instead of asserting it.
       - name: Steady-state re-export
-        if: inputs.mode == 'warm'
-        env:
-          PLATFORM: ${{ inputs.platform }}
-          PLATFORM_KEY: ${{ steps.vars.outputs.platform_key }}
+        if: needs.plan.outputs.mode == 'warm'
         run: |
           set -euo pipefail
           for target in $DEPS_TARGETS; do
