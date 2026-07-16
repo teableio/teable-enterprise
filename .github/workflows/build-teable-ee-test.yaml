@@ -1,0 +1,147 @@
+name: Bench app image build
+
+# Side-effect-free timing harness for the app image build. No tags are ever
+# pushed (push: false); only the scoped registry build cache is touched.
+#
+# Modes:
+#   baseline — full build, no cache args (control group)
+#   populate — build only the three deps targets and export their cache
+#              (zstd). Run once per lockfile change; cheap re-runs when warm.
+#   warm     — full build importing the deps cache, exporting NOTHING
+#              (routine releases never pay the cache-export cost).
+#
+# The runner disk cleanup runs in the background and is awaited just before
+# the build — it overlaps checkout/contexts/buildx setup instead of adding
+# its 1-4 min (measured variance) to the critical path.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'teable-ee ref to build'
+        required: false
+        default: 'develop'
+        type: string
+      release_label:
+        description: 'Fake release id baked into the build (vary it to force a fresh compile)'
+        required: false
+        default: 'bench'
+        type: string
+      mode:
+        description: 'Bench mode'
+        required: true
+        default: 'warm'
+        type: choice
+        options: [baseline, populate, warm]
+      platform:
+        description: 'Platform'
+        required: true
+        default: 'linux/amd64'
+        type: choice
+        options: [linux/amd64, linux/arm64]
+
+env:
+  REGISTRY_GITHUB: ghcr.io/teableio
+  CACHE_REPO: ghcr.io/teableio/teable-buildcache
+
+jobs:
+  bench:
+    runs-on: ${{ inputs.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ inputs.source_ref }}
+
+      - name: Start background disk cleanup
+        run: |
+          sudo nohup sh -c 'rm -rf /opt/ghc /opt/hostedtoolcache /usr/local/.ghcup /usr/local/lib/android /usr/local/share/boost /usr/local/share/chromium /usr/share/dotnet /usr/share/swift; touch /tmp/disk-cleanup.done' > /tmp/disk-cleanup.log 2>&1 &
+          echo "cleanup started"
+
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+
+      - name: Prepare generated Docker contexts
+        run: node ./scripts/generate-docker-contexts.mjs
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Wait for background disk cleanup
+        run: |
+          for i in $(seq 1 120); do [ -f /tmp/disk-cleanup.done ] && break; sleep 2; done
+          [ -f /tmp/disk-cleanup.done ] || echo "::warning::cleanup still running, proceeding"
+          df -h /
+
+      - name: Set platform key
+        id: pk
+        run: |
+          pk="$(echo '${{ inputs.platform }}' | tr '/' '-')"
+          echo "key=${pk}" >> "$GITHUB_OUTPUT"
+
+      - name: Populate deps cache (scoped, zstd)
+        if: inputs.mode == 'populate'
+        env:
+          PK: ${{ steps.pk.outputs.key }}
+        run: |
+          set -euo pipefail
+          for target in runtime-deps frontend-deps backend-deps; do
+            ref="${CACHE_REPO}:deps-${target}-${PK}"
+            echo "::group::populate ${target}"
+            docker buildx build \
+              --file dockers/teable/Dockerfile \
+              --target "${target}" \
+              --platform '${{ inputs.platform }}' \
+              --build-arg ENABLE_CSP=false \
+              --build-arg NEXT_BUILD_ENV_EDITION=EE \
+              --cache-from "type=registry,ref=${ref}" \
+              --cache-to "type=registry,ref=${ref},mode=max,compression=zstd,force-compression=true,oci-mediatypes=true,image-manifest=true" \
+              .
+            echo "::endgroup::"
+          done
+
+      - name: Full build, baseline (no push, no cache)
+        if: inputs.mode == 'baseline'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: dockers/teable/Dockerfile
+          platforms: ${{ inputs.platform }}
+          build-args: |
+            ENABLE_CSP=false
+            NEXT_BUILD_ENV_EDITION=EE
+            BUILD_VERSION=${{ inputs.release_label }}
+            FRONTEND_RELEASE=${{ inputs.release_label }}
+            GIT_COMMIT_SHA=bench
+          push: false
+          provenance: false
+
+      - name: Full build, warm (no push, deps cache import only)
+        if: inputs.mode == 'warm'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: dockers/teable/Dockerfile
+          platforms: ${{ inputs.platform }}
+          build-args: |
+            ENABLE_CSP=false
+            NEXT_BUILD_ENV_EDITION=EE
+            BUILD_VERSION=${{ inputs.release_label }}
+            FRONTEND_RELEASE=${{ inputs.release_label }}
+            GIT_COMMIT_SHA=bench
+          push: false
+          provenance: false
+          cache-from: |
+            type=registry,ref=${{ env.CACHE_REPO }}:deps-runtime-deps-${{ steps.pk.outputs.key }}
+            type=registry,ref=${{ env.CACHE_REPO }}:deps-frontend-deps-${{ steps.pk.outputs.key }}
+            type=registry,ref=${{ env.CACHE_REPO }}:deps-backend-deps-${{ steps.pk.outputs.key }}

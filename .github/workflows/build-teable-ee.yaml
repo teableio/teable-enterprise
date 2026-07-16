@@ -175,6 +175,68 @@ jobs:
   # gate waits for that manifest. Building the agent in its own lane publishes
   # the canonical tag minutes into the run, so the cloud lane never waits on
   # this workflow's app builds.
+  # Seeds the scoped deps-stage build cache (zstd) that build-push imports.
+  # Runs BESIDE the build, never gating it: on a routine release everything
+  # is already cached and this re-exports in ~1 min; when the lockfile
+  # changes, the release builds cold exactly as before while this job seeds
+  # the cache for the next one. Benched (bench v2 runs): warm app builds drop
+  # amd64 699s -> 519s and arm64 1585s -> 661s.
+  populate-deps-cache:
+    needs: [prepare-release]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_key: linux-amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            platform_key: linux-arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
+
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+
+      - name: Prepare generated Docker contexts
+        run: node ./scripts/generate-docker-contexts.mjs
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and export deps-stage cache
+        run: |
+          set -euo pipefail
+          for target in runtime-deps frontend-deps backend-deps; do
+            ref="${{ env.REGISTRY_GITHUB }}/teable-buildcache:deps-${target}-${{ matrix.platform_key }}"
+            echo "::group::${target}"
+            docker buildx build \
+              --file dockers/teable/Dockerfile \
+              --target "${target}" \
+              --platform '${{ matrix.platform }}' \
+              --build-arg ENABLE_CSP=false \
+              --build-arg NEXT_BUILD_ENV_EDITION=EE \
+              --cache-from "type=registry,ref=${ref}" \
+              --cache-to "type=registry,ref=${ref},mode=max,compression=zstd,force-compression=true,oci-mediatypes=true,image-manifest=true" \
+              .
+            echo "::endgroup::"
+          done
+
   build-agent:
     needs: [prepare-release, track-start, ensure-agent-base]
     runs-on: ${{ matrix.runner }}
@@ -310,32 +372,36 @@ jobs:
         if: matrix.file == 'Dockerfile'
         run: node ./scripts/generate-docker-contexts.mjs
 
-      - name: Free runner disk space for app build
+      # Freeing disk costs 1-4 min of pure rm -rf (measured variance); run it
+      # in the background so it overlaps the buildx setup and cache import
+      # instead of sitting on the critical path.
+      - name: Start background disk cleanup
         if: matrix.file == 'Dockerfile'
         run: |
-          set -euxo pipefail
-
-          echo "Disk before cleanup:"
-          df -h /
-
-          sudo rm -rf \
-            /opt/ghc \
-            /opt/hostedtoolcache \
-            /usr/local/.ghcup \
-            /usr/local/lib/android \
-            /usr/local/share/boost \
-            /usr/local/share/chromium \
-            /usr/share/dotnet \
-            /usr/share/swift
-
-          sudo apt-get clean
-          sudo docker system prune -af --volumes || true
-
-          echo "Disk after cleanup:"
-          df -h /
+          sudo nohup sh -c 'rm -rf /opt/ghc /opt/hostedtoolcache /usr/local/.ghcup /usr/local/lib/android /usr/local/share/boost /usr/local/share/chromium /usr/share/dotnet /usr/share/swift; touch /tmp/disk-cleanup.done' > /tmp/disk-cleanup.log 2>&1 &
+          echo "cleanup started"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Wait for background disk cleanup
+        if: matrix.file == 'Dockerfile'
+        run: |
+          for i in $(seq 1 120); do [ -f /tmp/disk-cleanup.done ] && break; sleep 2; done
+          [ -f /tmp/disk-cleanup.done ] || echo "::warning::disk cleanup still running, proceeding"
+          df -h /
+
+      - name: Compose deps cache-from list
+        id: depscache
+        if: matrix.file == 'Dockerfile'
+        run: |
+          {
+            echo 'list<<CACHE_EOF'
+            for t in runtime-deps frontend-deps backend-deps; do
+              echo "type=registry,ref=${{ env.REGISTRY_GITHUB }}/teable-buildcache:deps-${t}-${{ matrix.platform_key }}"
+            done
+            echo 'CACHE_EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push by digest
         id: build
@@ -352,6 +418,9 @@ jobs:
             GIT_COMMIT_SHA=${{ needs.prepare-release.outputs.source_sha }}
           outputs: type=image,name=${{ env.REGISTRY_GITHUB }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           provenance: false
+          # Import-only scoped deps cache (seeded by populate-deps-cache).
+          # No cache-to here: routine releases never pay the export cost.
+          cache-from: ${{ steps.depscache.outputs.list }}
 
       - name: Export digest artifact
         run: |
