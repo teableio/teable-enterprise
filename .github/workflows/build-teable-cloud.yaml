@@ -58,8 +58,8 @@ jobs:
         run: |
           # The sandbox agent is NOT built here anymore: it is content-identical
           # across editions, so build-teable-ee.yaml builds it once (multi-arch)
-          # and publishes teable-sandbox-agent-cloud as a same-digest alias,
-          # including the ECR/Aliyun sync and the preheat call.
+          # under the single canonical name teable-sandbox-agent, including the
+          # ECR/Aliyun sync and the preheat call.
           TARGET_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud"}]}'
           MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"}]}'
 

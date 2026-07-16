@@ -73,8 +73,8 @@ jobs:
           FAILED=0
 
           if [ "${{ inputs.edition }}" = "cloud" ]; then
-            # teable-sandbox-agent-cloud is synced by the ee lane below: the agent
-            # is built once in build-teable-ee.yaml and -cloud is a digest alias.
+            # The sandbox agent is NOT synced here: it has a single canonical
+            # name (no -cloud alias) and is built + synced only by the ee lane.
             IMAGES=("teable-cloud" "teable-sandbox-cloud")
             for image in "${IMAGES[@]}"; do
               for tag in "${TAGS[@]}"; do
@@ -87,7 +87,7 @@ jobs:
               done
             done
           elif [ "${{ inputs.edition }}" = "ee" ]; then
-            IMAGES=("teable" "teable-sandbox" "teable-sandbox-agent")
+            IMAGES=("teable" "teable-sandbox")
             SUFFIXES=("" "-ee")
 
             for image in "${IMAGES[@]}"; do
@@ -103,16 +103,13 @@ jobs:
               done
             done
 
-            # Transitional cloud alias of the unified sandbox agent (same digest
-            # as teable-sandbox-agent). teable.cn preheats pull this name from
-            # Aliyun, so it syncs with the standard tags plus the floating
-            # "latest" the cloud lane historically published.
-            for tag in "${TAGS[@]}" "latest"; do
+            # Single canonical sandbox agent (no -ee/-cloud alias); both
+            # teable.ai and teable.cn preheat teable/teable-sandbox-agent.
+            for tag in "${TAGS[@]}"; do
               [ -n "$tag" ] || continue
-              [ "$tag" = "beta" ] && continue
               retry_copy \
-                "${SRC_REGISTRY}/teable-sandbox-agent-cloud:${tag}" \
-                "${DST_REGISTRY}/teable-sandbox-agent-cloud:${tag}" \
+                "${SRC_REGISTRY}/teable-sandbox-agent:${tag}" \
+                "${DST_REGISTRY}/teable-sandbox-agent:${tag}" \
                 "--all" \
                 || FAILED=1
             done

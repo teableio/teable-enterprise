@@ -9,11 +9,6 @@ env:
   REGISTRY_DOCKERHUB: docker.io/teableio
   CE_IMAGE_SUFFIX: ""
   EE_IMAGE_SUFFIX: "-ee"
-  # Transitional alias for the unified sandbox agent image (same digest as the
-  # canonical build). The cloud build no longer builds its own agent; retire this
-  # alias after all cloud environments reference the canonical
-  # ghcr.io/teableio/teable-sandbox-agent prefix (target: 2 release cycles).
-  CLOUD_IMAGE_SUFFIX: "-cloud"
 
 on:
   workflow_dispatch:
@@ -138,9 +133,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.PACKAGES_KEY }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: Check for published base image
         id: check
         env:
@@ -154,9 +146,15 @@ jobs:
             echo "Base image missing, will build: $BASE_REF"
           fi
 
+      # QEMU must be registered before the Buildx builder is created, or the
+      # cold-base multi-arch rebuild gets a builder without the arm64 emulator.
       - name: Set up QEMU (arm64 emulation for the rare base rebuild)
         if: steps.check.outputs.exists == 'false'
         uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v3
 
       - name: Build and push base image
         if: steps.check.outputs.exists == 'false'
@@ -293,11 +291,10 @@ jobs:
           pattern: digests-${{ matrix.target }}-linux-*
           merge-multiple: true
 
-      - name: Create canonical and EE alias manifests
+      - name: Create canonical manifests
         env:
           META_JSON: ${{ steps.meta.outputs.json }}
           CANONICAL_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}
-          EE_ALIAS_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}${{ env.EE_IMAGE_SUFFIX }}
         run: |
           mapfile -t TAGS < <(jq -r '.tags[]' <<<"$META_JSON")
           mapfile -t DIGEST_FILES < <(find "/tmp/digests/${{ matrix.target }}" -type f -name '*.digest' | sort)
@@ -321,21 +318,17 @@ jobs:
             docker buildx imagetools create \
               --tag "${CANONICAL_IMAGE}:${tag_name}" \
               "${SOURCES[@]}"
-            docker buildx imagetools create \
-              --tag "${EE_ALIAS_IMAGE}:${tag_name}" \
-              "${CANONICAL_IMAGE}:${tag_name}"
           done
 
-      # The sandbox agent is content-identical across editions, so the cloud
-      # flavor is published from here as a same-digest alias instead of being
-      # built a second time in build-teable-cloud.yaml.
-      - name: Create cloud alias manifests for the unified sandbox agent
-        if: matrix.target == 'sandbox-agent'
+      # The sandbox agent is content-identical across editions and ships under
+      # the single canonical name (no -ee/-cloud aliases); only the edition app
+      # images (teable, teable-sandbox) carry the -ee alias.
+      - name: Create EE alias manifests
+        if: matrix.target != 'sandbox-agent'
         env:
           META_JSON: ${{ steps.meta.outputs.json }}
           CANONICAL_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}
-          CLOUD_ALIAS_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}${{ env.CLOUD_IMAGE_SUFFIX }}
-          RELEASE_ID: ${{ needs.prepare-release.outputs.release_id }}
+          EE_ALIAS_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}${{ env.EE_IMAGE_SUFFIX }}
         run: |
           mapfile -t TAGS < <(jq -r '.tags[]' <<<"$META_JSON")
 
@@ -345,14 +338,9 @@ jobs:
               continue
             fi
             docker buildx imagetools create \
-              --tag "${CLOUD_ALIAS_IMAGE}:${tag_name}" \
+              --tag "${EE_ALIAS_IMAGE}:${tag_name}" \
               "${CANONICAL_IMAGE}:${tag_name}"
           done
-
-          # Cloud consumers historically used a floating "latest" (the EE lane uses "beta").
-          docker buildx imagetools create \
-            --tag "${CLOUD_ALIAS_IMAGE}:latest" \
-            "${CANONICAL_IMAGE}:${RELEASE_ID}"
 
   sync-dockerhub:
     needs: [prepare-release, track-start, merge-manifests]
@@ -373,7 +361,7 @@ jobs:
           set -euo pipefail
 
           IFS=',' read -ra TAG_LIST <<< "$TAGS"
-          IMAGES=("teable" "teable-ee" "teable-sandbox" "teable-sandbox-ee" "teable-sandbox-agent" "teable-sandbox-agent-ee")
+          IMAGES=("teable" "teable-ee" "teable-sandbox" "teable-sandbox-ee" "teable-sandbox-agent")
 
           for image in "${IMAGES[@]}"; do
             for tag in "${TAG_LIST[@]}"; do
@@ -395,9 +383,9 @@ jobs:
       tags: "beta,${{ needs.prepare-release.outputs.source_sha }},${{ needs.prepare-release.outputs.release_id }}"
     secrets: inherit
 
-  # Cloud distribution of the unified sandbox agent (ECR copy of the -cloud
-  # alias). Lives here because this workflow now owns the only agent build;
-  # build-teable-cloud.yaml no longer builds or syncs the agent.
+  # Cloud distribution of the sandbox agent (ECR copy). Lives here because this
+  # workflow now owns the only agent build; build-teable-cloud.yaml no longer
+  # builds or syncs the agent. Single canonical name — no -cloud alias.
   sync-ecr-agent:
     needs: [prepare-release, track-start, merge-manifests]
     if: needs.merge-manifests.result == 'success'
@@ -415,10 +403,10 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-west-2
 
-      - name: Sync unified sandbox agent alias to ECR
+      - name: Sync sandbox agent to ECR
         env:
           SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
-          TAGS: latest,${{ needs.prepare-release.outputs.source_sha }},${{ needs.prepare-release.outputs.release_id }}
+          TAGS: beta,${{ needs.prepare-release.outputs.source_sha }},${{ needs.prepare-release.outputs.release_id }}
           ECR_REGISTRY: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable
         run: |
           set -euo pipefail
@@ -431,8 +419,8 @@ jobs:
             skopeo copy --all \
               --src-creds="$SRC_CREDS" \
               --dest-creds="AWS:${ECR_PASSWORD}" \
-              "docker://${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent-cloud:${tag}" \
-              "docker://${ECR_REGISTRY}/teable-sandbox-agent-cloud:${tag}"
+              "docker://${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent:${tag}" \
+              "docker://${ECR_REGISTRY}/teable-sandbox-agent:${tag}"
           done
 
   preheat-sandbox-agent:

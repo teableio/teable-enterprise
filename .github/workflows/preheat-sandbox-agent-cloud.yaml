@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          image="ghcr.io/teableio/teable-sandbox-agent-cloud:${IMAGE_TAG}"
+          image="ghcr.io/teableio/teable-sandbox-agent:${IMAGE_TAG}"
           payload="$(jq -n --arg image "$image" '{image: $image}')"
           http_code="$(curl -sS -w "%{http_code}" -o /tmp/preheat-ai-response.json \
             -X POST 'https://infra.teable.ai/api/image-preheats' \
@@ -55,7 +55,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          image="registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-agent-cloud:${IMAGE_TAG}"
+          image="registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-agent:${IMAGE_TAG}"
           payload="$(jq -n --arg image "$image" '{image: $image}')"
           http_code="$(curl -sS -w "%{http_code}" -o /tmp/preheat-cn-response.json \
             -X POST 'https://infra.teable.cn/api/image-preheats' \
