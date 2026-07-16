@@ -73,8 +73,6 @@ jobs:
           FAILED=0
 
           if [ "${{ inputs.edition }}" = "cloud" ]; then
-            # The sandbox agent is NOT synced here: it has a single canonical
-            # name (no -cloud alias) and is built + synced only by the ee lane.
             IMAGES=("teable-cloud" "teable-sandbox-cloud")
             for image in "${IMAGES[@]}"; do
               for tag in "${TAGS[@]}"; do
@@ -85,6 +83,22 @@ jobs:
                   "--all" \
                   || FAILED=1
               done
+            done
+
+            # The agent is built by the ee lane under its single canonical name
+            # (no -cloud alias), but it is synced in BOTH lanes so a manual
+            # cloud-only resync still refreshes the CN agent tag. skopeo copy
+            # is idempotent, so the double sync on the normal path is harmless.
+            # "latest" is skipped: the agent publishes no latest tag (its only
+            # consumers pull prefix + explicit app build tag).
+            for tag in "${TAGS[@]}"; do
+              [ -n "$tag" ] || continue
+              [ "$tag" = "latest" ] && continue
+              retry_copy \
+                "${SRC_REGISTRY}/teable-sandbox-agent:${tag}" \
+                "${DST_REGISTRY}/teable-sandbox-agent:${tag}" \
+                "--all" \
+                || FAILED=1
             done
           elif [ "${{ inputs.edition }}" = "ee" ]; then
             IMAGES=("teable" "teable-sandbox")

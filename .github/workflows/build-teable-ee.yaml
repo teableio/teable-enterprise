@@ -383,49 +383,9 @@ jobs:
       tags: "beta,${{ needs.prepare-release.outputs.source_sha }},${{ needs.prepare-release.outputs.release_id }}"
     secrets: inherit
 
-  # Cloud distribution of the sandbox agent (ECR copy). Lives here because this
-  # workflow now owns the only agent build; build-teable-cloud.yaml no longer
-  # builds or syncs the agent. Single canonical name — no -cloud alias.
-  sync-ecr-agent:
-    needs: [prepare-release, track-start, merge-manifests]
-    if: needs.merge-manifests.result == 'success'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Install skopeo
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y skopeo
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-west-2
-
-      - name: Sync sandbox agent to ECR
-        env:
-          SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
-          TAGS: beta,${{ needs.prepare-release.outputs.source_sha }},${{ needs.prepare-release.outputs.release_id }}
-          ECR_REGISTRY: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable
-        run: |
-          set -euo pipefail
-
-          ECR_PASSWORD="$(aws ecr get-login-password --region us-west-2)"
-          IFS=',' read -ra TAG_LIST <<< "$TAGS"
-
-          for tag in "${TAG_LIST[@]}"; do
-            [ -n "$tag" ] || continue
-            skopeo copy --all \
-              --src-creds="$SRC_CREDS" \
-              --dest-creds="AWS:${ECR_PASSWORD}" \
-              "docker://${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent:${tag}" \
-              "docker://${ECR_REGISTRY}/teable-sandbox-agent:${tag}"
-          done
-
   preheat-sandbox-agent:
-    needs: [prepare-release, track-start, merge-manifests, sync-ecr-agent, sync-aliyun]
-    if: needs.merge-manifests.result == 'success' && needs.sync-ecr-agent.result == 'success' && needs.sync-aliyun.result == 'success'
+    needs: [prepare-release, track-start, merge-manifests, sync-aliyun]
+    if: needs.merge-manifests.result == 'success' && needs.sync-aliyun.result == 'success'
     uses: ./.github/workflows/preheat-sandbox-agent-cloud.yaml
     with:
       image_tag: ${{ needs.prepare-release.outputs.release_id }}
@@ -439,7 +399,6 @@ jobs:
         merge-manifests,
         sync-dockerhub,
         sync-aliyun,
-        sync-ecr-agent,
         preheat-sandbox-agent,
       ]
     if: always()
@@ -450,9 +409,9 @@ jobs:
       - name: Determine final status
         id: status
         run: |
-          if [ "${{ needs.build-push.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests.result }}" == "cancelled" ] || [ "${{ needs.sync-dockerhub.result }}" == "cancelled" ] || [ "${{ needs.sync-aliyun.result }}" == "cancelled" ] || [ "${{ needs.sync-ecr-agent.result }}" == "cancelled" ] || [ "${{ needs.preheat-sandbox-agent.result }}" == "cancelled" ]; then
+          if [ "${{ needs.build-push.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests.result }}" == "cancelled" ] || [ "${{ needs.sync-dockerhub.result }}" == "cancelled" ] || [ "${{ needs.sync-aliyun.result }}" == "cancelled" ] || [ "${{ needs.preheat-sandbox-agent.result }}" == "cancelled" ]; then
             echo "status=Cancelled" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.merge-manifests.result }}" == "success" ] && [ "${{ needs.sync-dockerhub.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ] && [ "${{ needs.sync-ecr-agent.result }}" == "success" ] && [ "${{ needs.preheat-sandbox-agent.result }}" == "success" ]; then
+          elif [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.merge-manifests.result }}" == "success" ] && [ "${{ needs.sync-dockerhub.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ] && [ "${{ needs.preheat-sandbox-agent.result }}" == "success" ]; then
             echo "status=Released" >> $GITHUB_OUTPUT
           else
             echo "status=Fail" >> $GITHUB_OUTPUT
@@ -466,7 +425,6 @@ jobs:
         merge-manifests,
         sync-dockerhub,
         sync-aliyun,
-        sync-ecr-agent,
         preheat-sandbox-agent,
         determine-status,
       ]
