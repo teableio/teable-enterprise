@@ -62,7 +62,7 @@ jobs:
           # Aliyun sync and the preheat call. The agent is never synced to ECR:
           # both clouds pull it from ghcr/Aliyun via SANDBOX_OPENSANDBOX_IMAGE.
           TARGET_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud"}]}'
-          MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"}]}'
+          MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud","cache_image":"teable","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud","cache_image":"teable-sandbox","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"}]}'
 
           if [ -n "$INPUT_RELEASE_ID" ]; then
             RELEASE_ID="$INPUT_RELEASE_ID"
@@ -230,6 +230,13 @@ jobs:
             GIT_COMMIT_SHA=${{ needs.prepare-release.outputs.source_sha }}
           push: true
           provenance: false
+          # Second cache-from falls back to the EE lane's cache for the same
+          # Dockerfile: the deps stages are edition-independent (the edition
+          # build-arg is consumed after them), so either lane's cache hits.
+          cache-from: |
+            type=registry,ref=${{ env.REGISTRY_GITHUB }}/teable-buildcache:${{ matrix.image }}-${{ matrix.platform_key }}
+            type=registry,ref=${{ env.REGISTRY_GITHUB }}/teable-buildcache:${{ matrix.cache_image }}-${{ matrix.platform_key }}
+          cache-to: type=registry,ref=${{ env.REGISTRY_GITHUB }}/teable-buildcache:${{ matrix.image }}-${{ matrix.platform_key }},mode=max,image-manifest=true,oci-mediatypes=true
 
   sync-ecr:
     needs: [prepare-release, track-start, build-push]
