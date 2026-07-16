@@ -208,6 +208,22 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Import-only consumer of the deps-stage cache maintained by
+      # build-teable-ee.yaml (same Dockerfile, same manifests contexts — the
+      # edition/Sentry build-args are not consumed by the deps stages, so the
+      # cache keys match). A missing ref degrades to a cold build.
+      - name: Compute deps cache refs
+        id: cache_refs
+        if: matrix.file == 'Dockerfile'
+        run: |
+          {
+            echo 'cache_from<<EOF'
+            for target in frontend-deps backend-deps runtime-deps; do
+              echo "type=registry,ref=ghcr.io/teableio/teable-build-cache:${target}-${{ matrix.platform_key }}"
+            done
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
@@ -216,6 +232,7 @@ jobs:
           file: dockers/teable/${{ matrix.file }}
           platforms: ${{ matrix.platform }}
           tags: ${{ steps.meta.outputs.tags }}
+          cache-from: ${{ steps.cache_refs.outputs.cache_from }}
           build-args: |
             ENABLE_CSP=false
             NEXT_BUILD_ENV_EDITION=CLOUD

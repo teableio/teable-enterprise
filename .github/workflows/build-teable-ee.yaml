@@ -9,6 +9,15 @@ env:
   REGISTRY_DOCKERHUB: docker.io/teableio
   CE_IMAGE_SUFFIX: ""
   EE_IMAGE_SUFFIX: "-ee"
+  # Registry-backed build cache for the app image's dependency stages only
+  # (frontend-deps / backend-deps / runtime-deps). Builder stages are never
+  # exported — that was what sank the April 2026 type=gha attempt (89a47d1):
+  # multi-GB cache blobs and slow decompression for stages that invalidate on
+  # every release anyway. Deps stages only invalidate when dependency
+  # manifests change (~8% of builds), and skipping their cold pnpm
+  # fetch/install saves ~13 min on the arm64 app leg (bench 2026-07-16).
+  BUILD_CACHE_IMAGE: ghcr.io/teableio/teable-build-cache
+  BUILD_CACHE_TARGETS: frontend-deps backend-deps runtime-deps
 
 on:
   workflow_dispatch:
@@ -337,6 +346,20 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Import-only: a missing/stale cache ref degrades to a cold build, never
+      # a failure. Sandbox rows get an empty string (no cache).
+      - name: Compute deps cache refs
+        id: cache_refs
+        if: matrix.file == 'Dockerfile'
+        run: |
+          {
+            echo 'cache_from<<EOF'
+            for target in $BUILD_CACHE_TARGETS; do
+              echo "type=registry,ref=${BUILD_CACHE_IMAGE}:${target}-${{ matrix.platform_key }}"
+            done
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
@@ -344,6 +367,7 @@ jobs:
           context: .
           file: dockers/teable/${{ matrix.file }}
           platforms: ${{ matrix.platform }}
+          cache-from: ${{ steps.cache_refs.outputs.cache_from }}
           build-args: |
             ENABLE_CSP=false
             NEXT_BUILD_ENV_EDITION=EE
@@ -352,6 +376,26 @@ jobs:
             GIT_COMMIT_SHA=${{ needs.prepare-release.outputs.source_sha }}
           outputs: type=image,name=${{ env.REGISTRY_GITHUB }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           provenance: false
+
+      # Refresh the deps cache from the layers the main build just produced
+      # (or confirmed). Steady state (deps unchanged) is a no-op re-push of
+      # ~8s per target; on manifest-change builds it exports the fresh deps
+      # layers (~1-2 min, layers already local). Never gates the release.
+      - name: Refresh deps build cache
+        if: matrix.file == 'Dockerfile'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          for target in $BUILD_CACHE_TARGETS; do
+            docker buildx build \
+              --file dockers/teable/${{ matrix.file }} \
+              --target "$target" \
+              --platform ${{ matrix.platform }} \
+              --cache-from "type=registry,ref=${BUILD_CACHE_IMAGE}:${target}-${{ matrix.platform_key }}" \
+              --cache-to "type=registry,ref=${BUILD_CACHE_IMAGE}:${target}-${{ matrix.platform_key }},mode=max,compression=zstd,force-compression=true,oci-mediatypes=true,image-manifest=true" \
+              --provenance=false \
+              .
+          done
 
       - name: Export digest artifact
         run: |
@@ -365,6 +409,30 @@ jobs:
           path: /tmp/digests/${{ matrix.platform_key }}.digest
           if-no-files-found: error
           retention-days: 1
+
+  # Overwriting the cache tags orphans the previous cache manifests as
+  # untagged package versions (GHCR never garbage-collects); reap them so
+  # storage stays at ~one cache set per platform. This is safe ONLY for
+  # teable-build-cache, where every live manifest is tagged — image packages
+  # (teable, teable-sandbox, …) hold untagged-but-referenced per-arch
+  # manifests from push-by-digest and must never get this treatment.
+  gc-build-cache:
+    needs: build-push
+    if: needs.build-push.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete untagged teable-build-cache versions
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          gh api '/orgs/teableio/packages/container/teable-build-cache/versions?per_page=100' \
+            --jq '.[] | select(.metadata.container.tags | length == 0) | .id' |
+          while read -r vid; do
+            gh api -X DELETE "/orgs/teableio/packages/container/teable-build-cache/versions/${vid}" \
+              && echo "deleted untagged cache version ${vid}" \
+              || echo "failed to delete cache version ${vid} (non-fatal)"
+          done
 
   merge-manifests:
     needs: [prepare-release, track-start, build-push]
