@@ -181,32 +181,36 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `list_b64=${encoded}\n`);
           EOF
 
-      - name: Free runner disk space for app build
+      # Freeing disk costs 1-4 min of pure rm -rf (measured variance); run it
+      # in the background so it overlaps the buildx setup and cache import
+      # instead of sitting on the critical path.
+      - name: Start background disk cleanup
         if: matrix.file == 'Dockerfile'
         run: |
-          set -euxo pipefail
-
-          echo "Disk before cleanup:"
-          df -h /
-
-          sudo rm -rf \
-            /opt/ghc \
-            /opt/hostedtoolcache \
-            /usr/local/.ghcup \
-            /usr/local/lib/android \
-            /usr/local/share/boost \
-            /usr/local/share/chromium \
-            /usr/share/dotnet \
-            /usr/share/swift
-
-          sudo apt-get clean
-          sudo docker system prune -af --volumes || true
-
-          echo "Disk after cleanup:"
-          df -h /
+          sudo nohup sh -c 'rm -rf /opt/ghc /opt/hostedtoolcache /usr/local/.ghcup /usr/local/lib/android /usr/local/share/boost /usr/local/share/chromium /usr/share/dotnet /usr/share/swift; touch /tmp/disk-cleanup.done' > /tmp/disk-cleanup.log 2>&1 &
+          echo "cleanup started"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Wait for background disk cleanup
+        if: matrix.file == 'Dockerfile'
+        run: |
+          for i in $(seq 1 120); do [ -f /tmp/disk-cleanup.done ] && break; sleep 2; done
+          [ -f /tmp/disk-cleanup.done ] || echo "::warning::disk cleanup still running, proceeding"
+          df -h /
+
+      - name: Compose deps cache-from list
+        id: depscache
+        if: matrix.file == 'Dockerfile'
+        run: |
+          {
+            echo 'list<<CACHE_EOF'
+            for t in runtime-deps frontend-deps backend-deps; do
+              echo "type=registry,ref=ghcr.io/teableio/teable-buildcache:deps-${t}-${{ matrix.platform_key }}"
+            done
+            echo 'CACHE_EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push by digest
         id: build
@@ -230,6 +234,11 @@ jobs:
             GIT_COMMIT_SHA=${{ needs.prepare-release.outputs.source_sha }}
           push: true
           provenance: false
+          # Import-only scoped deps cache, seeded by the EE lane's
+          # populate-deps-cache job — the deps stages are edition-independent
+          # (the edition build-arg is consumed after them), so the same cache
+          # serves both lanes. Empty for the sandbox leg (step skipped).
+          cache-from: ${{ steps.depscache.outputs.list }}
 
   sync-ecr:
     needs: [prepare-release, track-start, build-push]
