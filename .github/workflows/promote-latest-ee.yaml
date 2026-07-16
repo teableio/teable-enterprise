@@ -68,3 +68,21 @@ jobs:
       edition: ee
       tags: "latest"
     secrets: inherit
+
+  notify-infra:
+    name: Notify teable-infra platform release
+    needs: [promote-latest, sync-aliyun]
+    if: needs.promote-latest.result == 'success' && needs.sync-aliyun.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch teable-stable-promoted to teable-infra
+        env:
+          DISPATCH_TOKEN: ${{ secrets.TEABLE_INFRA_DISPATCH_TOKEN }}
+          RELEASE_ID: ${{ github.event.client_payload.release_id || inputs.release_id }}
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/teableio/teable-infra/dispatches \
+            -d "{\"event_type\":\"teable-stable-promoted\",\"client_payload\":{\"release_id\":\"${RELEASE_ID}\"}}"
+          echo "dispatched teable-stable-promoted release_id=${RELEASE_ID}"
