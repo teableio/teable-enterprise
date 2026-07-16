@@ -217,8 +217,6 @@ jobs:
             SCAFFOLD_DRIFT=fail
           outputs: type=image,name=${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent,push-by-digest=true,name-canonical=true,push=true
           provenance: false
-          cache-from: type=registry,ref=${{ env.REGISTRY_GITHUB }}/teable-buildcache:teable-sandbox-agent-${{ matrix.platform_key }}
-          cache-to: type=registry,ref=${{ env.REGISTRY_GITHUB }}/teable-buildcache:teable-sandbox-agent-${{ matrix.platform_key }},mode=max,image-manifest=true,oci-mediatypes=true
 
       - name: Export digest artifact
         run: |
@@ -354,11 +352,14 @@ jobs:
             GIT_COMMIT_SHA=${{ needs.prepare-release.outputs.source_sha }}
           outputs: type=image,name=${{ env.REGISTRY_GITHUB }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           provenance: false
-          # Layer cache on ghcr: the Dockerfile keys its deps stages on the
-          # manifest/lockfile set only, so source-only releases skip pnpm
-          # fetch/install entirely (the arm64 leg spends ~20 min there cold).
-          cache-from: type=registry,ref=${{ env.REGISTRY_GITHUB }}/teable-buildcache:${{ matrix.image }}-${{ matrix.platform_key }}
-          cache-to: type=registry,ref=${{ env.REGISTRY_GITHUB }}/teable-buildcache:${{ matrix.image }}-${{ matrix.platform_key }},mode=max,image-manifest=true,oci-mediatypes=true
+          # Layer cache on ghcr, arm64 only. The Dockerfile keys its deps stages
+          # on the manifest/lockfile set, so cached builds skip pnpm
+          # fetch/install — worth it exactly where that dominates. Benched on
+          # release-2256's commit: arm64 31.5 -> 12.0 min; on amd64 the cache
+          # pull + export overhead exceeded its ~5.5 min deps cost
+          # (14.3 -> 15.6 min), so the amd64 leg builds uncached.
+          cache-from: ${{ matrix.platform_key == 'linux-arm64' && format('type=registry,ref={0}/teable-buildcache:{1}-{2}', env.REGISTRY_GITHUB, matrix.image, matrix.platform_key) || '' }}
+          cache-to: ${{ matrix.platform_key == 'linux-arm64' && format('type=registry,ref={0}/teable-buildcache:{1}-{2},mode=max,image-manifest=true,oci-mediatypes=true', env.REGISTRY_GITHUB, matrix.image, matrix.platform_key) || '' }}
 
       - name: Export digest artifact
         run: |
