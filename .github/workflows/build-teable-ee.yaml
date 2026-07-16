@@ -66,8 +66,8 @@ jobs:
           INPUT_RELEASE_TIMESTAMP: ${{ github.event.client_payload.release_timestamp || inputs.release_timestamp }}
           INPUT_RELEASE_SEQUENCE: ${{ github.event.client_payload.release_sequence || inputs.release_sequence }}
         run: |
-          TARGET_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox"},{"target":"sandbox-agent","file":"Dockerfile.sandbox-agent","image":"teable-sandbox-agent"}]}'
-          MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"app","file":"Dockerfile","image":"teable","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"},{"target":"sandbox-agent","file":"Dockerfile.sandbox-agent","image":"teable-sandbox-agent","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox-agent","file":"Dockerfile.sandbox-agent","image":"teable-sandbox-agent","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"}]}'
+          TARGET_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox"}]}'
+          MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"app","file":"Dockerfile","image":"teable","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"}]}'
 
           if [ -n "$INPUT_RELEASE_ID" ]; then
             RELEASE_ID="$INPUT_RELEASE_ID"
@@ -169,6 +169,118 @@ jobs:
           push: true
           provenance: false
 
+  # The agent's thin source layer builds in ~3 minutes, but inside the shared
+  # build-push matrix its manifest could only be assembled after the slowest
+  # leg (the app arm64 build, ~30 min) — and the cloud lane's verify-agent
+  # gate waits for that manifest. Building the agent in its own lane publishes
+  # the canonical tag minutes into the run, so the cloud lane never waits on
+  # this workflow's app builds.
+  build-agent:
+    needs: [prepare-release, track-start, ensure-agent-base]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_key: linux-amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            platform_key: linux-arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
+
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: dockers/teable/Dockerfile.sandbox-agent
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            SANDBOX_AGENT_BASE_IMAGE=${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent-base:${{ needs.prepare-release.outputs.agent_base_tag }}
+            SCAFFOLD_DRIFT=fail
+          outputs: type=image,name=${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent,push-by-digest=true,name-canonical=true,push=true
+          provenance: false
+
+      - name: Export digest artifact
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.platform_key }}.digest"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-sandbox-agent-${{ matrix.platform_key }}
+          path: /tmp/digests/${{ matrix.platform_key }}.digest
+          if-no-files-found: error
+          retention-days: 1
+
+  # Publishes the canonical agent manifest as soon as the two agent legs are
+  # done — the cloud lane's verify-agent polls for exactly these tags. The
+  # agent ships only under its canonical name (no -ee/-cloud aliases).
+  merge-agent-manifest:
+    needs: [prepare-release, track-start, build-agent]
+    if: needs.build-agent.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Download digest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests/sandbox-agent
+          pattern: digests-sandbox-agent-linux-*
+          merge-multiple: true
+
+      - name: Create canonical manifests
+        env:
+          CANONICAL_IMAGE: ${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent
+          TAGS: beta,${{ needs.prepare-release.outputs.source_sha }},${{ needs.prepare-release.outputs.release_id }}
+        run: |
+          mapfile -t DIGEST_FILES < <(find /tmp/digests/sandbox-agent -type f -name '*.digest' | sort)
+          if [ "${#DIGEST_FILES[@]}" -eq 0 ]; then
+            echo "No digest artifacts found for sandbox-agent" >&2
+            exit 1
+          fi
+
+          SOURCES=()
+          for digest_file in "${DIGEST_FILES[@]}"; do
+            digest="$(tr -d '\n' < "$digest_file")"
+            SOURCES+=("${CANONICAL_IMAGE}@${digest}")
+          done
+
+          IFS=',' read -ra TAG_LIST <<< "$TAGS"
+          for tag in "${TAG_LIST[@]}"; do
+            [ -n "$tag" ] || continue
+            docker buildx imagetools create \
+              --tag "${CANONICAL_IMAGE}:${tag}" \
+              "${SOURCES[@]}"
+          done
+
   build-push:
     needs: [prepare-release, track-start, ensure-agent-base]
     runs-on: ${{ matrix.runner }}
@@ -238,8 +350,6 @@ jobs:
             BUILD_VERSION=${{ needs.prepare-release.outputs.release_id }}
             FRONTEND_RELEASE=${{ needs.prepare-release.outputs.release_id }}
             GIT_COMMIT_SHA=${{ needs.prepare-release.outputs.source_sha }}
-            SANDBOX_AGENT_BASE_IMAGE=${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent-base:${{ needs.prepare-release.outputs.agent_base_tag }}
-            SCAFFOLD_DRIFT=fail
           outputs: type=image,name=${{ env.REGISTRY_GITHUB }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           provenance: false
 
@@ -320,11 +430,10 @@ jobs:
               "${SOURCES[@]}"
           done
 
-      # The sandbox agent is content-identical across editions and ships under
-      # the single canonical name (no -ee/-cloud aliases); only the edition app
-      # images (teable, teable-sandbox) carry the -ee alias.
+      # Edition app images (teable, teable-sandbox) carry the -ee alias; the
+      # agent is not in this matrix — it ships canonical-only from its own
+      # merge-agent-manifest job.
       - name: Create EE alias manifests
-        if: matrix.target != 'sandbox-agent'
         env:
           META_JSON: ${{ steps.meta.outputs.json }}
           CANONICAL_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}
@@ -343,8 +452,8 @@ jobs:
           done
 
   sync-dockerhub:
-    needs: [prepare-release, track-start, merge-manifests]
-    if: needs.merge-manifests.result == 'success'
+    needs: [prepare-release, track-start, merge-manifests, merge-agent-manifest]
+    if: needs.merge-manifests.result == 'success' && needs.merge-agent-manifest.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Install skopeo
@@ -375,8 +484,8 @@ jobs:
           done
 
   sync-aliyun:
-    needs: [prepare-release, track-start, merge-manifests]
-    if: needs.merge-manifests.result == 'success'
+    needs: [prepare-release, track-start, merge-manifests, merge-agent-manifest]
+    if: needs.merge-manifests.result == 'success' && needs.merge-agent-manifest.result == 'success'
     uses: ./.github/workflows/sync-aliyun.yaml
     with:
       edition: ee
@@ -384,8 +493,8 @@ jobs:
     secrets: inherit
 
   preheat-sandbox-agent:
-    needs: [prepare-release, track-start, merge-manifests, sync-aliyun]
-    if: needs.merge-manifests.result == 'success' && needs.sync-aliyun.result == 'success'
+    needs: [prepare-release, track-start, merge-agent-manifest, sync-aliyun]
+    if: needs.merge-agent-manifest.result == 'success' && needs.sync-aliyun.result == 'success'
     uses: ./.github/workflows/preheat-sandbox-agent-cloud.yaml
     with:
       image_tag: ${{ needs.prepare-release.outputs.release_id }}
@@ -397,6 +506,7 @@ jobs:
         track-start,
         build-push,
         merge-manifests,
+        merge-agent-manifest,
         sync-dockerhub,
         sync-aliyun,
         preheat-sandbox-agent,
@@ -409,9 +519,9 @@ jobs:
       - name: Determine final status
         id: status
         run: |
-          if [ "${{ needs.build-push.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests.result }}" == "cancelled" ] || [ "${{ needs.sync-dockerhub.result }}" == "cancelled" ] || [ "${{ needs.sync-aliyun.result }}" == "cancelled" ] || [ "${{ needs.preheat-sandbox-agent.result }}" == "cancelled" ]; then
+          if [ "${{ needs.build-push.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests.result }}" == "cancelled" ] || [ "${{ needs.merge-agent-manifest.result }}" == "cancelled" ] || [ "${{ needs.sync-dockerhub.result }}" == "cancelled" ] || [ "${{ needs.sync-aliyun.result }}" == "cancelled" ] || [ "${{ needs.preheat-sandbox-agent.result }}" == "cancelled" ]; then
             echo "status=Cancelled" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.merge-manifests.result }}" == "success" ] && [ "${{ needs.sync-dockerhub.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ] && [ "${{ needs.preheat-sandbox-agent.result }}" == "success" ]; then
+          elif [ "${{ needs.build-push.result }}" == "success" ] && [ "${{ needs.merge-manifests.result }}" == "success" ] && [ "${{ needs.merge-agent-manifest.result }}" == "success" ] && [ "${{ needs.sync-dockerhub.result }}" == "success" ] && [ "${{ needs.sync-aliyun.result }}" == "success" ] && [ "${{ needs.preheat-sandbox-agent.result }}" == "success" ]; then
             echo "status=Released" >> $GITHUB_OUTPUT
           else
             echo "status=Fail" >> $GITHUB_OUTPUT
@@ -423,6 +533,7 @@ jobs:
         track-start,
         build-push,
         merge-manifests,
+        merge-agent-manifest,
         sync-dockerhub,
         sync-aliyun,
         preheat-sandbox-agent,
