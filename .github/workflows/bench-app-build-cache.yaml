@@ -1,0 +1,169 @@
+name: Bench app build cache
+
+# Experiment harness for re-introducing build caching on the app image —
+# scoped to the dependency stages only (frontend-deps / backend-deps /
+# runtime-deps), registry cache backend with zstd blobs. The April 2026
+# attempt (89a47d1 removed it) exported the whole graph to the GHA cache
+# backend: multi-GB blobs, slow decompression, 10GB quota thrash. This bench
+# never exports builder stages and never touches release tags: images go
+# push-by-digest to teable-build-bench, cache manifests to teable-build-cache.
+#
+# Modes:
+#   populate — build the three deps targets and export their cache (cold seed)
+#   warm     — full app build with --cache-from, then a steady-state re-export
+#              to prove routine-release export cost is ~zero
+#   baseline — full app build with no cache args (control group)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'teable-ee ref (sha/branch) to build'
+        required: true
+        type: string
+      mode:
+        description: 'Bench mode'
+        required: true
+        type: choice
+        options: [populate, warm, baseline]
+      platform:
+        description: 'Target platform'
+        required: true
+        type: choice
+        options: [linux/arm64, linux/amd64]
+        default: linux/arm64
+
+env:
+  CACHE_IMAGE: ghcr.io/teableio/teable-build-cache
+  BENCH_IMAGE: ghcr.io/teableio/teable-build-bench
+  DEPS_TARGETS: frontend-deps backend-deps runtime-deps
+
+jobs:
+  bench:
+    runs-on: ${{ inputs.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 90
+    steps:
+      - name: Checkout teable-ee source
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ inputs.source_ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+
+      - name: Prepare generated Docker contexts
+        run: node ./scripts/generate-docker-contexts.mjs
+
+      # Identical to the release workflow so timings stay comparable.
+      - name: Free runner disk space for app build
+        run: |
+          set -euxo pipefail
+          df -h /
+          sudo rm -rf \
+            /opt/ghc \
+            /opt/hostedtoolcache \
+            /usr/local/.ghcup \
+            /usr/local/lib/android \
+            /usr/local/share/boost \
+            /usr/local/share/chromium \
+            /usr/share/dotnet \
+            /usr/share/swift
+          sudo apt-get clean
+          sudo docker system prune -af --volumes || true
+          df -h /
+
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve bench variables
+        id: vars
+        run: |
+          platform='${{ inputs.platform }}'
+          echo "platform_key=${platform//\//-}" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Populate deps cache (cold seed)
+        if: inputs.mode == 'populate'
+        env:
+          PLATFORM: ${{ inputs.platform }}
+          PLATFORM_KEY: ${{ steps.vars.outputs.platform_key }}
+        run: |
+          set -euo pipefail
+          for target in $DEPS_TARGETS; do
+            start=$SECONDS
+            docker buildx build \
+              --file dockers/teable/Dockerfile \
+              --target "$target" \
+              --platform "$PLATFORM" \
+              --cache-to "type=registry,ref=${CACHE_IMAGE}:${target}-${PLATFORM_KEY},mode=max,compression=zstd,force-compression=true,oci-mediatypes=true,image-manifest=true" \
+              --provenance=false \
+              .
+            echo "PHASE populate:${target} $((SECONDS - start))s" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Full app build
+        if: inputs.mode == 'warm' || inputs.mode == 'baseline'
+        env:
+          PLATFORM: ${{ inputs.platform }}
+          PLATFORM_KEY: ${{ steps.vars.outputs.platform_key }}
+          SOURCE_SHA: ${{ steps.vars.outputs.source_sha }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          CACHE_ARGS=()
+          if [ "$MODE" = "warm" ]; then
+            for target in $DEPS_TARGETS; do
+              CACHE_ARGS+=(--cache-from "type=registry,ref=${CACHE_IMAGE}:${target}-${PLATFORM_KEY}")
+            done
+          fi
+          start=$SECONDS
+          docker buildx build \
+            --file dockers/teable/Dockerfile \
+            --platform "$PLATFORM" \
+            "${CACHE_ARGS[@]}" \
+            --build-arg ENABLE_CSP=false \
+            --build-arg NEXT_BUILD_ENV_EDITION=EE \
+            --build-arg "BUILD_VERSION=bench.${GITHUB_RUN_NUMBER}" \
+            --build-arg "FRONTEND_RELEASE=bench.${GITHUB_RUN_NUMBER}" \
+            --build-arg "GIT_COMMIT_SHA=${SOURCE_SHA}" \
+            --output "type=image,name=${BENCH_IMAGE},push-by-digest=true,name-canonical=true,push=true" \
+            --provenance=false \
+            .
+          echo "PHASE full-build:${MODE} $((SECONDS - start))s" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Routine releases would run cache-to on every build; with deps
+      # unchanged every blob already exists in the registry, so this should
+      # cost seconds. Measure it instead of asserting it.
+      - name: Steady-state re-export
+        if: inputs.mode == 'warm'
+        env:
+          PLATFORM: ${{ inputs.platform }}
+          PLATFORM_KEY: ${{ steps.vars.outputs.platform_key }}
+        run: |
+          set -euo pipefail
+          for target in $DEPS_TARGETS; do
+            start=$SECONDS
+            docker buildx build \
+              --file dockers/teable/Dockerfile \
+              --target "$target" \
+              --platform "$PLATFORM" \
+              --cache-from "type=registry,ref=${CACHE_IMAGE}:${target}-${PLATFORM_KEY}" \
+              --cache-to "type=registry,ref=${CACHE_IMAGE}:${target}-${PLATFORM_KEY},mode=max,compression=zstd,force-compression=true,oci-mediatypes=true,image-manifest=true" \
+              --provenance=false \
+              .
+            echo "PHASE reexport:${target} $((SECONDS - start))s" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Disk usage after build
+        if: always()
+        run: df -h /
