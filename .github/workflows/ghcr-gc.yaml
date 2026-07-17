@@ -1,0 +1,87 @@
+name: GHCR GC
+
+# Reaps unpromoted staging image versions from ghcr. Every develop merge
+# pushes a pinned release-id per image (the staging channel); only versions
+# that were promoted at release time (stamped prod-<release-id> by
+# manual-ecs-deploy / promote-latest-ee) are durable. Everything else ages
+# out after ROLLING WINDOW days, with a keep-newest floor per package so a
+# quiet holiday can never empty a package.
+#
+# Retention rules (dataaxiom/ghcr-cleanup-action, multi-arch aware — it
+# never orphans the untagged platform children of a kept manifest list):
+#   keep  — any version tagged latest / beta / prod-*         (durable)
+#   keep  — any version younger than the rolling window       (14 days)
+#   keep  — the newest 10 tagged versions beyond the window   (floor)
+#   drop  — older tagged versions (release.* / alpha-pr-*) and untagged
+#           orphans
+#
+# teable-sandbox-agent is deliberately ABSENT from the package list: running
+# apps resolve their agent image as <prefix>:<their own build release-id> at
+# sandbox spawn, so an agent release tag must stay pullable for as long as
+# ANY deployment (prod, self-hosted beta/stable) still runs that app build.
+#
+# Deleting needs a PAT with read:packages + delete:packages in
+# GHCR_GC_TOKEN. Until that secret exists every run is forced to dry-run, so
+# the workflow is safe to merge first and arm later.
+#
+# First-time backfill (~23k accumulated versions) should be phased to stay
+# inside API rate limits: dispatch with older_than '6 months', then
+# '2 months', then '1 month', then let the schedule take over at 14 days.
+
+on:
+  schedule:
+    - cron: '30 18 * * *' # 02:30 Beijing, daily
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Log what would be deleted without deleting'
+        required: false
+        default: true
+        type: boolean
+      older_than:
+        description: 'Rolling window — only versions older than this are candidates'
+        required: false
+        default: '14 days'
+        type: string
+
+# The cleanup action must never run twice against the same package.
+concurrency:
+  group: ghcr-gc
+
+jobs:
+  gc-app-images:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clean app image packages
+        uses: dataaxiom/ghcr-cleanup-action@v1.2.2
+        with:
+          token: ${{ secrets.GHCR_GC_TOKEN || secrets.PACKAGES_KEY }}
+          owner: teableio
+          packages: teable,teable-ee,teable-cloud,teable-sandbox,teable-sandbox-ee,teable-sandbox-cloud
+          exclude-tags: latest,beta,prod-*
+          older-than: ${{ inputs.older_than || '14 days' }}
+          keep-n-tagged: 10
+          delete-untagged: true
+          validate: true
+          dry-run: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) || secrets.GHCR_GC_TOKEN == '' }}
+
+  # The build cache rotates in place: populate-deps-cache overwrites the six
+  # deps-* tags every release, leaving the previous cache manifests as
+  # untagged garbage. Same for the agent base image, whose base-<hash> tag
+  # moves only when its inputs change.
+  gc-build-support:
+    runs-on: ubuntu-latest
+    needs: gc-app-images
+    if: always()
+    steps:
+      - name: Clean buildcache and agent-base packages
+        uses: dataaxiom/ghcr-cleanup-action@v1.2.2
+        with:
+          token: ${{ secrets.GHCR_GC_TOKEN || secrets.PACKAGES_KEY }}
+          owner: teableio
+          packages: teable-buildcache,teable-sandbox-agent-base
+          exclude-tags: latest,deps-*,base-*
+          older-than: 3 days
+          delete-untagged: true
+          validate: true
+          dry-run: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) || secrets.GHCR_GC_TOKEN == '' }}
