@@ -94,6 +94,7 @@ jobs:
           INPUT_RELEASE_TIMESTAMP: ${{ github.event.client_payload.release_timestamp || inputs.release_timestamp }}
           INPUT_RELEASE_SEQUENCE: ${{ github.event.client_payload.release_sequence || inputs.release_sequence }}
           INPUT_MODE: ${{ inputs.mode }}
+          SOURCE_REF: ${{ github.event.client_payload.source_ref || inputs.source_ref || 'develop' }}
           SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
         run: |
           EE_TARGET_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox"}]}'
@@ -128,6 +129,11 @@ jobs:
           if [ "$MODE" = "rehearsal" ]; then
             EE_TAGS="$RELEASE_ID"
             CLOUD_TAGS="$RELEASE_ID"
+          elif [ "$SOURCE_REF" != "develop" ]; then
+            # Branch/ref releases get pinned tags only — the floating beta and
+            # latest tags may only ever move to develop builds.
+            EE_TAGS="${SOURCE_SHA},${RELEASE_ID}"
+            CLOUD_TAGS="${SOURCE_SHA},${RELEASE_ID}"
           else
             EE_TAGS="beta,${SOURCE_SHA},${RELEASE_ID}"
             CLOUD_TAGS="latest,${SOURCE_SHA},${RELEASE_ID}"
