@@ -1,0 +1,884 @@
+name: Build teable (unified)
+
+# One pipeline for BOTH editions. The images differ only by frontend build
+# args (edition flag, Sentry sourcemaps, CDN asset prefix), and since the
+# deps-cache/agent-fast-lane work the EE build is no slower than cloud — so
+# a single trigger builds everything, with one release id, shared deps cache,
+# and the agent built exactly once. The editions keep INDEPENDENT release
+# statuses: separate build matrices, separate sync chains, separate tracking
+# records — an EE-only leg failure does not block the cloud release or vice
+# versa. The cloud lane's old cross-workflow verify-agent poll is gone: cloud
+# syncs simply `needs: merge-agent-manifest` in-run.
+#
+# mode=rehearsal (validation runs): builds everything and pushes ONLY the
+# release-id tag to ghcr — no beta/latest/sha movement, no dockerhub/aliyun/
+# ECR sync, no preheat, no tracking records.
+
+concurrency:
+  group: build-teable-unified-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY_GITHUB: ghcr.io/teableio
+  REGISTRY_DOCKERHUB: docker.io/teableio
+  EE_IMAGE_SUFFIX: "-ee"
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Optional teable-ee ref to build from'
+        required: false
+        type: string
+      release_timestamp:
+        description: 'Optional UTC timestamp for release id (e.g. 2026-04-20T10:38:57Z)'
+        required: false
+        type: string
+      release_sequence:
+        description: 'Optional release id sequence suffix'
+        required: false
+        type: string
+      mode:
+        description: 'release = full pipeline; rehearsal = ghcr release-id tag only, no syncs/tracking'
+        required: true
+        default: 'release'
+        type: choice
+        options: [release, rehearsal]
+  repository_dispatch:
+    types: [build-teable]
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    outputs:
+      ee_matrix_json: ${{ steps.release.outputs.ee_matrix_json }}
+      ee_target_matrix_json: ${{ steps.release.outputs.ee_target_matrix_json }}
+      cloud_matrix_json: ${{ steps.release.outputs.cloud_matrix_json }}
+      release_id: ${{ steps.release.outputs.release_id }}
+      release_timestamp: ${{ steps.release.outputs.release_timestamp }}
+      release_sequence: ${{ steps.release.outputs.release_sequence }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      agent_base_tag: ${{ steps.agent_base.outputs.tag }}
+      mode: ${{ steps.release.outputs.mode }}
+      ee_tags: ${{ steps.release.outputs.ee_tags }}
+      cloud_tags: ${{ steps.release.outputs.cloud_tags }}
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ github.event.client_payload.source_ref || inputs.source_ref || 'develop' }}
+
+      - name: Resolve source SHA
+        id: source
+        run: |
+          source_sha="$(git rev-parse HEAD)"
+          if [ -z "$source_sha" ]; then
+            echo "Failed to resolve teable-ee source SHA" >&2
+            exit 1
+          fi
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Compute sandbox agent base tag (inputs-hash)
+        id: agent_base
+        run: |
+          tag="$(node scripts/sandbox-agent-base-hash.mjs)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Sandbox agent base tag: $tag"
+
+      - name: Compute release id
+        id: release
+        env:
+          INPUT_RELEASE_ID: ${{ github.event.client_payload.release_id }}
+          INPUT_RELEASE_TIMESTAMP: ${{ github.event.client_payload.release_timestamp || inputs.release_timestamp }}
+          INPUT_RELEASE_SEQUENCE: ${{ github.event.client_payload.release_sequence || inputs.release_sequence }}
+          INPUT_MODE: ${{ inputs.mode }}
+          SOURCE_REF: ${{ github.event.client_payload.source_ref || inputs.source_ref || 'develop' }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          EE_TARGET_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox"}]}'
+          EE_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"app","file":"Dockerfile","image":"teable","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"}]}'
+          CLOUD_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"}]}'
+
+          if [ -n "$INPUT_RELEASE_ID" ]; then
+            RELEASE_ID="$INPUT_RELEASE_ID"
+            RELEASE_TIMESTAMP="${INPUT_RELEASE_TIMESTAMP}"
+            RELEASE_SEQUENCE="${INPUT_RELEASE_SEQUENCE}"
+
+            if [ -z "$RELEASE_TIMESTAMP" ] || [ -z "$RELEASE_SEQUENCE" ]; then
+              RELEASE_BODY="${RELEASE_ID#release.}"
+              RELEASE_SEQUENCE="${RELEASE_SEQUENCE:-${RELEASE_BODY##*.}}"
+              RELEASE_TIMESTAMP_TAG="${RELEASE_BODY%.*}"
+              RELEASE_TIMESTAMP="${RELEASE_TIMESTAMP:-$(printf '%s' "$RELEASE_TIMESTAMP_TAG" | sed -E 's/^([0-9]{4}-[0-9]{2}-[0-9]{2}T)([0-9]{2})-([0-9]{2})-([0-9]{2}Z)$/\1\2:\3:\4/')}"
+            fi
+          else
+            RELEASE_TIMESTAMP="${INPUT_RELEASE_TIMESTAMP}"
+            if [ -z "$RELEASE_TIMESTAMP" ]; then
+              RELEASE_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            fi
+
+            RELEASE_SEQUENCE="${INPUT_RELEASE_SEQUENCE:-${GITHUB_RUN_NUMBER:-1}}"
+            RELEASE_TIMESTAMP_NO_MS=$(printf '%s' "$RELEASE_TIMESTAMP" | sed -E 's/\.[0-9]{3}Z$/Z/')
+            RELEASE_TIMESTAMP_TAG=$(printf '%s' "$RELEASE_TIMESTAMP_NO_MS" | tr ':' '-')
+            RELEASE_ID="release.${RELEASE_TIMESTAMP_TAG}.${RELEASE_SEQUENCE}"
+            RELEASE_TIMESTAMP="$RELEASE_TIMESTAMP_NO_MS"
+          fi
+
+          MODE="${INPUT_MODE:-release}"
+          if [ "$MODE" = "rehearsal" ]; then
+            EE_TAGS="$RELEASE_ID"
+            CLOUD_TAGS="$RELEASE_ID"
+          elif [ "$SOURCE_REF" != "develop" ]; then
+            # Branch/ref releases get pinned tags only — the floating beta and
+            # latest tags may only ever move to develop builds.
+            EE_TAGS="${SOURCE_SHA},${RELEASE_ID}"
+            CLOUD_TAGS="${SOURCE_SHA},${RELEASE_ID}"
+          else
+            EE_TAGS="beta,${SOURCE_SHA},${RELEASE_ID}"
+            CLOUD_TAGS="latest,${SOURCE_SHA},${RELEASE_ID}"
+          fi
+
+          {
+            echo "ee_target_matrix_json=$EE_TARGET_MATRIX_JSON"
+            echo "ee_matrix_json=$EE_MATRIX_JSON"
+            echo "cloud_matrix_json=$CLOUD_MATRIX_JSON"
+            echo "release_id=$RELEASE_ID"
+            echo "release_timestamp=$RELEASE_TIMESTAMP"
+            echo "release_sequence=$RELEASE_SEQUENCE"
+            echo "mode=$MODE"
+            echo "ee_tags=$EE_TAGS"
+            echo "cloud_tags=$CLOUD_TAGS"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release id: $RELEASE_ID (mode=$MODE)"
+
+  track-start-ee:
+    needs: prepare-release
+    if: needs.prepare-release.outputs.mode == 'release'
+    uses: ./.github/workflows/track-build-teable.yaml
+    with:
+      action: create
+      edition: ee
+      status: Building
+      release_id: ${{ needs.prepare-release.outputs.release_id }}
+    secrets:
+      TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+
+  track-start-cloud:
+    needs: prepare-release
+    if: needs.prepare-release.outputs.mode == 'release'
+    uses: ./.github/workflows/track-build-teable.yaml
+    with:
+      action: create
+      edition: cloud
+      status: Building
+      release_id: ${{ needs.prepare-release.outputs.release_id }}
+    secrets:
+      TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+
+  # Build (or skip) the source-independent sandbox agent base image. The tag is
+  # the content hash of its inputs, so an existing tag means nothing changed —
+  # routine releases skip this entirely and only push the thin source layer.
+  ensure-agent-base:
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
+
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - name: Check for published base image
+        id: check
+        env:
+          BASE_REF: ${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent-base:${{ needs.prepare-release.outputs.agent_base_tag }}
+        run: |
+          if docker buildx imagetools inspect "$BASE_REF" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Base image already published: $BASE_REF"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Base image missing, will build: $BASE_REF"
+          fi
+
+      # QEMU must be registered before the Buildx builder is created, or the
+      # cold-base multi-arch rebuild gets a builder without the arm64 emulator.
+      - name: Set up QEMU (arm64 emulation for the rare base rebuild)
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push base image
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: dockers/teable/Dockerfile.sandbox-agent-base
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent-base:${{ needs.prepare-release.outputs.agent_base_tag }}
+            ${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent-base:latest
+          push: true
+          provenance: false
+
+  # Seeds the scoped deps-stage build cache (zstd) that the app builds import.
+  # Runs BESIDE the build, never gating it: on a routine release everything
+  # is already cached and this re-exports in ~1 min; when the lockfile
+  # changes, the release builds cold exactly as before while this job seeds
+  # the cache for the next one.
+  populate-deps-cache:
+    needs: [prepare-release]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_key: linux-amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            platform_key: linux-arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
+
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+
+      - name: Prepare generated Docker contexts
+        run: node ./scripts/generate-docker-contexts.mjs
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and export deps-stage cache
+        run: |
+          set -euo pipefail
+          for target in runtime-deps frontend-deps backend-deps; do
+            ref="${{ env.REGISTRY_GITHUB }}/teable-buildcache:deps-${target}-${{ matrix.platform_key }}"
+            echo "::group::${target}"
+            docker buildx build \
+              --file dockers/teable/Dockerfile \
+              --target "${target}" \
+              --platform '${{ matrix.platform }}' \
+              --build-arg ENABLE_CSP=false \
+              --build-arg NEXT_BUILD_ENV_EDITION=EE \
+              --cache-from "type=registry,ref=${ref}" \
+              --cache-to "type=registry,ref=${ref},mode=max,compression=zstd,force-compression=true,oci-mediatypes=true,image-manifest=true" \
+              .
+            echo "::endgroup::"
+          done
+
+  build-agent:
+    needs: [prepare-release, ensure-agent-base]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_key: linux-amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            platform_key: linux-arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
+
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: dockers/teable/Dockerfile.sandbox-agent
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            SANDBOX_AGENT_BASE_IMAGE=${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent-base:${{ needs.prepare-release.outputs.agent_base_tag }}
+            SCAFFOLD_DRIFT=fail
+          outputs: type=image,name=${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent,push-by-digest=true,name-canonical=true,push=true
+          provenance: false
+
+      - name: Export digest artifact
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.platform_key }}.digest"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-sandbox-agent-${{ matrix.platform_key }}
+          path: /tmp/digests/${{ matrix.platform_key }}.digest
+          if-no-files-found: error
+          retention-days: 1
+
+  # Publishes the canonical agent manifest as soon as the two agent legs are
+  # done. Both editions' sync chains depend on this job directly — no
+  # cross-workflow polling anymore.
+  merge-agent-manifest:
+    needs: [prepare-release, build-agent]
+    if: needs.build-agent.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Download digest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests/sandbox-agent
+          pattern: digests-sandbox-agent-linux-*
+          merge-multiple: true
+
+      - name: Create canonical manifests
+        env:
+          CANONICAL_IMAGE: ${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent
+          TAGS: ${{ needs.prepare-release.outputs.ee_tags }}
+        run: |
+          mapfile -t DIGEST_FILES < <(find /tmp/digests/sandbox-agent -type f -name '*.digest' | sort)
+          if [ "${#DIGEST_FILES[@]}" -eq 0 ]; then
+            echo "No digest artifacts found for sandbox-agent" >&2
+            exit 1
+          fi
+
+          SOURCES=()
+          for digest_file in "${DIGEST_FILES[@]}"; do
+            digest="$(tr -d '\n' < "$digest_file")"
+            SOURCES+=("${CANONICAL_IMAGE}@${digest}")
+          done
+
+          IFS=',' read -ra TAG_LIST <<< "$TAGS"
+          for tag in "${TAG_LIST[@]}"; do
+            [ -n "$tag" ] || continue
+            docker buildx imagetools create \
+              --tag "${CANONICAL_IMAGE}:${tag}" \
+              "${SOURCES[@]}"
+          done
+
+  build-push-ee:
+    needs: [prepare-release, ensure-agent-base]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix: ${{ fromJson(needs.prepare-release.outputs.ee_matrix_json) }}
+
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
+
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+
+      - name: Prepare generated Docker contexts
+        if: matrix.file == 'Dockerfile'
+        run: node ./scripts/generate-docker-contexts.mjs
+
+      # Freeing disk costs 1-4 min of pure rm -rf (measured variance); run it
+      # in the background so it overlaps the buildx setup and cache import
+      # instead of sitting on the critical path.
+      - name: Start background disk cleanup
+        if: matrix.file == 'Dockerfile'
+        run: |
+          sudo nohup sh -c 'rm -rf /opt/ghc /opt/hostedtoolcache /usr/local/.ghcup /usr/local/lib/android /usr/local/share/boost /usr/local/share/chromium /usr/share/dotnet /usr/share/swift; touch /tmp/disk-cleanup.done' > /tmp/disk-cleanup.log 2>&1 &
+          echo "cleanup started"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Wait for background disk cleanup
+        if: matrix.file == 'Dockerfile'
+        run: |
+          for i in $(seq 1 120); do [ -f /tmp/disk-cleanup.done ] && break; sleep 2; done
+          [ -f /tmp/disk-cleanup.done ] || echo "::warning::disk cleanup still running, proceeding"
+          df -h /
+
+      - name: Compose deps cache-from list
+        id: depscache
+        if: matrix.file == 'Dockerfile'
+        run: |
+          {
+            echo 'list<<CACHE_EOF'
+            for t in runtime-deps frontend-deps backend-deps; do
+              echo "type=registry,ref=${{ env.REGISTRY_GITHUB }}/teable-buildcache:deps-${t}-${{ matrix.platform_key }}"
+            done
+            echo 'CACHE_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: dockers/teable/${{ matrix.file }}
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            ENABLE_CSP=false
+            NEXT_BUILD_ENV_EDITION=EE
+            BUILD_VERSION=${{ needs.prepare-release.outputs.release_id }}
+            FRONTEND_RELEASE=${{ needs.prepare-release.outputs.release_id }}
+            GIT_COMMIT_SHA=${{ needs.prepare-release.outputs.source_sha }}
+          outputs: type=image,name=${{ env.REGISTRY_GITHUB }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+          provenance: false
+          # Import-only scoped deps cache (seeded by populate-deps-cache).
+          # No cache-to here: routine releases never pay the export cost.
+          cache-from: ${{ steps.depscache.outputs.list }}
+
+      - name: Export digest artifact
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.platform_key }}.digest"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.target }}-${{ matrix.platform_key }}
+          path: /tmp/digests/${{ matrix.platform_key }}.digest
+          if-no-files-found: error
+          retention-days: 1
+
+  # Cloud images are amd64-only, so they push their tags directly — no digest
+  # merge needed. Edition-specific bits: CLOUD edition flag, Sentry sourcemap
+  # upload, CDN asset prefix, and the Next static asset upload config.
+  # Deliberately NOT gated on ensure-agent-base: the cloud images don't
+  # consume the agent base, and in the old two-workflow world a base failure
+  # never stopped the cloud images from being built and pushed (only the
+  # Released status). merge-agent-manifest still gates the cloud syncs.
+  build-push-cloud:
+    needs: [prepare-release]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix: ${{ fromJson(needs.prepare-release.outputs.cloud_matrix_json) }}
+
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
+
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+
+      - name: Compose image tags
+        id: tags
+        env:
+          TAGS: ${{ needs.prepare-release.outputs.cloud_tags }}
+        run: |
+          {
+            echo 'list<<TAGS_EOF'
+            IFS=',' read -ra TAG_LIST <<< "$TAGS"
+            for tag in "${TAG_LIST[@]}"; do
+              [ -n "$tag" ] || continue
+              echo "${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}:${tag}"
+            done
+            echo 'TAGS_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Prepare generated Docker contexts
+        if: matrix.file == 'Dockerfile'
+        run: node ./scripts/generate-docker-contexts.mjs
+
+      - name: Prepare upload assets config
+        if: matrix.file == 'Dockerfile'
+        id: upload_assets
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          SEALOS_OBJECTSTORAGE_ACCESS_KEY: ${{ secrets.SEALOS_OBJECTSTORAGE_ACCESS_KEY }}
+          SEALOS_OBJECTSTORAGE_SECRET_KEY: ${{ secrets.SEALOS_OBJECTSTORAGE_SECRET_KEY }}
+        run: |
+          node <<'EOF'
+          const fs = require('node:fs');
+
+          const uploadAssetsList = [
+            [
+              'aws-objectstorage',
+              'https://s3.us-west-2.amazonaws.com',
+              process.env.AWS_ACCESS_KEY_ID,
+              process.env.AWS_SECRET_ACCESS_KEY,
+              'teable-next-asset',
+            ],
+            [
+              'sealos-objectstorage',
+              'https://objectstorageapi.hzh.sealos.run',
+              process.env.SEALOS_OBJECTSTORAGE_ACCESS_KEY,
+              process.env.SEALOS_OBJECTSTORAGE_SECRET_KEY,
+              '38puz7wo-teable-public',
+            ],
+          ];
+
+          const encoded = Buffer.from(JSON.stringify(uploadAssetsList)).toString('base64');
+          process.stdout.write(`::add-mask::${encoded}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `list_b64=${encoded}\n`);
+          EOF
+
+      # Freeing disk costs 1-4 min of pure rm -rf (measured variance); run it
+      # in the background so it overlaps the buildx setup and cache import
+      # instead of sitting on the critical path.
+      - name: Start background disk cleanup
+        if: matrix.file == 'Dockerfile'
+        run: |
+          sudo nohup sh -c 'rm -rf /opt/ghc /opt/hostedtoolcache /usr/local/.ghcup /usr/local/lib/android /usr/local/share/boost /usr/local/share/chromium /usr/share/dotnet /usr/share/swift; touch /tmp/disk-cleanup.done' > /tmp/disk-cleanup.log 2>&1 &
+          echo "cleanup started"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Wait for background disk cleanup
+        if: matrix.file == 'Dockerfile'
+        run: |
+          for i in $(seq 1 120); do [ -f /tmp/disk-cleanup.done ] && break; sleep 2; done
+          [ -f /tmp/disk-cleanup.done ] || echo "::warning::disk cleanup still running, proceeding"
+          df -h /
+
+      - name: Compose deps cache-from list
+        id: depscache
+        if: matrix.file == 'Dockerfile'
+        run: |
+          {
+            echo 'list<<CACHE_EOF'
+            for t in runtime-deps frontend-deps backend-deps; do
+              echo "type=registry,ref=${{ env.REGISTRY_GITHUB }}/teable-buildcache:deps-${t}-${{ matrix.platform_key }}"
+            done
+            echo 'CACHE_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: dockers/teable/${{ matrix.file }}
+          platforms: ${{ matrix.platform }}
+          tags: ${{ steps.tags.outputs.list }}
+          build-args: |
+            ENABLE_CSP=false
+            NEXT_BUILD_ENV_EDITION=CLOUD
+            SENTRY_ORG=${{ secrets.SENTRY_ORG }}
+            SENTRY_PROJECT=${{ secrets.SENTRY_PROJECT }}
+            SENTRY_AUTH_TOKEN=${{ secrets.SENTRY_AUTH_TOKEN }}
+            SENTRY_SOURCEMAPS_UPLOAD=true
+            NEXT_BUILD_ENV_ASSET_PREFIX=${{ vars.NEXT_BUILD_ENV_ASSET_PREFIX }}
+            UPLOAD_ASSETS_LIST_B64=${{ steps.upload_assets.outputs.list_b64 }}
+            BUILD_VERSION=${{ needs.prepare-release.outputs.release_id }}
+            FRONTEND_RELEASE=${{ needs.prepare-release.outputs.release_id }}
+            GIT_COMMIT_SHA=${{ needs.prepare-release.outputs.source_sha }}
+          push: true
+          provenance: false
+          # Import-only scoped deps cache — the deps stages are edition-
+          # independent (the edition build-arg is consumed after them), so the
+          # same cache serves both editions. Empty for the sandbox leg.
+          cache-from: ${{ steps.depscache.outputs.list }}
+
+  merge-manifests-ee:
+    needs: [prepare-release, build-push-ee]
+    if: needs.build-push-ee.result == 'success'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.prepare-release.outputs.ee_target_matrix_json) }}
+
+    steps:
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Download digest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests/${{ matrix.target }}
+          pattern: digests-${{ matrix.target }}-linux-*
+          merge-multiple: true
+
+      - name: Create canonical and EE alias manifests
+        env:
+          CANONICAL_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}
+          EE_ALIAS_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}${{ env.EE_IMAGE_SUFFIX }}
+          TAGS: ${{ needs.prepare-release.outputs.ee_tags }}
+        run: |
+          mapfile -t DIGEST_FILES < <(find "/tmp/digests/${{ matrix.target }}" -type f -name '*.digest' | sort)
+
+          if [ "${#DIGEST_FILES[@]}" -eq 0 ]; then
+            echo "No digest artifacts found for ${{ matrix.target }}" >&2
+            exit 1
+          fi
+
+          SOURCES=()
+          for digest_file in "${DIGEST_FILES[@]}"; do
+            digest="$(tr -d '\n' < "$digest_file")"
+            SOURCES+=("${CANONICAL_IMAGE}@${digest}")
+          done
+
+          IFS=',' read -ra TAG_LIST <<< "$TAGS"
+          for tag in "${TAG_LIST[@]}"; do
+            [ -n "$tag" ] || continue
+            docker buildx imagetools create \
+              --tag "${CANONICAL_IMAGE}:${tag}" \
+              "${SOURCES[@]}"
+            docker buildx imagetools create \
+              --tag "${EE_ALIAS_IMAGE}:${tag}" \
+              "${CANONICAL_IMAGE}:${tag}"
+          done
+
+  # ── EE distribution chain ──────────────────────────────────────────────
+
+  sync-dockerhub:
+    needs: [prepare-release, merge-manifests-ee, merge-agent-manifest]
+    if: needs.prepare-release.outputs.mode == 'release' && needs.merge-manifests-ee.result == 'success' && needs.merge-agent-manifest.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+
+      - name: Sync images to Docker Hub
+        env:
+          SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
+          DST_CREDS: ${{ vars.DOCKER_HUB_NAME }}:${{ secrets.DOCKER_HUB_AK }}
+          TAGS: ${{ needs.prepare-release.outputs.ee_tags }}
+        run: |
+          set -euo pipefail
+
+          IFS=',' read -ra TAG_LIST <<< "$TAGS"
+          IMAGES=("teable" "teable-ee" "teable-sandbox" "teable-sandbox-ee" "teable-sandbox-agent")
+
+          for image in "${IMAGES[@]}"; do
+            for tag in "${TAG_LIST[@]}"; do
+              [ -n "$tag" ] || continue
+              skopeo copy --all \
+                --src-creds="$SRC_CREDS" \
+                --dest-creds="$DST_CREDS" \
+                "docker://${{ env.REGISTRY_GITHUB }}/${image}:${tag}" \
+                "docker://${{ env.REGISTRY_DOCKERHUB }}/${image}:${tag}"
+            done
+          done
+
+  sync-aliyun-ee:
+    needs: [prepare-release, merge-manifests-ee, merge-agent-manifest]
+    if: needs.prepare-release.outputs.mode == 'release' && needs.merge-manifests-ee.result == 'success' && needs.merge-agent-manifest.result == 'success'
+    uses: ./.github/workflows/sync-aliyun.yaml
+    with:
+      edition: ee
+      tags: ${{ needs.prepare-release.outputs.ee_tags }}
+    secrets: inherit
+
+  preheat-sandbox-agent:
+    needs: [prepare-release, merge-agent-manifest, sync-aliyun-ee]
+    if: needs.prepare-release.outputs.mode == 'release' && needs.merge-agent-manifest.result == 'success' && needs.sync-aliyun-ee.result == 'success'
+    uses: ./.github/workflows/preheat-sandbox-agent-cloud.yaml
+    with:
+      image_tag: ${{ needs.prepare-release.outputs.release_id }}
+    secrets: inherit
+
+  # ── Cloud distribution chain ───────────────────────────────────────────
+
+  sync-ecr:
+    needs: [prepare-release, build-push-cloud]
+    if: needs.prepare-release.outputs.mode == 'release' && needs.build-push-cloud.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Sync images to ECR
+        env:
+          SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
+          TAGS: ${{ needs.prepare-release.outputs.cloud_tags }}
+          ECR_REGISTRY: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable
+        run: |
+          set -euo pipefail
+
+          ECR_PASSWORD="$(aws ecr get-login-password --region us-west-2)"
+          IFS=',' read -ra TAG_LIST <<< "$TAGS"
+          IMAGES=("teable-cloud" "teable-sandbox-cloud")
+
+          for image in "${IMAGES[@]}"; do
+            for tag in "${TAG_LIST[@]}"; do
+              [ -n "$tag" ] || continue
+              skopeo copy --all \
+                --src-creds="$SRC_CREDS" \
+                --dest-creds="AWS:${ECR_PASSWORD}" \
+                "docker://${{ env.REGISTRY_GITHUB }}/${image}:${tag}" \
+                "docker://${ECR_REGISTRY}/${image}:${tag}"
+            done
+          done
+
+  # The cloud Aliyun sync also copies the canonical agent tag; depending on
+  # merge-agent-manifest directly (same run) replaces the old cross-workflow
+  # verify-agent poll.
+  sync-aliyun-cloud:
+    needs: [prepare-release, build-push-cloud, merge-agent-manifest]
+    if: needs.prepare-release.outputs.mode == 'release' && needs.build-push-cloud.result == 'success' && needs.merge-agent-manifest.result == 'success'
+    uses: ./.github/workflows/sync-aliyun.yaml
+    with:
+      edition: cloud
+      tags: ${{ needs.prepare-release.outputs.cloud_tags }}
+    secrets: inherit
+
+  # ── Per-edition statuses (independent releases from one run) ───────────
+
+  determine-status-ee:
+    needs:
+      [
+        prepare-release,
+        build-push-ee,
+        merge-manifests-ee,
+        merge-agent-manifest,
+        sync-dockerhub,
+        sync-aliyun-ee,
+        preheat-sandbox-agent,
+      ]
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.status.outputs.status }}
+    steps:
+      - name: Determine final EE status
+        id: status
+        run: |
+          if [ "${{ needs.prepare-release.outputs.mode }}" != "release" ]; then
+            echo "status=Rehearsal" >> $GITHUB_OUTPUT
+          elif [ "${{ needs.build-push-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-agent-manifest.result }}" == "cancelled" ] || [ "${{ needs.sync-dockerhub.result }}" == "cancelled" ] || [ "${{ needs.sync-aliyun-ee.result }}" == "cancelled" ] || [ "${{ needs.preheat-sandbox-agent.result }}" == "cancelled" ]; then
+            echo "status=Cancelled" >> $GITHUB_OUTPUT
+          elif [ "${{ needs.build-push-ee.result }}" == "success" ] && [ "${{ needs.merge-manifests-ee.result }}" == "success" ] && [ "${{ needs.merge-agent-manifest.result }}" == "success" ] && [ "${{ needs.sync-dockerhub.result }}" == "success" ] && [ "${{ needs.sync-aliyun-ee.result }}" == "success" ] && [ "${{ needs.preheat-sandbox-agent.result }}" == "success" ]; then
+            echo "status=Released" >> $GITHUB_OUTPUT
+          else
+            echo "status=Fail" >> $GITHUB_OUTPUT
+          fi
+
+  determine-status-cloud:
+    needs:
+      [
+        prepare-release,
+        build-push-cloud,
+        merge-agent-manifest,
+        sync-ecr,
+        sync-aliyun-cloud,
+      ]
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.status.outputs.status }}
+    steps:
+      - name: Determine final cloud status
+        id: status
+        run: |
+          if [ "${{ needs.prepare-release.outputs.mode }}" != "release" ]; then
+            echo "status=Rehearsal" >> $GITHUB_OUTPUT
+          elif [ "${{ needs.build-push-cloud.result }}" == "cancelled" ] || [ "${{ needs.merge-agent-manifest.result }}" == "cancelled" ] || [ "${{ needs.sync-ecr.result }}" == "cancelled" ] || [ "${{ needs.sync-aliyun-cloud.result }}" == "cancelled" ]; then
+            echo "status=Cancelled" >> $GITHUB_OUTPUT
+          elif [ "${{ needs.build-push-cloud.result }}" == "success" ] && [ "${{ needs.merge-agent-manifest.result }}" == "success" ] && [ "${{ needs.sync-ecr.result }}" == "success" ] && [ "${{ needs.sync-aliyun-cloud.result }}" == "success" ]; then
+            echo "status=Released" >> $GITHUB_OUTPUT
+          else
+            echo "status=Fail" >> $GITHUB_OUTPUT
+          fi
+
+  track-complete-ee:
+    needs: [prepare-release, track-start-ee, determine-status-ee]
+    if: always() && needs.prepare-release.outputs.mode == 'release' && needs.track-start-ee.result == 'success'
+    uses: ./.github/workflows/track-build-teable.yaml
+    with:
+      action: update
+      edition: ee
+      record_id: ${{ needs.track-start-ee.outputs.record_id }}
+      status: ${{ needs.determine-status-ee.outputs.status }}
+      start_time: ${{ needs.track-start-ee.outputs.start_time }}
+    secrets:
+      TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+
+  track-complete-cloud:
+    needs: [prepare-release, track-start-cloud, determine-status-cloud]
+    if: always() && needs.prepare-release.outputs.mode == 'release' && needs.track-start-cloud.result == 'success'
+    uses: ./.github/workflows/track-build-teable.yaml
+    with:
+      action: update
+      edition: cloud
+      record_id: ${{ needs.track-start-cloud.outputs.record_id }}
+      status: ${{ needs.determine-status-cloud.outputs.status }}
+      start_time: ${{ needs.track-start-cloud.outputs.start_time }}
+    secrets:
+      TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
