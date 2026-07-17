@@ -1,5 +1,18 @@
 name: Promote teable EE to latest
 
+# EE stable-channel release. Staging builds publish only to ghcr (pinned
+# release-id + floating beta); this workflow turns a chosen build into the
+# stable release:
+#   1. ghcr: move latest and stamp prod-<release-id> — the permanent marker
+#      that exempts the promoted version (and its co-located release-id tag)
+#      from ghcr-gc.yaml.
+#   2. Docker Hub: copy release-id + latest FROM ghcr. The per-merge sync
+#      ships only the beta channel, so the pinned tag does not exist on
+#      Docker Hub before this runs — promote must copy, not retag.
+#   3. Aliyun EE mirror: latest + release-id, including the canonical agent
+#      tag (the sync's ee lane skips latest for the agent by design).
+#   4. Notify teable-infra (teable-stable-promoted).
+
 on:
   workflow_dispatch:
     inputs:
@@ -13,21 +26,10 @@ on:
 env:
   REGISTRY_GITHUB: ghcr.io/teableio
   REGISTRY_DOCKERHUB: docker.io/teableio
-  CE_IMAGE_SUFFIX: ""
-  EE_IMAGE_SUFFIX: "-ee"
 
 jobs:
   promote-latest:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target: [app, sandbox]
-        include:
-          - target: app
-            image: teable
-          - target: sandbox
-            image: teable-sandbox
-
     steps:
       - name: Login to GitHub container registry
         uses: docker/login-action@v3
@@ -36,29 +38,42 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.PACKAGES_KEY }}
 
-      - name: Login to Docker Hub registry
-        uses: docker/login-action@v3
-        with:
-          username: ${{ vars.DOCKER_HUB_NAME }}
-          password: ${{ secrets.DOCKER_HUB_AK }}
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Promote release tag to latest
+      - name: Install skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+
+      - name: Promote on ghcr and copy to Docker Hub
         env:
           RELEASE_ID: ${{ github.event.client_payload.release_id || inputs.release_id }}
+          SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
+          DST_CREDS: ${{ vars.DOCKER_HUB_NAME }}:${{ secrets.DOCKER_HUB_AK }}
         run: |
-          REGISTRIES=("${{ env.REGISTRY_GITHUB }}" "${{ env.REGISTRY_DOCKERHUB }}")
-          SUFFIXES=("${{ env.CE_IMAGE_SUFFIX }}" "${{ env.EE_IMAGE_SUFFIX }}")
+          set -euo pipefail
+          IMAGES=(teable teable-ee teable-sandbox teable-sandbox-ee)
 
-          for REGISTRY in "${REGISTRIES[@]}"; do
-            for SUFFIX in "${SUFFIXES[@]}"; do
-              docker buildx imagetools create \
-                --tag "$REGISTRY/${{ matrix.image }}${SUFFIX}:latest" \
-                "$REGISTRY/${{ matrix.image }}${SUFFIX}:${RELEASE_ID}"
+          for image in "${IMAGES[@]}"; do
+            docker buildx imagetools create \
+              --tag "${REGISTRY_GITHUB}/${image}:latest" \
+              --tag "${REGISTRY_GITHUB}/${image}:prod-${RELEASE_ID}" \
+              "${REGISTRY_GITHUB}/${image}:${RELEASE_ID}"
+
+            for tag in "${RELEASE_ID}" latest; do
+              skopeo copy --all \
+                --src-creds="$SRC_CREDS" \
+                --dest-creds="$DST_CREDS" \
+                "docker://${REGISTRY_GITHUB}/${image}:${RELEASE_ID}" \
+                "docker://${REGISTRY_DOCKERHUB}/${image}:${tag}"
             done
           done
+
+          # The agent needs no promote step: its pinned release tags ship to
+          # Docker Hub on every merge (running apps pull them at sandbox
+          # spawn) and the ghcr package is exempt from GC for the same
+          # reason. Aliyun gets the agent release tag via sync-aliyun below.
 
   sync-aliyun:
     needs: promote-latest
@@ -66,7 +81,7 @@ jobs:
     uses: ./.github/workflows/sync-aliyun.yaml
     with:
       edition: ee
-      tags: "latest"
+      tags: "latest,${{ github.event.client_payload.release_id || inputs.release_id }}"
     secrets: inherit
 
   notify-infra:

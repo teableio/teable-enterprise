@@ -64,6 +64,10 @@ on:
         required: true
       TEABLE_API_TOKEN:
         required: false
+      INFRA_TEABLE_AI_PREHEAT_TOKEN:
+        required: false
+      INFRA_TEABLE_CN_PREHEAT_TOKEN:
+        required: false
 
 jobs:
   prepare:
@@ -78,9 +82,59 @@ jobs:
         id: start_time
         run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
 
+  # Production deploys run from the durable prod-<release-id> tag, stamped
+  # here BEFORE anything is deployed. Staging builds only carry their pinned
+  # release-id, which ghcr-gc.yaml / the ECR lifecycle policy reap after a
+  # rolling window — the prod-* stamp is what makes a deployed version (and
+  # every task-definition revision referencing it, i.e. rollback targets)
+  # permanently pullable. Stamping also keeps the co-located release-id tag
+  # alive on ghcr, which running apps use to pull their sandbox agent.
+  stamp-prod:
+    name: Stamp prod release tags
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Login to AWS ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Stamp prod tags
+        env:
+          RELEASE_ID: ${{ inputs.image_tag }}
+          ECR_REGISTRY: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable
+        run: |
+          set -euo pipefail
+          REGISTRIES=("ghcr.io/teableio" "$ECR_REGISTRY")
+          IMAGES=("teable-cloud" "teable-sandbox-cloud")
+
+          for REGISTRY in "${REGISTRIES[@]}"; do
+            for IMAGE in "${IMAGES[@]}"; do
+              docker buildx imagetools create \
+                --tag "$REGISTRY/${IMAGE}:prod-${RELEASE_ID}" \
+                "$REGISTRY/${IMAGE}:${RELEASE_ID}"
+            done
+          done
+
   deploy-sandbox:
     name: Deploy Sandbox to ECS
-    needs: prepare
+    needs: [prepare, stamp-prod]
     runs-on: ubuntu-latest
 
     steps:
@@ -111,7 +165,7 @@ jobs:
         with:
           task-definition: sandbox-task-definition.json
           container-name: teable-sandbox
-          image: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-sandbox-cloud:${{ inputs.image_tag }}
+          image: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-sandbox-cloud:prod-${{ inputs.image_tag }}
 
       - name: Deploy sandbox to ECS service
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
@@ -181,7 +235,7 @@ jobs:
         with:
           task-definition: task-definition.json
           container-name: teable
-          image: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-cloud:${{ inputs.image_tag }}
+          image: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-cloud:prod-${{ inputs.image_tag }}
 
       - name: Run database migration as one-off task
         run: |
@@ -314,13 +368,28 @@ jobs:
             done
           done
 
+# Aliyun receives images ONLY at release time. The pinned release-id must
+  # ship alongside latest: teable.cn (manual-sealos-deploy) deploys that
+  # pinned tag from Aliyun, and the sync's cloud lane also carries the
+  # canonical agent tag that CN sandboxes pull.
   sync-aliyun:
     needs: promote-latest
     if: needs.promote-latest.result == 'success'
     uses: ./.github/workflows/sync-aliyun.yaml
     with:
       edition: cloud
-      tags: "latest"
+      tags: "latest,${{ inputs.image_tag }}"
+    secrets: inherit
+
+  # Preheat CN sandbox-agent nodes as soon as the agent tag lands on Aliyun.
+  # Best-effort: not part of the notify gating — a preheat miss only costs
+  # first-spawn latency.
+  preheat-sandbox-agent:
+    needs: sync-aliyun
+    if: needs.sync-aliyun.result == 'success'
+    uses: ./.github/workflows/preheat-sandbox-agent-cloud.yaml
+    with:
+      image_tag: ${{ inputs.image_tag }}
     secrets: inherit
 
   notify:

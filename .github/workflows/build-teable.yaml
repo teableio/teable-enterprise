@@ -11,8 +11,16 @@ name: Build teable (unified)
 # syncs simply `needs: merge-agent-manifest` in-run.
 #
 # mode=rehearsal (validation runs): builds everything and pushes ONLY the
-# release-id tag to ghcr — no beta/latest/sha movement, no dockerhub/aliyun/
-# ECR sync, no preheat, no tracking records.
+# release-id tag to ghcr — no beta/latest movement, no dockerhub/ECR sync,
+# no tracking records.
+#
+# Channel split: a routine develop merge is a STAGING build — it pushes the
+# pinned release-id to ghcr (+ ECR for the AWS staging cluster) and moves the
+# floating beta, nothing more. The durable/public tags and the Aliyun mirror
+# are produced at release time instead: manual-ecs-deploy (cloud production)
+# and promote-latest-ee (EE stable) stamp prod-<release-id> markers, move
+# latest, and run the dockerhub/aliyun syncs + agent preheat. ghcr-gc.yaml
+# reaps unpromoted staging versions after their rolling window.
 
 concurrency:
   group: build-teable-unified-${{ github.ref }}
@@ -126,17 +134,18 @@ jobs:
           fi
 
           MODE="${INPUT_MODE:-release}"
-          if [ "$MODE" = "rehearsal" ]; then
+          # Staging-channel tagging: pinned release-id only. No sha tags
+          # (the release record maps release-id -> commit), and the cloud
+          # latest tag is NOT moved here — latest means "current production"
+          # and only manual-ecs-deploy moves it after a successful deploy.
+          # The EE beta channel keeps floating with develop.
+          if [ "$MODE" = "rehearsal" ] || [ "$SOURCE_REF" != "develop" ]; then
+            # Rehearsals and branch/ref builds never move floating tags.
             EE_TAGS="$RELEASE_ID"
             CLOUD_TAGS="$RELEASE_ID"
-          elif [ "$SOURCE_REF" != "develop" ]; then
-            # Branch/ref releases get pinned tags only — the floating beta and
-            # latest tags may only ever move to develop builds.
-            EE_TAGS="${SOURCE_SHA},${RELEASE_ID}"
-            CLOUD_TAGS="${SOURCE_SHA},${RELEASE_ID}"
           else
-            EE_TAGS="beta,${SOURCE_SHA},${RELEASE_ID}"
-            CLOUD_TAGS="latest,${SOURCE_SHA},${RELEASE_ID}"
+            EE_TAGS="beta,${RELEASE_ID}"
+            CLOUD_TAGS="${RELEASE_ID}"
           fi
 
           {
@@ -500,7 +509,8 @@ jobs:
   # Deliberately NOT gated on ensure-agent-base: the cloud images don't
   # consume the agent base, and in the old two-workflow world a base failure
   # never stopped the cloud images from being built and pushed (only the
-  # Released status). merge-agent-manifest still gates the cloud syncs.
+  # Released status). merge-agent-manifest still gates the cloud Released
+  # status — staging sandboxes pull the agent release tag from ghcr.
   build-push-cloud:
     needs: [prepare-release]
     runs-on: ${{ matrix.runner }}
@@ -694,9 +704,14 @@ jobs:
 
   # ── EE distribution chain ──────────────────────────────────────────────
 
+  # Per-merge Docker Hub sync is the beta channel only. The pinned release
+  # tags, the Aliyun mirror, and the agent preheat all moved to release time
+  # (manual-ecs-deploy for cloud, promote-latest-ee for EE) — a staging build
+  # publishes nothing durable. Skipped entirely on non-develop builds, which
+  # carry no beta tag.
   sync-dockerhub:
     needs: [prepare-release, merge-manifests-ee, merge-agent-manifest]
-    if: needs.prepare-release.outputs.mode == 'release' && needs.merge-manifests-ee.result == 'success' && needs.merge-agent-manifest.result == 'success'
+    if: needs.prepare-release.outputs.mode == 'release' && needs.merge-manifests-ee.result == 'success' && needs.merge-agent-manifest.result == 'success' && contains(needs.prepare-release.outputs.ee_tags, 'beta')
     runs-on: ubuntu-latest
     steps:
       - name: Install skopeo
@@ -704,7 +719,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y skopeo
 
-      - name: Sync images to Docker Hub
+      - name: Sync beta channel to Docker Hub
         env:
           SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
           DST_CREDS: ${{ vars.DOCKER_HUB_NAME }}:${{ secrets.DOCKER_HUB_AK }}
@@ -712,36 +727,30 @@ jobs:
         run: |
           set -euo pipefail
 
-          IFS=',' read -ra TAG_LIST <<< "$TAGS"
-          IMAGES=("teable" "teable-ee" "teable-sandbox" "teable-sandbox-ee" "teable-sandbox-agent")
-
-          for image in "${IMAGES[@]}"; do
-            for tag in "${TAG_LIST[@]}"; do
-              [ -n "$tag" ] || continue
-              skopeo copy --all \
-                --src-creds="$SRC_CREDS" \
-                --dest-creds="$DST_CREDS" \
-                "docker://${{ env.REGISTRY_GITHUB }}/${image}:${tag}" \
-                "docker://${{ env.REGISTRY_DOCKERHUB }}/${image}:${tag}"
-            done
+          for image in teable teable-ee teable-sandbox teable-sandbox-ee; do
+            skopeo copy --all \
+              --src-creds="$SRC_CREDS" \
+              --dest-creds="$DST_CREDS" \
+              "docker://${{ env.REGISTRY_GITHUB }}/${image}:beta" \
+              "docker://${{ env.REGISTRY_DOCKERHUB }}/${image}:beta"
           done
 
-  sync-aliyun-ee:
-    needs: [prepare-release, merge-manifests-ee, merge-agent-manifest]
-    if: needs.prepare-release.outputs.mode == 'release' && needs.merge-manifests-ee.result == 'success' && needs.merge-agent-manifest.result == 'success'
-    uses: ./.github/workflows/sync-aliyun.yaml
-    with:
-      edition: ee
-      tags: ${{ needs.prepare-release.outputs.ee_tags }}
-    secrets: inherit
-
-  preheat-sandbox-agent:
-    needs: [prepare-release, merge-agent-manifest, sync-aliyun-ee]
-    if: needs.prepare-release.outputs.mode == 'release' && needs.merge-agent-manifest.result == 'success' && needs.sync-aliyun-ee.result == 'success'
-    uses: ./.github/workflows/preheat-sandbox-agent-cloud.yaml
-    with:
-      image_tag: ${{ needs.prepare-release.outputs.release_id }}
-    secrets: inherit
+          # The agent is the one image whose PINNED tags must still ship per
+          # merge: a running app resolves its agent image as
+          # <prefix>:<the app's own build release-id> at sandbox spawn, so a
+          # beta user pulled today needs today's agent release-id available
+          # for as long as they run that app build. (Same reason the
+          # teable-sandbox-agent package is exempt from ghcr GC.)
+          IFS=',' read -ra TAG_LIST <<< "$TAGS"
+          for tag in "${TAG_LIST[@]}"; do
+            [ -n "$tag" ] || continue
+            [ "$tag" = "beta" ] && continue
+            skopeo copy --all \
+              --src-creds="$SRC_CREDS" \
+              --dest-creds="$DST_CREDS" \
+              "docker://${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent:${tag}" \
+              "docker://${{ env.REGISTRY_DOCKERHUB }}/teable-sandbox-agent:${tag}"
+          done
 
   # ── Cloud distribution chain ───────────────────────────────────────────
 
@@ -785,18 +794,6 @@ jobs:
             done
           done
 
-  # The cloud Aliyun sync also copies the canonical agent tag; depending on
-  # merge-agent-manifest directly (same run) replaces the old cross-workflow
-  # verify-agent poll.
-  sync-aliyun-cloud:
-    needs: [prepare-release, build-push-cloud, merge-agent-manifest]
-    if: needs.prepare-release.outputs.mode == 'release' && needs.build-push-cloud.result == 'success' && needs.merge-agent-manifest.result == 'success'
-    uses: ./.github/workflows/sync-aliyun.yaml
-    with:
-      edition: cloud
-      tags: ${{ needs.prepare-release.outputs.cloud_tags }}
-    secrets: inherit
-
   # ── Per-edition statuses (independent releases from one run) ───────────
 
   determine-status-ee:
@@ -807,8 +804,6 @@ jobs:
         merge-manifests-ee,
         merge-agent-manifest,
         sync-dockerhub,
-        sync-aliyun-ee,
-        preheat-sandbox-agent,
       ]
     if: always()
     runs-on: ubuntu-latest
@@ -818,11 +813,14 @@ jobs:
       - name: Determine final EE status
         id: status
         run: |
+          # sync-dockerhub legitimately skips on non-develop builds (no beta
+          # tag to sync), so "skipped" counts as success for it.
+          DOCKERHUB="${{ needs.sync-dockerhub.result }}"
           if [ "${{ needs.prepare-release.outputs.mode }}" != "release" ]; then
             echo "status=Rehearsal" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-agent-manifest.result }}" == "cancelled" ] || [ "${{ needs.sync-dockerhub.result }}" == "cancelled" ] || [ "${{ needs.sync-aliyun-ee.result }}" == "cancelled" ] || [ "${{ needs.preheat-sandbox-agent.result }}" == "cancelled" ]; then
+          elif [ "${{ needs.build-push-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-agent-manifest.result }}" == "cancelled" ] || [ "$DOCKERHUB" == "cancelled" ]; then
             echo "status=Cancelled" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push-ee.result }}" == "success" ] && [ "${{ needs.merge-manifests-ee.result }}" == "success" ] && [ "${{ needs.merge-agent-manifest.result }}" == "success" ] && [ "${{ needs.sync-dockerhub.result }}" == "success" ] && [ "${{ needs.sync-aliyun-ee.result }}" == "success" ] && [ "${{ needs.preheat-sandbox-agent.result }}" == "success" ]; then
+          elif [ "${{ needs.build-push-ee.result }}" == "success" ] && [ "${{ needs.merge-manifests-ee.result }}" == "success" ] && [ "${{ needs.merge-agent-manifest.result }}" == "success" ] && { [ "$DOCKERHUB" == "success" ] || [ "$DOCKERHUB" == "skipped" ]; }; then
             echo "status=Released" >> $GITHUB_OUTPUT
           else
             echo "status=Fail" >> $GITHUB_OUTPUT
@@ -835,7 +833,6 @@ jobs:
         build-push-cloud,
         merge-agent-manifest,
         sync-ecr,
-        sync-aliyun-cloud,
       ]
     if: always()
     runs-on: ubuntu-latest
@@ -847,9 +844,9 @@ jobs:
         run: |
           if [ "${{ needs.prepare-release.outputs.mode }}" != "release" ]; then
             echo "status=Rehearsal" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push-cloud.result }}" == "cancelled" ] || [ "${{ needs.merge-agent-manifest.result }}" == "cancelled" ] || [ "${{ needs.sync-ecr.result }}" == "cancelled" ] || [ "${{ needs.sync-aliyun-cloud.result }}" == "cancelled" ]; then
+          elif [ "${{ needs.build-push-cloud.result }}" == "cancelled" ] || [ "${{ needs.merge-agent-manifest.result }}" == "cancelled" ] || [ "${{ needs.sync-ecr.result }}" == "cancelled" ]; then
             echo "status=Cancelled" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push-cloud.result }}" == "success" ] && [ "${{ needs.merge-agent-manifest.result }}" == "success" ] && [ "${{ needs.sync-ecr.result }}" == "success" ] && [ "${{ needs.sync-aliyun-cloud.result }}" == "success" ]; then
+          elif [ "${{ needs.build-push-cloud.result }}" == "success" ] && [ "${{ needs.merge-agent-manifest.result }}" == "success" ] && [ "${{ needs.sync-ecr.result }}" == "success" ]; then
             echo "status=Released" >> $GITHUB_OUTPUT
           else
             echo "status=Fail" >> $GITHUB_OUTPUT

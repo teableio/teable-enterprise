@@ -64,8 +64,60 @@ on:
         required: false
 
 jobs:
+  # teable.cn deploys pinned tags from Aliyun, but Aliyun only receives
+  # images at release time (manual-ecs-deploy's sync-aliyun). This job makes
+  # the CN deploy self-sufficient: any tag still missing on Aliyun is copied
+  # from ghcr before kubectl touches anything, so the CN and AI launches can
+  # run in either order. Idempotent — near-instant when the tags are there.
+  ensure-aliyun:
+    name: Ensure release images on Aliyun
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+
+      - name: Copy any missing images from ghcr
+        env:
+          SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
+          DST_CREDS: ${{ vars.ALI_DOCKER_USERNAME }}:${{ secrets.ALI_DOCKER_PASSWORD }}
+          SRC_REGISTRY: ghcr.io/teableio
+          DST_REGISTRY: registry.cn-shenzhen.aliyuncs.com/teable
+          TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          # The agent is included because CN sandboxes pull
+          # <aliyun prefix>:<the app's release id> at spawn time.
+          for image in teable-cloud teable-sandbox-cloud teable-sandbox-agent; do
+            if skopeo inspect --raw --creds="$DST_CREDS" \
+                "docker://${DST_REGISTRY}/${image}:${TAG}" >/dev/null 2>&1; then
+              echo "✅ ${image}:${TAG} already on Aliyun"
+              continue
+            fi
+            echo "⏫ ${image}:${TAG} missing on Aliyun, copying from ghcr"
+            copied=0
+            for attempt in 1 2 3; do
+              if skopeo copy --all \
+                  --src-creds="$SRC_CREDS" \
+                  --dest-creds="$DST_CREDS" \
+                  "docker://${SRC_REGISTRY}/${image}:${TAG}" \
+                  "docker://${DST_REGISTRY}/${image}:${TAG}"; then
+                copied=1
+                break
+              fi
+              echo "⚠️ attempt ${attempt} failed, retrying in 10s"
+              sleep 10
+            done
+            if [ "$copied" != "1" ]; then
+              echo "❌ failed to copy ${image}:${TAG} to Aliyun"
+              exit 1
+            fi
+          done
+
   deploy:
     name: Deploy to Sealos
+    needs: ensure-aliyun
     runs-on: ubuntu-latest
     outputs:
       start_time: ${{ steps.start_time.outputs.start }}
