@@ -491,8 +491,12 @@ jobs:
   # Cloud images are amd64-only, so they push their tags directly — no digest
   # merge needed. Edition-specific bits: CLOUD edition flag, Sentry sourcemap
   # upload, CDN asset prefix, and the Next static asset upload config.
+  # Deliberately NOT gated on ensure-agent-base: the cloud images don't
+  # consume the agent base, and in the old two-workflow world a base failure
+  # never stopped the cloud images from being built and pushed (only the
+  # Released status). merge-agent-manifest still gates the cloud syncs.
   build-push-cloud:
-    needs: [prepare-release, ensure-agent-base]
+    needs: [prepare-release]
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix: ${{ fromJson(needs.prepare-release.outputs.cloud_matrix_json) }}
