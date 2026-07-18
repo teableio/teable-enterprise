@@ -11,23 +11,23 @@ on:
         required: false
         default: 'Manual'
       release_created_time:
-        description: 'Deprecated compatibility input; teable.cn does not create Launch records'
+        description: 'Creation time of the Release record that triggered this deploy'
         required: false
         default: ''
       release_record_id:
-        description: 'Cloud Release record ID used to clear a CN-only publishing lock'
+        description: 'Cloud Release record ID used to track publishing progress'
         required: false
         default: ''
       related_release_record_ids:
-        description: 'Deprecated compatibility input; teable.cn does not create Launch records'
+        description: 'Comma-separated Release record IDs to link on the Launch'
         required: false
         default: ''
       refined_changelog:
-        description: 'Deprecated compatibility input; teable.cn does not create Launch records'
+        description: 'Reviewed English changelog to store on the Launch'
         required: false
         default: ''
       refined_changelog_zh:
-        description: 'Deprecated compatibility input; teable.cn does not create Launch records'
+        description: 'Reviewed Chinese changelog to store on the Launch'
         required: false
         default: ''
       publish_mode:
@@ -50,27 +50,27 @@ on:
         type: string
         default: 'Automation'
       release_created_time:
-        description: 'Deprecated compatibility input; teable.cn does not create Launch records'
+        description: 'Creation time of the Release record that triggered this deploy'
         required: false
         type: string
         default: ''
       release_record_id:
-        description: 'Cloud Release record ID used to clear a CN-only publishing lock'
+        description: 'Cloud Release record ID used to track publishing progress'
         required: false
         type: string
         default: ''
       related_release_record_ids:
-        description: 'Deprecated compatibility input; teable.cn does not create Launch records'
+        description: 'Comma-separated Release record IDs to link on the Launch'
         required: false
         type: string
         default: ''
       refined_changelog:
-        description: 'Deprecated compatibility input; teable.cn does not create Launch records'
+        description: 'Reviewed English changelog to store on the Launch'
         required: false
         type: string
         default: ''
       refined_changelog_zh:
-        description: 'Deprecated compatibility input; teable.cn does not create Launch records'
+        description: 'Reviewed Chinese changelog to store on the Launch'
         required: false
         type: string
         default: ''
@@ -302,51 +302,49 @@ jobs:
         with:
           args: rollout status deployment/teable-cloud
 
-      - name: Release CN-only publishing lock
-        if: inputs.publish_mode == 'cn' && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+
+  notify:
+    name: Record teable.cn Launch
+    needs: deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create teable.cn Launch
         env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          REGION: teable.cn
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          TRIGGER: ${{ inputs.trigger || github.actor }}
+          RELEASE_CREATED_TIME: ${{ inputs.release_created_time }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          RELATED_RELEASE_RECORD_IDS: ${{ inputs.related_release_record_ids }}
+          REFINED_CHANGELOG: ${{ inputs.refined_changelog }}
+          REFINED_CHANGELOG_ZH: ${{ inputs.refined_changelog_zh }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+        run: bash .github/scripts/record-teable-launch.sh
+
+  finalize-release:
+    name: Finalize Release publishing progress
+    needs: notify
+    if: >-
+      needs.notify.result == 'success' &&
+      inputs.release_record_id != '' &&
+      inputs.publish_lock_id != ''
+    runs-on: ubuntu-latest
+    concurrency:
+      group: finalize-teable-release-${{ inputs.release_record_id }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Record teable.cn completion
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
           RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
           PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
-        run: |
-          set -euo pipefail
-
-          read_http_code=$(curl -sS -w "%{http_code}" -o /tmp/release-lock.json \
-            "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/${RELEASE_RECORD_ID}?fieldKeyType=dbFieldName" \
-            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}')
-
-          if [ "$read_http_code" -lt 200 ] || [ "$read_http_code" -ge 300 ]; then
-            echo "Failed to read release lock: HTTP ${read_http_code}"
-            cat /tmp/release-lock.json
-            exit 1
-          fi
-
-          current_lock_id=$(jq -r '.fields.Publishing_Metadata // empty | fromjson? | .lockId // empty' /tmp/release-lock.json)
-          if [ "$current_lock_id" != "$PUBLISH_LOCK_ID" ]; then
-            echo "Publishing lock changed; skip clearing lock ${PUBLISH_LOCK_ID}"
-            exit 0
-          fi
-
-          update_payload=$(jq -n '{
-            "fieldKeyType": "dbFieldName",
-            "typecast": true,
-            "record": {
-              "fields": {
-                "status": "Released",
-                "Publishing_Metadata": null
-              }
-            }
-          }')
-
-          update_http_code=$(curl -sS -w "%{http_code}" -o /tmp/release-unlock.json -X PATCH \
-            "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/${RELEASE_RECORD_ID}" \
-            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
-            -H 'Content-Type: application/json' \
-            -d "$update_payload")
-
-          if [ "$update_http_code" -lt 200 ] || [ "$update_http_code" -ge 300 ]; then
-            echo "Failed to clear CN-only publishing lock: HTTP ${update_http_code}"
-            cat /tmp/release-unlock.json
-            exit 1
-          fi
-
-          echo "Cleared CN-only publishing lock ${PUBLISH_LOCK_ID}"
+          TARGET: cn
+        run: bash .github/scripts/finalize-teable-release.sh
