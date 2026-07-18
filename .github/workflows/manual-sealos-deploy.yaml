@@ -15,7 +15,7 @@ on:
         required: false
         default: ''
       release_record_id:
-        description: 'Deprecated compatibility input; teable.cn does not update Release records'
+        description: 'Cloud Release record ID used to clear a CN-only publishing lock'
         required: false
         default: ''
       related_release_record_ids:
@@ -28,6 +28,14 @@ on:
         default: ''
       refined_changelog_zh:
         description: 'Deprecated compatibility input; teable.cn does not create Launch records'
+        required: false
+        default: ''
+      publish_mode:
+        description: 'Release Publisher target mode: ai, cn, or all'
+        required: false
+        default: ''
+      publish_lock_id:
+        description: 'Release Publisher lock identifier'
         required: false
         default: ''
   workflow_call:
@@ -47,7 +55,7 @@ on:
         type: string
         default: ''
       release_record_id:
-        description: 'Deprecated compatibility input; teable.cn does not update Release records'
+        description: 'Cloud Release record ID used to clear a CN-only publishing lock'
         required: false
         type: string
         default: ''
@@ -63,6 +71,16 @@ on:
         default: ''
       refined_changelog_zh:
         description: 'Deprecated compatibility input; teable.cn does not create Launch records'
+        required: false
+        type: string
+        default: ''
+      publish_mode:
+        description: 'Release Publisher target mode: ai, cn, or all'
+        required: false
+        type: string
+        default: ''
+      publish_lock_id:
+        description: 'Release Publisher lock identifier'
         required: false
         type: string
         default: ''
@@ -283,3 +301,52 @@ jobs:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         with:
           args: rollout status deployment/teable-cloud
+
+      - name: Release CN-only publishing lock
+        if: inputs.publish_mode == 'cn' && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        env:
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+        run: |
+          set -euo pipefail
+
+          read_http_code=$(curl -sS -w "%{http_code}" -o /tmp/release-lock.json \
+            "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/${RELEASE_RECORD_ID}?fieldKeyType=dbFieldName" \
+            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}')
+
+          if [ "$read_http_code" -lt 200 ] || [ "$read_http_code" -ge 300 ]; then
+            echo "Failed to read release lock: HTTP ${read_http_code}"
+            cat /tmp/release-lock.json
+            exit 1
+          fi
+
+          current_lock_id=$(jq -r '.fields.Publishing_Metadata // empty | fromjson? | .lockId // empty' /tmp/release-lock.json)
+          if [ "$current_lock_id" != "$PUBLISH_LOCK_ID" ]; then
+            echo "Publishing lock changed; skip clearing lock ${PUBLISH_LOCK_ID}"
+            exit 0
+          fi
+
+          update_payload=$(jq -n '{
+            "fieldKeyType": "dbFieldName",
+            "typecast": true,
+            "record": {
+              "fields": {
+                "status": "Released",
+                "Publishing_Metadata": null
+              }
+            }
+          }')
+
+          update_http_code=$(curl -sS -w "%{http_code}" -o /tmp/release-unlock.json -X PATCH \
+            "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/${RELEASE_RECORD_ID}" \
+            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
+            -H 'Content-Type: application/json' \
+            -d "$update_payload")
+
+          if [ "$update_http_code" -lt 200 ] || [ "$update_http_code" -ge 300 ]; then
+            echo "Failed to clear CN-only publishing lock: HTTP ${update_http_code}"
+            cat /tmp/release-unlock.json
+            exit 1
+          fi
+
+          echo "Cleared CN-only publishing lock ${PUBLISH_LOCK_ID}"
