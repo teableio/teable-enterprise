@@ -20,18 +20,16 @@ name: GHCR GC
 # release id> at sandbox spawn, so agent release tags must stay pullable
 # for as long as ANY deployment still runs that app build.
 #
-# Arming: requires a classic PAT with write:packages + delete:packages in
-# GHCR_GC_TOKEN (write is needed because untagging a multi-tagged image
-# PUTs a replacement manifest before deleting it). Until that secret
-# exists, every job here SKIPS entirely — deliberately not a dry-run
-# fallback: in dataaxiom/ghcr-cleanup-action@v1.2.2 the untagging PUT for
-# multi-tagged delete-tags matches is NOT gated by dry-run (verified in
-# src/image-deleter.ts performUntagging), so an unarmed "dry run" with a
-# write-capable fallback token could still move tags. With our
-# exclude-tags config, delete-tags matches are single-tagged in practice,
-# but skip-when-unarmed removes the hazard class outright. For the same
-# reason, treat manual dry_run output as trustworthy only for
-# single-tagged matches.
+# Token: PACKAGES_KEY (probed 2026-07-18: classic PAT with
+# delete:packages, repo, write:packages — write matters because untagging
+# a multi-tagged image PUTs a replacement manifest before deleting it).
+# Note that manual dry_run is NOT fully read-only in
+# dataaxiom/ghcr-cleanup-action@v1.2.2: the untagging PUT for
+# multi-tagged delete-tags matches is not dry-run-gated (verified in
+# src/image-deleter.ts performUntagging). With our exclude-tags config,
+# delete-tags matches are single-tagged in practice, so dry_run output is
+# trustworthy — but keep that caveat in mind before loosening the
+# excludes.
 
 on:
   schedule:
@@ -58,23 +56,10 @@ jobs:
   gc-staging-images:
     runs-on: ubuntu-latest
     steps:
-      - name: Check arming token
-        id: gate
-        env:
-          GC_TOKEN: ${{ secrets.GHCR_GC_TOKEN }}
-        run: |
-          if [ -n "$GC_TOKEN" ]; then
-            echo "armed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "armed=false" >> "$GITHUB_OUTPUT"
-            echo "GHCR_GC_TOKEN not set — skipping GC (see workflow header)"
-          fi
-
       - name: Clean staging image versions
-        if: steps.gate.outputs.armed == 'true'
         uses: dataaxiom/ghcr-cleanup-action@v1.2.2
         with:
-          token: ${{ secrets.GHCR_GC_TOKEN }}
+          token: ${{ secrets.PACKAGES_KEY }}
           owner: teableio
           packages: teable-staging,teable-sandbox,teable-sandbox-ee,teable-cloud,teable-sandbox-cloud
           delete-tags: beta-*
@@ -93,23 +78,10 @@ jobs:
     needs: gc-staging-images
     if: always()
     steps:
-      - name: Check arming token
-        id: gate
-        env:
-          GC_TOKEN: ${{ secrets.GHCR_GC_TOKEN }}
-        run: |
-          if [ -n "$GC_TOKEN" ]; then
-            echo "armed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "armed=false" >> "$GITHUB_OUTPUT"
-            echo "GHCR_GC_TOKEN not set — skipping GC (see workflow header)"
-          fi
-
       - name: Clean buildcache and agent-base packages
-        if: steps.gate.outputs.armed == 'true'
         uses: dataaxiom/ghcr-cleanup-action@v1.2.2
         with:
-          token: ${{ secrets.GHCR_GC_TOKEN }}
+          token: ${{ secrets.PACKAGES_KEY }}
           owner: teableio
           packages: teable-buildcache,teable-sandbox-agent-base
           exclude-tags: latest,deps-*,base-*
