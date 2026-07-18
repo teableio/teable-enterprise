@@ -133,8 +133,15 @@ jobs:
             --rawfile body note.md \
             '{tag_name: $tag, name: $tag, body: $body, draft: false, prerelease: false, make_latest: "true"}')"
 
-          existing_id="$(gh api "repos/${OSS_REPO}/releases/tags/${RELEASE_ID}" -q .id 2>/dev/null || true)"
-          if [ -n "$existing_id" ]; then
+          # Branch on gh's EXIT CODE, not its output: on 404 gh prints the
+          # error JSON to stdout, so `-q .id || true` captures garbage and
+          # sends the upsert down the PATCH path.
+          if release_json="$(gh api "repos/${OSS_REPO}/releases/tags/${RELEASE_ID}" 2>/dev/null)"; then
+            existing_id="$(printf '%s' "$release_json" | jq -r .id)"
+          else
+            existing_id=""
+          fi
+          if [ -n "$existing_id" ] && [ "$existing_id" != "null" ]; then
             echo "$payload" | gh api "repos/${OSS_REPO}/releases/${existing_id}" --method PATCH --input - >/dev/null
             echo "Updated existing release ${existing_id}"
           else
