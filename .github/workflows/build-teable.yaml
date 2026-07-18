@@ -39,7 +39,6 @@ concurrency:
 env:
   REGISTRY_GITHUB: ghcr.io/teableio
   REGISTRY_DOCKERHUB: docker.io/teableio
-  EE_IMAGE_SUFFIX: "-ee"
 
 on:
   workflow_dispatch:
