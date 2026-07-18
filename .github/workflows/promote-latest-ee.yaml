@@ -1,5 +1,19 @@
 name: Promote teable EE to latest
 
+# EE stable-channel release. A staging build's app image lives in the
+# INTERNAL teable-staging twin as beta-<id> (the public teable/teable-ee
+# packages only ever show official releases); the sandbox stages in place.
+# Promotion turns a chosen build into the official release:
+#   1. ghcr: stamp release.<id> on the public packages from the staging
+#      source (skip if already stamped — re-promotes work after the beta
+#      twin is reaped), then move latest.
+#   2. Docker Hub: copy release.<id> + latest from ghcr (the per-merge sync
+#      ships only the floating beta channel).
+#   3. Aliyun EE mirror: latest + release.<id>, including the canonical
+#      agent tag (the sync's ee lane skips latest for the agent by design).
+#   4. Notify teable-infra (teable-stable-promoted).
+#   5. Reap old beta-* staging versions (keep a small cushion).
+
 on:
   workflow_dispatch:
     inputs:
@@ -13,21 +27,11 @@ on:
 env:
   REGISTRY_GITHUB: ghcr.io/teableio
   REGISTRY_DOCKERHUB: docker.io/teableio
-  CE_IMAGE_SUFFIX: ""
-  EE_IMAGE_SUFFIX: "-ee"
+  RELEASE_ID: ${{ github.event.client_payload.release_id || inputs.release_id }}
 
 jobs:
   promote-latest:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target: [app, sandbox]
-        include:
-          - target: app
-            image: teable
-          - target: sandbox
-            image: teable-sandbox
-
     steps:
       - name: Login to GitHub container registry
         uses: docker/login-action@v3
@@ -36,29 +40,61 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.PACKAGES_KEY }}
 
-      - name: Login to Docker Hub registry
-        uses: docker/login-action@v3
-        with:
-          username: ${{ vars.DOCKER_HUB_NAME }}
-          password: ${{ secrets.DOCKER_HUB_AK }}
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Promote release tag to latest
-        env:
-          RELEASE_ID: ${{ github.event.client_payload.release_id || inputs.release_id }}
+      - name: Install skopeo
         run: |
-          REGISTRIES=("${{ env.REGISTRY_GITHUB }}" "${{ env.REGISTRY_DOCKERHUB }}")
-          SUFFIXES=("${{ env.CE_IMAGE_SUFFIX }}" "${{ env.EE_IMAGE_SUFFIX }}")
+          sudo apt-get update
+          sudo apt-get install -y skopeo
 
-          for REGISTRY in "${REGISTRIES[@]}"; do
-            for SUFFIX in "${SUFFIXES[@]}"; do
+      - name: Stamp release on ghcr and copy to Docker Hub
+        env:
+          SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
+          DST_CREDS: ${{ vars.DOCKER_HUB_NAME }}:${{ secrets.DOCKER_HUB_AK }}
+        run: |
+          set -euo pipefail
+          BETA_TAG="beta-${RELEASE_ID#release.}"
+
+          # target -> "staging-source release-image alias-image"
+          SPECS=(
+            "teable-staging teable teable-ee"
+            "teable-sandbox teable-sandbox teable-sandbox-ee"
+          )
+
+          for spec in "${SPECS[@]}"; do
+            read -r STAGING RELEASE ALIAS <<< "$spec"
+
+            # Stamp the official tag from the staging source unless a prior
+            # promote already did (the beta twin may be reaped by then).
+            if ! docker buildx imagetools inspect \
+                "${REGISTRY_GITHUB}/${RELEASE}:${RELEASE_ID}" >/dev/null 2>&1; then
               docker buildx imagetools create \
-                --tag "$REGISTRY/${{ matrix.image }}${SUFFIX}:latest" \
-                "$REGISTRY/${{ matrix.image }}${SUFFIX}:${RELEASE_ID}"
+                --tag "${REGISTRY_GITHUB}/${RELEASE}:${RELEASE_ID}" \
+                "${REGISTRY_GITHUB}/${STAGING}:${BETA_TAG}"
+            fi
+
+            docker buildx imagetools create \
+              --tag "${REGISTRY_GITHUB}/${RELEASE}:latest" \
+              --tag "${REGISTRY_GITHUB}/${ALIAS}:${RELEASE_ID}" \
+              --tag "${REGISTRY_GITHUB}/${ALIAS}:latest" \
+              "${REGISTRY_GITHUB}/${RELEASE}:${RELEASE_ID}"
+
+            for image in "$RELEASE" "$ALIAS"; do
+              for tag in "${RELEASE_ID}" latest; do
+                skopeo copy --all \
+                  --src-creds="$SRC_CREDS" \
+                  --dest-creds="$DST_CREDS" \
+                  "docker://${REGISTRY_GITHUB}/${image}:${RELEASE_ID}" \
+                  "docker://${REGISTRY_DOCKERHUB}/${image}:${tag}"
+              done
             done
           done
+
+          # The agent needs no promote step: it is tagged release.<id> at
+          # build time and its pinned tags ship to Docker Hub on every merge
+          # (running apps pull them at sandbox spawn). Aliyun gets the agent
+          # release tag via sync-aliyun below.
 
   sync-aliyun:
     needs: promote-latest
@@ -66,7 +102,7 @@ jobs:
     uses: ./.github/workflows/sync-aliyun.yaml
     with:
       edition: ee
-      tags: "latest"
+      tags: "latest,${{ github.event.client_payload.release_id || inputs.release_id }}"
     secrets: inherit
 
   notify-infra:
@@ -78,7 +114,6 @@ jobs:
       - name: Dispatch teable-stable-promoted to teable-infra
         env:
           DISPATCH_TOKEN: ${{ secrets.TEABLE_INFRA_DISPATCH_TOKEN }}
-          RELEASE_ID: ${{ github.event.client_payload.release_id || inputs.release_id }}
         run: |
           curl -fsS -X POST \
             -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
@@ -86,3 +121,28 @@ jobs:
             https://api.github.com/repos/teableio/teable-infra/dispatches \
             -d "{\"event_type\":\"teable-stable-promoted\",\"client_payload\":{\"release_id\":\"${RELEASE_ID}\"}}"
           echo "dispatched teable-stable-promoted release_id=${RELEASE_ID}"
+
+  # With the stable release out, reap old EE staging versions (the
+  # teable-staging twin and the in-place sandbox beta-* tags), keeping a
+  # small cushion. Dry-run until the GHCR_GC_TOKEN delete:packages PAT
+  # exists. Shares the ghcr-gc concurrency group: the cleanup action must
+  # never run twice against the same package.
+  cleanup-beta:
+    name: Reap EE staging versions
+    needs: promote-latest
+    if: needs.promote-latest.result == 'success'
+    concurrency:
+      group: ghcr-gc
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old beta versions of the EE staging packages
+        uses: dataaxiom/ghcr-cleanup-action@v1.2.2
+        with:
+          token: ${{ secrets.GHCR_GC_TOKEN || secrets.PACKAGES_KEY }}
+          owner: teableio
+          packages: teable-staging,teable-sandbox,teable-sandbox-ee
+          delete-tags: beta-*
+          keep-n-tagged: 5
+          exclude-tags: latest,beta,release.*
+          validate: true
+          dry-run: ${{ secrets.GHCR_GC_TOKEN == '' }}

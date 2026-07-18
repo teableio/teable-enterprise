@@ -64,6 +64,10 @@ on:
         required: true
       TEABLE_API_TOKEN:
         required: false
+      INFRA_TEABLE_AI_PREHEAT_TOKEN:
+        required: false
+      INFRA_TEABLE_CN_PREHEAT_TOKEN:
+        required: false
 
 jobs:
   prepare:
@@ -78,9 +82,64 @@ jobs:
         id: start_time
         run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
 
+  # Production deploys run from the official release.<id> tag. A staging
+  # build only carries its beta-<id> registry twin, so the FIRST launch of a
+  # build stamps release.<id> from it (ghcr + ECR) before anything deploys —
+  # the presence of a release.* tag is what makes a version official,
+  # permanently retained, and exempt from beta cleanup / the ECR lifecycle
+  # policy. Re-deploys of an already-released id (rollbacks) find the tag
+  # present and skip, so they work even after the beta twin is reaped.
+  stamp-release:
+    name: Stamp official release tags
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Login to AWS ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Stamp release tags from the staging build
+        env:
+          RELEASE_ID: ${{ inputs.image_tag }}
+          ECR_REGISTRY: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable
+        run: |
+          set -euo pipefail
+          BETA_TAG="beta-${RELEASE_ID#release.}"
+          REGISTRIES=("ghcr.io/teableio" "$ECR_REGISTRY")
+          IMAGES=("teable-cloud" "teable-sandbox-cloud")
+
+          for REGISTRY in "${REGISTRIES[@]}"; do
+            for IMAGE in "${IMAGES[@]}"; do
+              if docker buildx imagetools inspect "$REGISTRY/${IMAGE}:${RELEASE_ID}" >/dev/null 2>&1; then
+                echo "✅ ${IMAGE}:${RELEASE_ID} already stamped on ${REGISTRY}"
+                continue
+              fi
+              docker buildx imagetools create \
+                --tag "$REGISTRY/${IMAGE}:${RELEASE_ID}" \
+                "$REGISTRY/${IMAGE}:${BETA_TAG}"
+            done
+          done
+
   deploy-sandbox:
     name: Deploy Sandbox to ECS
-    needs: prepare
+    needs: [prepare, stamp-release]
     runs-on: ubuntu-latest
 
     steps:
@@ -314,14 +373,56 @@ jobs:
             done
           done
 
+  # Aliyun receives images ONLY at release time. The official release.<id>
+  # must ship alongside latest: teable.cn (manual-sealos-deploy) deploys
+  # that pinned tag from Aliyun, and the sync's cloud lane also carries the
+  # canonical agent tag that CN sandboxes pull.
   sync-aliyun:
-    needs: promote-latest
+    needs: [stamp-release, promote-latest]
     if: needs.promote-latest.result == 'success'
     uses: ./.github/workflows/sync-aliyun.yaml
     with:
       edition: cloud
-      tags: "latest"
+      tags: "latest,${{ inputs.image_tag }}"
     secrets: inherit
+
+  # Preheat CN sandbox-agent nodes as soon as the agent tag lands on Aliyun.
+  # Best-effort: not part of the notify gating — a preheat miss only costs
+  # first-spawn latency.
+  preheat-sandbox-agent:
+    needs: sync-aliyun
+    if: needs.sync-aliyun.result == 'success'
+    uses: ./.github/workflows/preheat-sandbox-agent-cloud.yaml
+    with:
+      image_tag: ${{ inputs.image_tag }}
+    secrets: inherit
+
+  # With the release stamped and deployed, the accumulated cloud staging
+  # versions have served their purpose: reap beta-* keeping a small cushion
+  # for staging rollback. The launched version itself only loses its beta-
+  # tag — the image survives, now carrying release.<id>. Without the
+  # GHCR_GC_TOKEN delete:packages PAT this runs as a dry-run. Shares the
+  # ghcr-gc concurrency group: the cleanup action must never run twice
+  # against the same package.
+  cleanup-beta:
+    name: Reap cloud staging versions
+    needs: [deploy-sandbox, deploy-app, promote-latest]
+    if: needs.deploy-sandbox.result == 'success' && needs.deploy-app.result == 'success'
+    concurrency:
+      group: ghcr-gc
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old beta versions of the cloud packages
+        uses: dataaxiom/ghcr-cleanup-action@v1.2.2
+        with:
+          token: ${{ secrets.GHCR_GC_TOKEN || secrets.PACKAGES_KEY }}
+          owner: teableio
+          packages: teable-cloud,teable-sandbox-cloud
+          delete-tags: beta-*
+          keep-n-tagged: 5
+          exclude-tags: latest,release.*
+          validate: true
+          dry-run: ${{ secrets.GHCR_GC_TOKEN == '' }}
 
   notify:
     name: Record Deployment in Teable
