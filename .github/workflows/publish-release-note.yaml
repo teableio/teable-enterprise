@@ -201,14 +201,21 @@ jobs:
           desc = open(path).read()
 
           START, END = '<!-- WHATS-NEW:START -->', '<!-- WHATS-NEW:END -->'
-          entry = f"### {release_id}\n\n{note}\n"
+          entry = f"### {release_id}\n\n{note}"
 
           m = re.search(re.escape(START) + r'(.*?)' + re.escape(END), desc, re.S)
           entries = []
           if m:
               body = m.group(1)
-              entries = [('### ' + e).strip() for e in body.split('### ') if e.strip()]
-              entries = [e for e in entries if not e.startswith(f'### {release_id}')]
+              # Only real entries survive the rebuild: the block heading and
+              # the All-releases footer are regenerated below, so capture
+              # strictly "### release.*" sections and strip any footer text
+              # that rides along inside the last one.
+              raw = re.findall(r'(?ms)^### release\..*?(?=^### release\.|\Z)', body)
+              for e in raw:
+                  e = re.sub(r'\n+All releases:.*$', '', e, flags=re.S).strip()
+                  if e and not e.startswith(f'### {release_id}'):
+                      entries.append(e)
           entries.insert(0, entry.strip())
           entries = entries[:5]
 
@@ -238,7 +245,8 @@ jobs:
 
   notify-failure:
     needs: [promote-ee, publish]
-    if: always() && (needs.promote-ee.result == 'failure' || needs.publish.result == 'failure')
+    # dry-run rehearsals are side-effect-free by contract — no alerts.
+    if: always() && !(github.event_name == 'workflow_dispatch' && inputs.dry_run) && (needs.promote-ee.result == 'failure' || needs.publish.result == 'failure')
     runs-on: ubuntu-latest
     steps:
       - name: Send Feishu failure notification

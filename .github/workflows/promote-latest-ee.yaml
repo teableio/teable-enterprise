@@ -147,6 +147,10 @@ jobs:
     name: Reap EE staging versions
     needs: promote-latest
     if: needs.promote-latest.result == 'success'
+    # Post-promotion housekeeping must never fail the promote (callers like
+    # publish-release-note gate on this workflow's result, and the images
+    # are already live) — the scheduled ghcr-gc backstop catches misses.
+    continue-on-error: true
     concurrency:
       group: ghcr-gc
     runs-on: ubuntu-latest
