@@ -467,12 +467,21 @@ jobs:
   notify:
     name: Record Deployment in Teable
     needs: [prepare, deploy-sandbox, deploy-app, promote-latest, sync-aliyun]
-    if: always()
+    if: >-
+      needs.deploy-sandbox.result == 'success' &&
+      needs.deploy-app.result == 'success' &&
+      needs.promote-latest.result == 'success' &&
+      needs.sync-aliyun.result == 'success'
     runs-on: ubuntu-latest
 
     steps:
-      - name: Record deployment in Teable
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create teable.ai Launch
         env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          REGION: teable.ai
           IMAGE_TAG: ${{ inputs.image_tag }}
           TRIGGER: ${{ inputs.trigger || github.actor }}
           RELEASE_CREATED_TIME: ${{ inputs.release_created_time }}
@@ -480,75 +489,28 @@ jobs:
           RELATED_RELEASE_RECORD_IDS: ${{ inputs.related_release_record_ids }}
           REFINED_CHANGELOG: ${{ inputs.refined_changelog }}
           REFINED_CHANGELOG_ZH: ${{ inputs.refined_changelog_zh }}
-        run: |
-          current_time=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-          related_release_ids_json=$(printf '%s' "$RELATED_RELEASE_RECORD_IDS" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+        run: bash .github/scripts/record-teable-launch.sh
 
-          # Build JSON payload using jq to properly escape special characters
-          payload=$(jq -n \
-            --arg date "$current_time" \
-            --arg region "teable.ai" \
-            --arg trigger "$TRIGGER" \
-            --arg snapshot "$RELEASE_CREATED_TIME" \
-            --arg refinedChangelog "$REFINED_CHANGELOG" \
-            --arg refinedChangelogZh "$REFINED_CHANGELOG_ZH" \
-            --argjson relatedReleaseIds "$related_release_ids_json" \
-            '{
-              "fieldKeyType": "dbFieldName",
-              "typecast": true,
-              "records": [
-                {
-                  "fields": {
-                    "date": $date,
-                    "region": $region,
-                    "trigger": $trigger,
-                    "Deploy_snapshot_time": (if $snapshot != "" then $snapshot else null end),
-                    "Related_Releases": (if ($relatedReleaseIds | length) > 0 then $relatedReleaseIds else null end),
-                    "Refined_Changelog": (if $refinedChangelog != "" then $refinedChangelog else null end),
-                    "Refined_Changelog_Zhong_Wen": (if $refinedChangelogZh != "" then $refinedChangelogZh else null end)
-                  }
-                }
-              ]
-            }')
+  finalize-release:
+    name: Finalize Release publishing progress
+    needs: notify
+    if: >-
+      needs.notify.result == 'success' &&
+      inputs.release_record_id != '' &&
+      inputs.publish_lock_id != ''
+    runs-on: ubuntu-latest
+    concurrency:
+      group: finalize-teable-release-${{ inputs.release_record_id }}
 
-          # Make the API call and capture both response and HTTP status code
-          http_code=$(curl -s -w "%{http_code}" -o /tmp/response.json -X POST 'https://app.teable.ai/api/table/tblmGAFOHrGcy66PaUp/record' \
-            -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
-            -H 'Content-Type: application/json' \
-            -d "$payload")
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-          response=$(cat /tmp/response.json)
-          echo "Response: $response"
-          echo "HTTP Status Code: $http_code"
-
-          # Check if request was successful
-          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
-            record_id=$(echo "$response" | jq -r '.records[0].id')
-            echo "Created deployment record with ID: ${record_id}"
-
-            if [ -n "$RELEASE_RECORD_ID" ]; then
-              update_payload=$(jq -n \
-                '{
-                  "fieldKeyType": "dbFieldName",
-                  "typecast": true,
-                  "record": {
-                    "fields": {
-                      "status": "Launched",
-                      "Publishing_Metadata": null
-                    }
-                  }
-                }')
-
-              update_http_code=$(curl -s -w "%{http_code}" -o /tmp/release-update.json -X PATCH \
-                "https://app.teable.ai/api/table/tblAhVLOxNtvkaF1ii5/record/${RELEASE_RECORD_ID}" \
-                -H 'Authorization: Bearer ${{ secrets.TEABLE_API_TOKEN }}' \
-                -H 'Content-Type: application/json' \
-                -d "$update_payload")
-
-              echo "Updated release record ${RELEASE_RECORD_ID} to Launched: HTTP ${update_http_code}"
-            fi
-          else
-            echo "Error: API request failed with status code $http_code"
-            echo "Response: $response"
-            exit 1
-          fi
+      - name: Record teable.ai completion
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: ai
+        run: bash .github/scripts/finalize-teable-release.sh
