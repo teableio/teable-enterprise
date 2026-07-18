@@ -22,6 +22,14 @@ on:
         description: 'Comma-separated Teable release record IDs to link on the launch record'
         required: false
         default: ''
+      refined_changelog:
+        description: 'Reviewed English changelog to store on the launch record'
+        required: false
+        default: ''
+      refined_changelog_zh:
+        description: 'Reviewed Chinese changelog to store on the launch record'
+        required: false
+        default: ''
   workflow_call:
     inputs:
       image_tag:
@@ -45,6 +53,16 @@ on:
         default: ''
       related_release_record_ids:
         description: 'Comma-separated Teable release record IDs to link on the launch record'
+        required: false
+        type: string
+        default: ''
+      refined_changelog:
+        description: 'Reviewed English changelog to store on the launch record'
+        required: false
+        type: string
+        default: ''
+      refined_changelog_zh:
+        description: 'Reviewed Chinese changelog to store on the launch record'
         required: false
         type: string
         default: ''
@@ -273,6 +291,8 @@ jobs:
           RELEASE_CREATED_TIME: ${{ inputs.release_created_time }}
           RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
           RELATED_RELEASE_RECORD_IDS: ${{ inputs.related_release_record_ids }}
+          REFINED_CHANGELOG: ${{ inputs.refined_changelog }}
+          REFINED_CHANGELOG_ZH: ${{ inputs.refined_changelog_zh }}
         run: |
           current_time=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
           related_release_ids_json=$(printf '%s' "$RELATED_RELEASE_RECORD_IDS" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
@@ -283,6 +303,8 @@ jobs:
             --arg region "teable.cn" \
             --arg trigger "$TRIGGER" \
             --arg snapshot "$RELEASE_CREATED_TIME" \
+            --arg refinedChangelog "$REFINED_CHANGELOG" \
+            --arg refinedChangelogZh "$REFINED_CHANGELOG_ZH" \
             --argjson relatedReleaseIds "$related_release_ids_json" \
             '{
               "fieldKeyType": "dbFieldName",
@@ -294,7 +316,9 @@ jobs:
                     "region": $region,
                     "trigger": $trigger,
                     "Deploy_snapshot_time": (if $snapshot != "" then $snapshot else null end),
-                    "Related_Releases": (if ($relatedReleaseIds | length) > 0 then $relatedReleaseIds else null end)
+                    "Related_Releases": (if ($relatedReleaseIds | length) > 0 then $relatedReleaseIds else null end),
+                    "Refined_Changelog": (if $refinedChangelog != "" then $refinedChangelog else null end),
+                    "Refined_Changelog_Zhong_Wen": (if $refinedChangelogZh != "" then $refinedChangelogZh else null end)
                   }
                 }
               ]
