@@ -62,6 +62,13 @@ on:
         required: true
       TEABLE_API_TOKEN:
         required: false
+      # Used by the ensure-aliyun job (ghcr pull / Aliyun push) — callers
+      # not using `secrets: inherit` must pass these for the self-heal
+      # copy to work.
+      PACKAGES_KEY:
+        required: false
+      ALI_DOCKER_PASSWORD:
+        required: false
 
 jobs:
   # teable.cn deploys official release.<id> tags from Aliyun, but Aliyun
