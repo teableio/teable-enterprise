@@ -23,8 +23,8 @@ name: GHCR GC
 # Token: PACKAGES_KEY (probed 2026-07-18: classic PAT with
 # delete:packages, repo, write:packages — write matters because untagging
 # a multi-tagged image PUTs a replacement manifest before deleting it).
-# Note that manual dry_run is NOT fully read-only in
-# dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2: the untagging PUT for
+# Note that manual dry_run is NOT fully read-only in the cleanup action
+# (v1.2.2, SHA-pinned below): the untagging PUT for
 # multi-tagged delete-tags matches is not dry-run-gated (verified in
 # src/image-deleter.ts performUntagging). With our exclude-tags config,
 # delete-tags matches are single-tagged in practice, so dry_run output is
