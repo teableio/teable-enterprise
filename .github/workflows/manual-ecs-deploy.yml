@@ -402,11 +402,9 @@ jobs:
   # With the release stamped and deployed, the accumulated cloud staging
   # versions have served their purpose: reap beta-* keeping a small cushion
   # for staging rollback. The launched version itself only loses its beta-
-  # tag — the image survives, now carrying release.<id>. Skips entirely
-  # until the GHCR_GC_TOKEN PAT (write:packages + delete:packages) exists:
-  # the action's multi-tag untagging PUT is not dry-run-gated, so an
-  # unarmed dry-run fallback with a write-capable token would not actually
-  # be read-only. Shares the ghcr-gc concurrency group: the cleanup action
+  # tag — the image survives, now carrying release.<id>. PACKAGES_KEY has
+  # the needed scopes (delete:packages + write:packages, probed
+  # 2026-07-18). Shares the ghcr-gc concurrency group: the cleanup action
   # must never run twice against the same package.
   cleanup-beta:
     name: Reap cloud staging versions
@@ -416,23 +414,10 @@ jobs:
       group: ghcr-gc
     runs-on: ubuntu-latest
     steps:
-      - name: Check arming token
-        id: gate
-        env:
-          GC_TOKEN: ${{ secrets.GHCR_GC_TOKEN }}
-        run: |
-          if [ -n "$GC_TOKEN" ]; then
-            echo "armed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "armed=false" >> "$GITHUB_OUTPUT"
-            echo "GHCR_GC_TOKEN not set — skipping staging cleanup"
-          fi
-
       - name: Delete old beta versions of the cloud packages
-        if: steps.gate.outputs.armed == 'true'
-        uses: dataaxiom/ghcr-cleanup-action@v1.2.2
+        uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
         with:
-          token: ${{ secrets.GHCR_GC_TOKEN }}
+          token: ${{ secrets.PACKAGES_KEY }}
           owner: teableio
           packages: teable-cloud,teable-sandbox-cloud
           delete-tags: beta-*
