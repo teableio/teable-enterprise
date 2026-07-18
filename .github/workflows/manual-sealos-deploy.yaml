@@ -64,11 +64,13 @@ on:
         required: false
 
 jobs:
-  # teable.cn deploys pinned tags from Aliyun, but Aliyun only receives
-  # images at release time (manual-ecs-deploy's sync-aliyun). This job makes
-  # the CN deploy self-sufficient: any tag still missing on Aliyun is copied
-  # from ghcr before kubectl touches anything, so the CN and AI launches can
-  # run in either order. Idempotent — near-instant when the tags are there.
+  # teable.cn deploys official release.<id> tags from Aliyun, but Aliyun
+  # only receives images at release time (manual-ecs-deploy's sync-aliyun).
+  # This job makes the CN launch self-sufficient: if this build was never
+  # released yet, its release.<id> is first stamped on ghcr from the
+  # beta-<id> staging twin, then any tag missing on Aliyun is copied over —
+  # so the CN and AI launches can run in either order. Idempotent:
+  # near-instant when the tags already exist.
   ensure-aliyun:
     name: Ensure release images on Aliyun
     runs-on: ubuntu-latest
@@ -78,7 +80,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y skopeo
 
-      - name: Copy any missing images from ghcr
+      - name: Stamp and copy any missing images
         env:
           SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
           DST_CREDS: ${{ vars.ALI_DOCKER_USERNAME }}:${{ secrets.ALI_DOCKER_PASSWORD }}
@@ -87,32 +89,48 @@ jobs:
           TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
+          BETA_TAG="beta-${TAG#release.}"
+
+          retry_copy() {
+            local src="$1" dst="$2" dst_creds="$3"
+            for attempt in 1 2 3; do
+              if skopeo copy --all \
+                  --src-creds="$SRC_CREDS" \
+                  --dest-creds="$dst_creds" \
+                  "docker://${src}" "docker://${dst}"; then
+                return 0
+              fi
+              echo "⚠️ attempt ${attempt} failed for ${src}, retrying in 10s"
+              sleep 10
+            done
+            echo "❌ failed to copy ${src} -> ${dst}"
+            return 1
+          }
+
           # The agent is included because CN sandboxes pull
-          # <aliyun prefix>:<the app's release id> at spawn time.
+          # <aliyun prefix>:<the app's release id> at spawn time; it always
+          # carries the release tag already (tagged at build time).
           for image in teable-cloud teable-sandbox-cloud teable-sandbox-agent; do
             if skopeo inspect --raw --creds="$DST_CREDS" \
                 "docker://${DST_REGISTRY}/${image}:${TAG}" >/dev/null 2>&1; then
               echo "✅ ${image}:${TAG} already on Aliyun"
               continue
             fi
-            echo "⏫ ${image}:${TAG} missing on Aliyun, copying from ghcr"
-            copied=0
-            for attempt in 1 2 3; do
-              if skopeo copy --all \
-                  --src-creds="$SRC_CREDS" \
-                  --dest-creds="$DST_CREDS" \
-                  "docker://${SRC_REGISTRY}/${image}:${TAG}" \
-                  "docker://${DST_REGISTRY}/${image}:${TAG}"; then
-                copied=1
-                break
-              fi
-              echo "⚠️ attempt ${attempt} failed, retrying in 10s"
-              sleep 10
-            done
-            if [ "$copied" != "1" ]; then
-              echo "❌ failed to copy ${image}:${TAG} to Aliyun"
-              exit 1
+
+            if ! skopeo inspect --raw --creds="$SRC_CREDS" \
+                "docker://${SRC_REGISTRY}/${image}:${TAG}" >/dev/null 2>&1; then
+              echo "⏫ ${image}:${TAG} not stamped yet, stamping from ${BETA_TAG} on ghcr"
+              retry_copy \
+                "${SRC_REGISTRY}/${image}:${BETA_TAG}" \
+                "${SRC_REGISTRY}/${image}:${TAG}" \
+                "$SRC_CREDS"
             fi
+
+            echo "⏫ ${image}:${TAG} missing on Aliyun, copying from ghcr"
+            retry_copy \
+              "${SRC_REGISTRY}/${image}:${TAG}" \
+              "${DST_REGISTRY}/${image}:${TAG}" \
+              "$DST_CREDS"
           done
 
   deploy:
