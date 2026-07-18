@@ -410,6 +410,9 @@ jobs:
     name: Reap cloud staging versions
     needs: [deploy-sandbox, deploy-app, promote-latest]
     if: needs.deploy-sandbox.result == 'success' && needs.deploy-app.result == 'success'
+    # Housekeeping must never mark a successful production deploy as
+    # failed — the scheduled ghcr-gc backstop catches misses.
+    continue-on-error: true
     concurrency:
       group: ghcr-gc
     runs-on: ubuntu-latest
