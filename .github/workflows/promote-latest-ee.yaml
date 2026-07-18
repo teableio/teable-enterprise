@@ -91,10 +91,18 @@ jobs:
             done
           done
 
-          # The agent needs no promote step: it is tagged release.<id> at
-          # build time and its pinned tags ship to Docker Hub on every merge
-          # (running apps pull them at sandbox spawn). Aliyun gets the agent
-          # release tag via sync-aliyun below.
+          # The agent already carries release.<id> on ghcr (tagged at build
+          # time), and develop merges ship it to Docker Hub per merge — but
+          # branch/hotfix builds skip that beta-channel sync, so copy it
+          # here too (idempotent) to guarantee any promoted id has its
+          # agent on Docker Hub: self-hosted apps pull
+          # <prefix>:<their BUILD_VERSION> at sandbox spawn. Aliyun gets
+          # the agent release tag via sync-aliyun below.
+          skopeo copy --all \
+            --src-creds="$SRC_CREDS" \
+            --dest-creds="$DST_CREDS" \
+            "docker://${REGISTRY_GITHUB}/teable-sandbox-agent:${RELEASE_ID}" \
+            "docker://${REGISTRY_DOCKERHUB}/teable-sandbox-agent:${RELEASE_ID}"
 
   sync-aliyun:
     needs: promote-latest
@@ -124,9 +132,12 @@ jobs:
 
   # With the stable release out, reap old EE staging versions (the
   # teable-staging twin and the in-place sandbox beta-* tags), keeping a
-  # small cushion. Dry-run until the GHCR_GC_TOKEN delete:packages PAT
-  # exists. Shares the ghcr-gc concurrency group: the cleanup action must
-  # never run twice against the same package.
+  # small cushion. Skips entirely until the GHCR_GC_TOKEN PAT
+  # (write:packages + delete:packages) exists: the action's multi-tag
+  # untagging PUT is not dry-run-gated, so an unarmed dry-run fallback
+  # with a write-capable token would not actually be read-only. Shares the
+  # ghcr-gc concurrency group: the cleanup action must never run twice
+  # against the same package.
   cleanup-beta:
     name: Reap EE staging versions
     needs: promote-latest
@@ -135,14 +146,26 @@ jobs:
       group: ghcr-gc
     runs-on: ubuntu-latest
     steps:
+      - name: Check arming token
+        id: gate
+        env:
+          GC_TOKEN: ${{ secrets.GHCR_GC_TOKEN }}
+        run: |
+          if [ -n "$GC_TOKEN" ]; then
+            echo "armed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "armed=false" >> "$GITHUB_OUTPUT"
+            echo "GHCR_GC_TOKEN not set — skipping staging cleanup"
+          fi
+
       - name: Delete old beta versions of the EE staging packages
+        if: steps.gate.outputs.armed == 'true'
         uses: dataaxiom/ghcr-cleanup-action@v1.2.2
         with:
-          token: ${{ secrets.GHCR_GC_TOKEN || secrets.PACKAGES_KEY }}
+          token: ${{ secrets.GHCR_GC_TOKEN }}
           owner: teableio
           packages: teable-staging,teable-sandbox,teable-sandbox-ee
           delete-tags: beta-*
           keep-n-tagged: 5
           exclude-tags: latest,beta,release.*
           validate: true
-          dry-run: ${{ secrets.GHCR_GC_TOKEN == '' }}

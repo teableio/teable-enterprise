@@ -182,7 +182,9 @@ jobs:
 
   deploy-app:
     name: Deploy Main to ECS
-    needs: prepare
+    # stamp-release must have produced the release.<id> tag before the
+    # migration one-off task or the service tries to pull it.
+    needs: [prepare, stamp-release]
     runs-on: ubuntu-latest
 
     steps:
@@ -400,10 +402,12 @@ jobs:
   # With the release stamped and deployed, the accumulated cloud staging
   # versions have served their purpose: reap beta-* keeping a small cushion
   # for staging rollback. The launched version itself only loses its beta-
-  # tag — the image survives, now carrying release.<id>. Without the
-  # GHCR_GC_TOKEN delete:packages PAT this runs as a dry-run. Shares the
-  # ghcr-gc concurrency group: the cleanup action must never run twice
-  # against the same package.
+  # tag — the image survives, now carrying release.<id>. Skips entirely
+  # until the GHCR_GC_TOKEN PAT (write:packages + delete:packages) exists:
+  # the action's multi-tag untagging PUT is not dry-run-gated, so an
+  # unarmed dry-run fallback with a write-capable token would not actually
+  # be read-only. Shares the ghcr-gc concurrency group: the cleanup action
+  # must never run twice against the same package.
   cleanup-beta:
     name: Reap cloud staging versions
     needs: [deploy-sandbox, deploy-app, promote-latest]
@@ -412,17 +416,29 @@ jobs:
       group: ghcr-gc
     runs-on: ubuntu-latest
     steps:
+      - name: Check arming token
+        id: gate
+        env:
+          GC_TOKEN: ${{ secrets.GHCR_GC_TOKEN }}
+        run: |
+          if [ -n "$GC_TOKEN" ]; then
+            echo "armed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "armed=false" >> "$GITHUB_OUTPUT"
+            echo "GHCR_GC_TOKEN not set — skipping staging cleanup"
+          fi
+
       - name: Delete old beta versions of the cloud packages
+        if: steps.gate.outputs.armed == 'true'
         uses: dataaxiom/ghcr-cleanup-action@v1.2.2
         with:
-          token: ${{ secrets.GHCR_GC_TOKEN || secrets.PACKAGES_KEY }}
+          token: ${{ secrets.GHCR_GC_TOKEN }}
           owner: teableio
           packages: teable-cloud,teable-sandbox-cloud
           delete-tags: beta-*
           keep-n-tagged: 5
           exclude-tags: latest,release.*
           validate: true
-          dry-run: ${{ secrets.GHCR_GC_TOKEN == '' }}
 
   notify:
     name: Record Deployment in Teable
