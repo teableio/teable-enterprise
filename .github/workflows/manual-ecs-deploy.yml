@@ -30,6 +30,14 @@ on:
         description: 'Reviewed Chinese changelog to store on the launch record'
         required: false
         default: ''
+      publish_mode:
+        description: 'Release Publisher target mode: ai, cn, or all'
+        required: false
+        default: ''
+      publish_lock_id:
+        description: 'Release Publisher lock identifier'
+        required: false
+        default: ''
   workflow_call:
     inputs:
       image_tag:
@@ -63,6 +71,16 @@ on:
         default: ''
       refined_changelog_zh:
         description: 'Reviewed Chinese changelog to store on the launch record'
+        required: false
+        type: string
+        default: ''
+      publish_mode:
+        description: 'Release Publisher target mode: ai, cn, or all'
+        required: false
+        type: string
+        default: ''
+      publish_lock_id:
+        description: 'Release Publisher lock identifier'
         required: false
         type: string
         default: ''
@@ -515,7 +533,8 @@ jobs:
                   "typecast": true,
                   "record": {
                     "fields": {
-                      "status": "Launched"
+                      "status": "Launched",
+                      "Publishing_Metadata": null
                     }
                   }
                 }')
