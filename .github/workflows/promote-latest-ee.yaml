@@ -23,6 +23,13 @@ on:
         type: string
   repository_dispatch:
     types: [promote-ee]
+  # publish-release-note.yaml calls this so the self-host images are
+  # official everywhere BEFORE the release note goes public.
+  workflow_call:
+    inputs:
+      release_id:
+        required: true
+        type: string
 
 env:
   REGISTRY_GITHUB: ghcr.io/teableio
