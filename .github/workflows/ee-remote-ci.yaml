@@ -7,23 +7,28 @@
 #
 # Privacy contract: teable-ee is private, this repo is public, so run logs and
 # artifacts here are world-readable. Every step that can print source code
-# (build errors, type errors, lint output, test failures) redirects stdout and
-# stderr into a log file; the public log carries only exit codes and line
-# counts. Full logs ship to the private teable-ci-logs repo as release assets
-# and are rendered back inside teable-ee by remote-ci-report.yml, which
-# deletes the release after ingestion. Suite results land on the teable-ee
-# commit as `remote-ci/*` statuses.
+# (build errors, type errors, lint/test output) redirects stdout and stderr
+# into a log file; the public log carries only exit codes and line counts.
+# Logs, playwright artifacts, and per-suite verdict files (<suite>.result,
+# first line = success|failure|cancelled) ship to the private teable-ci-logs
+# repo as release assets under the log_tag given in the dispatch payload.
+# teable-ee's "Remote CI" receiver jobs poll for the verdict files, render the
+# logs privately, and turn red/green — this workflow posts nothing to GitHub
+# checks itself, and a hung/lost run here surfaces as a receiver timeout (red)
+# over there.
 
 name: EE Remote CI
 
-run-name: 'EE Remote CI — PR #${{ github.event.client_payload.pr_number }} (${{ github.event.client_payload.suites }})'
+run-name: 'EE Remote CI — PR #${{ github.event.client_payload.pr_number }} (${{ github.event.client_payload.suites }}) ${{ github.event.client_payload.log_tag }}'
 
 on:
   repository_dispatch:
     types: [ee-remote-ci]
 
+# Suites in the group key so a per-suite retry dispatch doesn't cancel (or get
+# cancelled by) a concurrent full run for the same PR.
 concurrency:
-  group: ee-remote-ci-${{ github.event.client_payload.pr_number || github.event.client_payload.ee_ref }}
+  group: ee-remote-ci-${{ github.event.client_payload.pr_number || github.event.client_payload.ee_ref }}-${{ github.event.client_payload.suites }}
   cancel-in-progress: true
 
 permissions:
@@ -31,9 +36,11 @@ permissions:
 
 env:
   EE_SHA: ${{ github.event.client_payload.ee_sha }}
-  LOG_TAG: run-${{ github.run_id }}-${{ github.run_attempt }}
+  LOG_TAG: ${{ github.event.client_payload.log_tag }}
+  PR_NUMBER: ${{ github.event.client_payload.pr_number }}
   RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
   LOG_DIR: /tmp/ci-logs
+  LOGS_REPO: teableio/teable-ci-logs
 
 jobs:
   # ── Suite: lint (mirrors teable-ee "Linting and Types") ────────────────
@@ -47,15 +54,6 @@ jobs:
       TEABLE_TSDOWN_DISABLE_DTS: '1'
 
     steps:
-      - name: 🚦 Mark status running
-        env:
-          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-        run: |
-          gh api "repos/teableio/teable-ee/statuses/${EE_SHA}" \
-            -f state=pending -f context='remote-ci/build' \
-            -f description='running on enterprise 4c16g runner' \
-            -f target_url="${RUN_URL}" >/dev/null
-
       - name: 📦 Checkout teable-ee
         uses: actions/checkout@v4
         with:
@@ -80,8 +78,8 @@ jobs:
           {
             echo "=== prisma generate ==="
             pnpm -F @teable/db-main-prisma-ee prisma-generate --schema ./prisma/postgres/schema.prisma
-          } >> "$LOG_DIR/build.log" 2>&1 || status=$?
-          echo "prisma generate exit=$status ($(wc -l < "$LOG_DIR/build.log") log lines)"
+          } >> "$LOG_DIR/lint-build.log" 2>&1 || status=$?
+          echo "prisma generate exit=$status ($(wc -l < "$LOG_DIR/lint-build.log") log lines)"
           exit $status
 
       - name: 🏗 Run build
@@ -91,32 +89,19 @@ jobs:
             echo "=== build community/packages + packages ==="
             pnpm -r --filter "./community/packages/**" --sort --workspace-concurrency=4 run build &&
             pnpm -r --filter "./packages/**" --sort --workspace-concurrency=4 run build
-          } >> "$LOG_DIR/build.log" 2>&1 || status=$?
-          echo "build exit=$status ($(wc -l < "$LOG_DIR/build.log") log lines total)"
-          [ "$status" -ne 0 ] && echo "❌ build failed — full output arrives in the teable-ee report run (PR status link)"
+          } >> "$LOG_DIR/lint-build.log" 2>&1 || status=$?
+          echo "build exit=$status ($(wc -l < "$LOG_DIR/lint-build.log") log lines total)"
           exit $status
 
-      - name: 📤 Ship log & finalize status
+      - name: 📤 Ship log
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-          JOB_STATUS: ${{ job.status }}
-          PR_NUMBER: ${{ github.event.client_payload.pr_number }}
         run: |
           mkdir -p "$LOG_DIR"
-          [ -f "$LOG_DIR/build.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/build.log"
-          gh release create "$LOG_TAG" -R teableio/teable-ci-logs \
-            --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" \
-            --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/build.log" -R teableio/teable-ci-logs --clobber
-          case "$JOB_STATUS" in
-            success)   STATE=success; DESC='passed on enterprise runner';;
-            cancelled) STATE=error;   DESC='cancelled (superseded or manual)';;
-            *)         STATE=failure; DESC='failed — full log in teable-ee report run';;
-          esac
-          gh api "repos/teableio/teable-ee/statuses/${EE_SHA}" \
-            -f state="$STATE" -f context='remote-ci/build' \
-            -f description="$DESC" -f target_url="${RUN_URL}" >/dev/null
+          [ -f "$LOG_DIR/lint-build.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/lint-build.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/lint-build.log" -R "$LOGS_REPO" --clobber
 
   typecheck:
     if: contains(github.event.client_payload.suites, 'lint')
@@ -129,15 +114,6 @@ jobs:
       TEABLE_TSDOWN_DISABLE_DTS: '1'
 
     steps:
-      - name: 🚦 Mark status running
-        env:
-          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-        run: |
-          gh api "repos/teableio/teable-ee/statuses/${EE_SHA}" \
-            -f state=pending -f context='remote-ci/typecheck' \
-            -f description='running on enterprise 4c16g runner' \
-            -f target_url="${RUN_URL}" >/dev/null
-
       - name: 📦 Checkout teable-ee
         uses: actions/checkout@v4
         with:
@@ -162,8 +138,8 @@ jobs:
           {
             echo "=== prisma generate ==="
             pnpm -F @teable/db-main-prisma-ee prisma-generate --schema ./prisma/postgres/schema.prisma
-          } >> "$LOG_DIR/typecheck.log" 2>&1 || status=$?
-          echo "prisma generate exit=$status ($(wc -l < "$LOG_DIR/typecheck.log") log lines)"
+          } >> "$LOG_DIR/lint-typecheck.log" 2>&1 || status=$?
+          echo "prisma generate exit=$status ($(wc -l < "$LOG_DIR/lint-typecheck.log") log lines)"
           exit $status
 
       - name: 🏗 Build typecheck dependencies
@@ -173,8 +149,8 @@ jobs:
             echo "=== build typecheck deps ==="
             pnpm -r --filter "./community/packages/**" --sort --workspace-concurrency=1 run build &&
             pnpm -r --filter "./packages/**" --sort --workspace-concurrency=1 run build
-          } >> "$LOG_DIR/typecheck.log" 2>&1 || status=$?
-          echo "deps build exit=$status ($(wc -l < "$LOG_DIR/typecheck.log") log lines)"
+          } >> "$LOG_DIR/lint-typecheck.log" 2>&1 || status=$?
+          echo "deps build exit=$status ($(wc -l < "$LOG_DIR/lint-typecheck.log") log lines)"
           exit $status
 
       - name: 🕵️ Typecheck
@@ -185,32 +161,19 @@ jobs:
             pnpm g:typecheck &&
             pnpm g:typecheck:community &&
             pnpm g:typecheck:community:backend
-          } >> "$LOG_DIR/typecheck.log" 2>&1 || status=$?
-          echo "typecheck exit=$status ($(wc -l < "$LOG_DIR/typecheck.log") log lines total)"
-          [ "$status" -ne 0 ] && echo "❌ typecheck failed — full output arrives in the teable-ee report run (PR status link)"
+          } >> "$LOG_DIR/lint-typecheck.log" 2>&1 || status=$?
+          echo "typecheck exit=$status ($(wc -l < "$LOG_DIR/lint-typecheck.log") log lines total)"
           exit $status
 
-      - name: 📤 Ship log & finalize status
+      - name: 📤 Ship log
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-          JOB_STATUS: ${{ job.status }}
-          PR_NUMBER: ${{ github.event.client_payload.pr_number }}
         run: |
           mkdir -p "$LOG_DIR"
-          [ -f "$LOG_DIR/typecheck.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/typecheck.log"
-          gh release create "$LOG_TAG" -R teableio/teable-ci-logs \
-            --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" \
-            --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/typecheck.log" -R teableio/teable-ci-logs --clobber
-          case "$JOB_STATUS" in
-            success)   STATE=success; DESC='passed on enterprise runner';;
-            cancelled) STATE=error;   DESC='cancelled (superseded or manual)';;
-            *)         STATE=failure; DESC='failed — full log in teable-ee report run';;
-          esac
-          gh api "repos/teableio/teable-ee/statuses/${EE_SHA}" \
-            -f state="$STATE" -f context='remote-ci/typecheck' \
-            -f description="$DESC" -f target_url="${RUN_URL}" >/dev/null
+          [ -f "$LOG_DIR/lint-typecheck.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/lint-typecheck.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/lint-typecheck.log" -R "$LOGS_REPO" --clobber
 
   lint:
     if: contains(github.event.client_payload.suites, 'lint')
@@ -219,15 +182,6 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: 🚦 Mark status running
-        env:
-          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-        run: |
-          gh api "repos/teableio/teable-ee/statuses/${EE_SHA}" \
-            -f state=pending -f context='remote-ci/lint' \
-            -f description='running on enterprise 4c16g runner' \
-            -f target_url="${RUN_URL}" >/dev/null
-
       - name: 📦 Checkout teable-ee
         uses: actions/checkout@v4
         with:
@@ -253,8 +207,8 @@ jobs:
           {
             echo "=== prisma generate (community) ==="
             pnpm -F @teable/db-main-prisma prisma-generate-ci
-          } >> "$LOG_DIR/lint.log" 2>&1 || status=$?
-          echo "prisma generate exit=$status ($(wc -l < "$LOG_DIR/lint.log") log lines)"
+          } >> "$LOG_DIR/lint-eslint.log" 2>&1 || status=$?
+          echo "prisma generate exit=$status ($(wc -l < "$LOG_DIR/lint-eslint.log") log lines)"
           exit $status
 
       - name: 🏗 Build community lint dependencies
@@ -263,8 +217,8 @@ jobs:
           {
             echo "=== build plugin deps ==="
             pnpm -r --filter "@teable/plugin^..." --sort --workspace-concurrency=4 run build
-          } >> "$LOG_DIR/lint.log" 2>&1 || status=$?
-          echo "deps build exit=$status ($(wc -l < "$LOG_DIR/lint.log") log lines)"
+          } >> "$LOG_DIR/lint-eslint.log" 2>&1 || status=$?
+          echo "deps build exit=$status ($(wc -l < "$LOG_DIR/lint-eslint.log") log lines)"
           exit $status
 
       - name: 🔬 Linter
@@ -276,52 +230,868 @@ jobs:
             pnpm g:lint:community &&
             pnpm g:lint-styles &&
             pnpm g:lint-styles:community
-          } >> "$LOG_DIR/lint.log" 2>&1 || status=$?
-          echo "lint exit=$status ($(wc -l < "$LOG_DIR/lint.log") log lines total)"
-          [ "$status" -ne 0 ] && echo "❌ lint failed — full output arrives in the teable-ee report run (PR status link)"
+          } >> "$LOG_DIR/lint-eslint.log" 2>&1 || status=$?
+          echo "lint exit=$status ($(wc -l < "$LOG_DIR/lint-eslint.log") log lines total)"
           exit $status
 
-      - name: 📤 Ship log & finalize status
+      - name: 📤 Ship log
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          [ -f "$LOG_DIR/lint-eslint.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/lint-eslint.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/lint-eslint.log" -R "$LOGS_REPO" --clobber
+
+  lint-verdict:
+    needs: [build, typecheck, lint]
+    if: always() && contains(github.event.client_payload.suites, 'lint')
+    runs-on: ubuntu-latest
+    name: Lint verdict
+    timeout-minutes: 5
+    steps:
+      - name: 🧾 Write lint.result
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          R_BUILD: ${{ needs.build.result }}
+          R_TYPECHECK: ${{ needs.typecheck.result }}
+          R_LINT: ${{ needs.lint.result }}
+        run: |
+          VERDICT=success
+          for r in "$R_BUILD" "$R_TYPECHECK" "$R_LINT"; do
+            [ "$r" = "failure" ] && VERDICT=failure
+          done
+          if [ "$VERDICT" = "success" ]; then
+            for r in "$R_BUILD" "$R_TYPECHECK" "$R_LINT"; do
+              [ "$r" = "cancelled" ] && VERDICT=cancelled
+            done
+          fi
+          {
+            echo "$VERDICT"
+            echo "build=$R_BUILD typecheck=$R_TYPECHECK lint=$R_LINT"
+            echo "run=$RUN_URL"
+          } > lint.result
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" lint.result -R "$LOGS_REPO" --clobber
+
+  # ── Suite: unit (mirrors teable-ee "Unit Tests") ───────────────────────
+  unit:
+    if: contains(github.event.client_payload.suites, 'unit')
+    runs-on: ubuntu-latest
+    name: Unit Tests ${{ matrix.suite.name }}
+    timeout-minutes: 30
+
+    env:
+      NODE_OPTIONS: '--max-old-space-size=8192'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - name: backend-ee 1/3
+            filter: '--filter "@teable/backend-ee"'
+            shard: 1/3
+          - name: backend-ee 2/3
+            filter: '--filter "@teable/backend-ee"'
+            shard: 2/3
+          - name: backend-ee 3/3
+            filter: '--filter "@teable/backend-ee"'
+            shard: 3/3
+          - name: packages
+            filter: '--filter "@teable/*-ee" --filter "!@teable/backend-ee"'
+          - name: community packages
+            filter: community
+            shard: ''
+
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Monorepo install
+        uses: ./.github/actions/pnpm-install
+
+      - name: 🧩 Generate Prisma Client
+        working-directory: packages/db-main-prisma
+        run: |
+          mkdir -p "$LOG_DIR"
+          SLUG=$(echo "${{ matrix.suite.name }}" | tr ' /' '--')
+          echo "SLUG=$SLUG" >> "$GITHUB_ENV"
+          status=0
+          {
+            echo "=== prisma generate ==="
+            pnpm -F @teable/db-main-prisma-ee prisma-generate --schema ./prisma/postgres/schema.prisma
+          } >> "$LOG_DIR/unit-$SLUG.log" 2>&1 || status=$?
+          echo "prisma generate exit=$status"
+          exit $status
+
+      - name: 🧪 Run Tests
+        env:
+          VITEST_SHARD: ${{ matrix.suite.shard }}
+        run: |
+          status=0
+          {
+            echo "=== unit tests (${{ matrix.suite.name }}) ==="
+            if [ "${{ matrix.suite.filter }}" = "community" ]; then
+              pnpm g:test-unit:community
+            else
+              pnpm -r ${{ matrix.suite.filter }} --workspace-concurrency=1 test-unit-cover
+            fi
+          } >> "$LOG_DIR/unit-$SLUG.log" 2>&1 || status=$?
+          echo "unit tests exit=$status ($(wc -l < "$LOG_DIR/unit-$SLUG.log") log lines total)"
+          exit $status
+
+      - name: 📤 Ship log
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          SLUG="${SLUG:-$(echo "${{ matrix.suite.name }}" | tr ' /' '--')}"
+          [ -f "$LOG_DIR/unit-$SLUG.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/unit-$SLUG.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/unit-$SLUG.log" -R "$LOGS_REPO" --clobber
+
+  unit-verdict:
+    needs: [unit]
+    if: always() && contains(github.event.client_payload.suites, 'unit')
+    runs-on: ubuntu-latest
+    name: Unit verdict
+    timeout-minutes: 5
+    steps:
+      - name: 🧾 Write unit.result
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          R_UNIT: ${{ needs.unit.result }}
+        run: |
+          case "$R_UNIT" in
+            success) VERDICT=success;;
+            cancelled) VERDICT=cancelled;;
+            *) VERDICT=failure;;
+          esac
+          {
+            echo "$VERDICT"
+            echo "matrix=$R_UNIT"
+            echo "run=$RUN_URL"
+          } > unit.result
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" unit.result -R "$LOGS_REPO" --clobber
+
+  # ── Suite: integration (mirrors teable-ee "Integration Tests") ─────────
+  integration:
+    if: contains(github.event.client_payload.suites, 'integration')
+    runs-on: ubuntu-latest
+    name: Integration Tests - ${{ matrix.e2e.database-type }} ${{ matrix.e2e.shard }}
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        e2e:
+          - database-type: postgres-ee
+            shard: 1/2
+          - database-type: postgres-ee
+            shard: 2/2
+          - database-type: postgres-community
+            shard: 1/4
+          - database-type: postgres-community
+            shard: 2/4
+          - database-type: postgres-community
+            shard: 3/4
+          - database-type: postgres-community
+            shard: 4/4
+          - database-type: postgres-community-unit
+            shard: 1/2
+          - database-type: postgres-community-unit
+            shard: 2/2
+          - database-type: postgres-community-split
+            shard: smoke
+
+    env:
+      CI: 1
+      TEABLE_TSDOWN_DISABLE_DTS: '1'
+
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Monorepo install
+        uses: ./.github/actions/pnpm-install
+
+      # prisma generate costs ~40s per schema; the generated clients only change
+      # with the schemas or the prisma version, so cache them across runs.
+      - name: ♻️ Restore generated prisma clients
+        id: prisma-clients
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules/.pnpm/@prisma+client@*/node_modules/.prisma
+            community/packages/db-data-prisma/src/generated
+          key: prisma-clients-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml', 'packages/db-main-prisma/prisma/postgres/schema.prisma', 'community/packages/db-data-prisma/prisma/schema.prisma') }}
+
+      - name: 🧪 Run Tests
+        env:
+          VITEST_MAX_THREADS: 2
+          VITEST_MIN_THREADS: 1
+          VITEST_SHARD: ${{ matrix.e2e.shard }}
+          # Listener-level probes ([e2e-probe] lines) for diagnosing event-chain flakes.
+          E2E_PROBE: 1
+          # Airtable import e2e (test/airtable-import.e2e-spec.ts) — skips when unset.
+          # PAT is a Secret (read-only, scoped to the single test base); base id is a Variable.
+          AIRTABLE_TEST_PAT: ${{ secrets.AIRTABLE_TEST_PAT }}
+          AIRTABLE_TEST_BASE: ${{ vars.AIRTABLE_TEST_BASE }}
+          PRISMA_CLIENTS_CACHED: ${{ steps.prisma-clients.outputs.cache-hit }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          SLUG="${{ matrix.e2e.database-type }}-$(echo '${{ matrix.e2e.shard }}' | tr '/' '-')"
+          echo "SLUG=$SLUG" >> "$GITHUB_ENV"
+          status=0
+          {
+            echo "=== make ${{ matrix.e2e.database-type }}.integration.test (shard ${{ matrix.e2e.shard }}) ==="
+            make ${{ matrix.e2e.database-type }}.integration.test
+          } >> "$LOG_DIR/integration-$SLUG.log" 2>&1 || status=$?
+          echo "integration exit=$status ($(wc -l < "$LOG_DIR/integration-$SLUG.log") log lines)"
+          exit $status
+
+      - name: 📤 Ship log
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          SLUG="${SLUG:-${{ matrix.e2e.database-type }}-$(echo '${{ matrix.e2e.shard }}' | tr '/' '-')}"
+          [ -f "$LOG_DIR/integration-$SLUG.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/integration-$SLUG.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/integration-$SLUG.log" -R "$LOGS_REPO" --clobber
+
+  integration-verdict:
+    needs: [integration]
+    if: always() && contains(github.event.client_payload.suites, 'integration')
+    runs-on: ubuntu-latest
+    name: Integration verdict
+    timeout-minutes: 5
+    steps:
+      - name: 🧾 Write integration.result
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          R_INTEGRATION: ${{ needs.integration.result }}
+        run: |
+          case "$R_INTEGRATION" in
+            success) VERDICT=success;;
+            cancelled) VERDICT=cancelled;;
+            *) VERDICT=failure;;
+          esac
+          {
+            echo "$VERDICT"
+            echo "matrix=$R_INTEGRATION"
+            echo "run=$RUN_URL"
+          } > integration.result
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" integration.result -R "$LOGS_REPO" --clobber
+
+  # ── Suite: e2e (mirrors teable-ee "Frontend E2E Tests") ────────────────
+  e2e:
+    if: contains(github.event.client_payload.suites, 'e2e')
+    runs-on: ubuntu-latest
+    name: Frontend E2E Tests
+    timeout-minutes: 45
+
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Monorepo install
+        uses: ./.github/actions/pnpm-install
+
+      - name: 🎭 Setup Playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+      - run: pnpm exec playwright install --with-deps chromium
+        working-directory: enterprise/app-ee
+
+      - name: 🗃️ Setup Database
+        run: |
+          mkdir -p "$LOG_DIR"
+          status=0
+          {
+            echo "=== switch-db-mode ==="
+            echo "1" | make switch-db-mode
+          } >> "$LOG_DIR/e2e.log" 2>&1 || status=$?
+          echo "switch-db-mode exit=$status"
+          exit $status
+
+      - name: 🧩 Generate Prisma Client
+        run: |
+          status=0
+          {
+            echo "=== prisma generate ==="
+            pnpm -C community/packages/db-main-prisma prisma-generate-ci &&
+            pnpm -C packages/db-main-prisma prisma-generate-ci
+          } >> "$LOG_DIR/e2e.log" 2>&1 || status=$?
+          echo "prisma generate exit=$status"
+          exit $status
+
+      - name: 🌱 Seed Database
+        working-directory: enterprise/backend-ee
+        run: |
+          status=0
+          {
+            echo "=== seed (pre-test-e2e) ==="
+            pnpm pre-test-e2e
+          } >> "$LOG_DIR/e2e.log" 2>&1 || status=$?
+          echo "seed exit=$status"
+          exit $status
+
+      - name: 📝 Create Frontend Environment File
+        working-directory: enterprise/app-ee
+        run: |
+          cp .env.development .env.production.local
+          cat >> .env.production.local << EOF
+          NEXT_BUILD_ENV_EDITION=CLOUD
+          NEXT_BUILD_ENV_TYPECHECK=false
+          NEXT_BUILD_ENV_SOURCEMAPS=false
+          NEXT_BUILD_ENV_SENTRY_ENABLED=false
+          PORT=3000
+          SOCKET_PORT=3001
+          SERVER_PORT=3003
+          CI=true
+          NEXTJS_DIR=${{ github.workspace }}/enterprise/app-ee
+          I18NEXT_DEFAULT_CONFIG_PATH=${{ github.workspace }}/enterprise/app-ee/next-i18next.config.js
+          EOF
+
+      - name: 📝 Create Backend Development Environment File
+        working-directory: enterprise/app-ee
+        run: |
+          cp .env.development .env.development.local
+          cat >> .env.development.local << 'EOF'
+          PORT=3000
+          SOCKET_PORT=3001
+          SERVER_PORT=3003
+          NEXT_BUILD_ENV_EDITION=CLOUD
+          BACKEND_SKIP_NEXT_START=true
+          EOF
+
+      - name: 🏗️ Build Frontend
+        working-directory: enterprise/app-ee
+        env:
+          NODE_OPTIONS: '--max-old-space-size=4096'
+        run: |
+          status=0
+          {
+            echo "=== next build ==="
+            pnpm exec next build
+          } >> "$LOG_DIR/e2e.log" 2>&1 || status=$?
+          echo "frontend build exit=$status ($(wc -l < "$LOG_DIR/e2e.log") log lines)"
+          exit $status
+
+      - name: 🏗️ Build Backend
+        run: |
+          status=0
+          {
+            echo "=== backend build ==="
+            pnpm --filter @teable/backend-ee... build
+          } >> "$LOG_DIR/e2e.log" 2>&1 || status=$?
+          echo "backend build exit=$status ($(wc -l < "$LOG_DIR/e2e.log") log lines)"
+          exit $status
+
+      - name: 🚀 Start Backend Server
+        working-directory: enterprise/backend-ee
+        run: |
+          NODE_ENV=development pnpm exec dotenv-flow -p ../app-ee -- node dist/index.js > /tmp/backend.log 2>&1 &
+          echo $! > /tmp/backend.pid
+          echo "Backend server started with PID $(cat /tmp/backend.pid)"
+
+      - name: ⏳ Wait for Backend Ready
+        run: |
+          for i in {1..36}; do
+            if curl -sf --connect-timeout 2 --max-time 5 http://localhost:3003/health > /dev/null 2>&1; then
+              echo "✅ Backend server is ready after $((i*5)) seconds"
+              exit 0
+            fi
+            echo "Attempt $i/36: waiting for backend..."
+            sleep 5
+          done
+          echo "❌ Backend failed to start within 180 seconds (backend.log ships to teable-ee)"
+          exit 1
+
+      - name: 🚀 Start Frontend Server
+        working-directory: enterprise/app-ee
+        run: |
+          pnpm start > /tmp/frontend.log 2>&1 &
+          echo $! > /tmp/frontend.pid
+          echo "Frontend server started with PID $(cat /tmp/frontend.pid)"
+
+      - name: ⏳ Wait for Frontend Ready
+        run: |
+          for i in {1..36}; do
+            if curl -sf --connect-timeout 2 --max-time 5 http://localhost:3000 > /dev/null 2>&1; then
+              echo "✅ Frontend server is ready after $((i*5)) seconds"
+              exit 0
+            fi
+            echo "Attempt $i/36: waiting for frontend..."
+            sleep 5
+          done
+          echo "❌ Frontend failed to start within 180 seconds (frontend.log ships to teable-ee)"
+          exit 1
+
+      - name: ⏳ Wait for Backend Stable
+        run: |
+          consecutive=0
+          for i in {1..36}; do
+            if curl -sf --connect-timeout 2 --max-time 5 http://localhost:3003/health > /dev/null 2>&1; then
+              consecutive=$((consecutive + 1))
+              if [ "$consecutive" -ge 8 ]; then
+                echo "✅ Backend server stayed ready"
+                exit 0
+              fi
+            else
+              consecutive=0
+              echo "Attempt $i/36: backend not ready"
+            fi
+            sleep 5
+          done
+          echo "❌ Backend failed to stay ready before E2E tests (backend.log ships to teable-ee)"
+          exit 1
+
+      - name: 🎭 Run E2E Tests
+        working-directory: enterprise/app-ee
+        env:
+          NODE_OPTIONS: '--dns-result-order=ipv4first'
+          E2E_WEBSERVER_MODE: START
+          SERVER_PORT: 3003
+          E2E_WORKERS: 4
+          NEXTJS_DIR: ${{ github.workspace }}/enterprise/app-ee
+          I18NEXT_DEFAULT_CONFIG_PATH: ${{ github.workspace }}/enterprise/app-ee/next-i18next.config.js
+          SKIP_AI_TESTS: true
+        run: |
+          status=0
+          {
+            echo "=== playwright ==="
+            pnpm exec playwright test --trace=on --retries=0
+          } >> "$LOG_DIR/e2e.log" 2>&1 || status=$?
+          echo "playwright exit=$status ($(wc -l < "$LOG_DIR/e2e.log") log lines total)"
+          exit $status
+
+      - name: 📤 Ship log, artifacts & verdict
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
           JOB_STATUS: ${{ job.status }}
-          PR_NUMBER: ${{ github.event.client_payload.pr_number }}
         run: |
           mkdir -p "$LOG_DIR"
-          [ -f "$LOG_DIR/lint.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/lint.log"
-          gh release create "$LOG_TAG" -R teableio/teable-ci-logs \
-            --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" \
-            --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/lint.log" -R teableio/teable-ci-logs --clobber
+          [ -f "$LOG_DIR/e2e.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/e2e.log"
+          for f in /tmp/backend.log /tmp/frontend.log; do
+            if [ -f "$f" ]; then
+              { echo ""; echo "=== $(basename "$f") ==="; cat "$f"; } >> "$LOG_DIR/e2e.log"
+            fi
+          done
+          # Playwright report/traces/screenshots must not become public
+          # artifacts — bundle them into the private channel instead.
+          ART_DIRS=""
+          for d in enterprise/app-ee/e2e/.out/reports/html enterprise/app-ee/e2e/.out/output enterprise/app-ee/e2e/.out/screenshots; do
+            [ -d "$d" ] && ART_DIRS="$ART_DIRS $d"
+          done
+          if [ -n "$ART_DIRS" ]; then
+            tar -czf "$LOG_DIR/e2e-artifacts.tar.gz" $ART_DIRS || true
+          fi
           case "$JOB_STATUS" in
-            success)   STATE=success; DESC='passed on enterprise runner';;
-            cancelled) STATE=error;   DESC='cancelled (superseded or manual)';;
-            *)         STATE=failure; DESC='failed — full log in teable-ee report run';;
+            success) VERDICT=success;;
+            cancelled) VERDICT=cancelled;;
+            *) VERDICT=failure;;
           esac
-          gh api "repos/teableio/teable-ee/statuses/${EE_SHA}" \
-            -f state="$STATE" -f context='remote-ci/lint' \
-            -f description="$DESC" -f target_url="${RUN_URL}" >/dev/null
+          {
+            echo "$VERDICT"
+            echo "run=$RUN_URL"
+          } > e2e.result
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/e2e.log" -R "$LOGS_REPO" --clobber
+          if [ -f "$LOG_DIR/e2e-artifacts.tar.gz" ]; then
+            gh release upload "$LOG_TAG" "$LOG_DIR/e2e-artifacts.tar.gz" -R "$LOGS_REPO" --clobber
+          fi
+          gh release upload "$LOG_TAG" e2e.result -R "$LOGS_REPO" --clobber
 
-  # ── Ship results + log pointer back to teable-ee ───────────────────────
-  report-back:
-    needs: [build, typecheck, lint]
-    if: always()
+  # ── Suite: v2 (mirrors teable-ee "V2 Tests") ───────────────────────────
+  # Fine-grained package gates come precomputed from the teable-ee dispatch
+  # job (dorny/paths-filter "changes" array in client_payload.filters).
+  v2-unit-deps:
+    if: >-
+      contains(github.event.client_payload.suites, 'v2') &&
+      (contains(fromJson(github.event.client_payload.filters), 'v2_shared') ||
+       contains(fromJson(github.event.client_payload.filters), 'v2_adapter_db_postgres_pg') ||
+       contains(fromJson(github.event.client_payload.filters), 'v2_adapter_repository_postgres') ||
+       contains(fromJson(github.event.client_payload.filters), 'v2_adapter_table_query_ops_postgres') ||
+       contains(fromJson(github.event.client_payload.filters), 'v2_adapter_table_repository_postgres') ||
+       contains(fromJson(github.event.client_payload.filters), 'v2_core') ||
+       contains(fromJson(github.event.client_payload.filters), 'v2_formula_sql_pg') ||
+       contains(fromJson(github.event.client_payload.filters), 'v2_table_query_ops'))
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    name: V2 Unit Dependencies
+    timeout-minutes: 20
+    env:
+      CI: 1
+      TESTCONTAINERS_REUSE_ENABLE: 'false'
 
     steps:
-      - name: 📨 Dispatch results to teable-ee
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Monorepo install
+        uses: ./.github/actions/pnpm-install
+        with:
+          install-args: |
+            --filter
+            @teable/v2-adapter-db-postgres-pg...
+            --filter
+            @teable/v2-adapter-repository-postgres...
+            --filter
+            @teable/v2-adapter-table-query-ops-postgres...
+            --filter
+            @teable/v2-adapter-table-repository-postgres...
+            --filter
+            @teable/v2-core...
+            --filter
+            @teable/v2-formula-sql-pg...
+            --filter
+            @teable/v2-table-query-ops...
+
+      - name: ☁️ Upload workspace dependencies
+        uses: ./.github/actions/workspace-deps-upload
+        with:
+          name: v2-unit-deps-${{ github.run_id }}
+
+  v2-e2e-deps:
+    if: >-
+      contains(github.event.client_payload.suites, 'v2') &&
+      (contains(fromJson(github.event.client_payload.filters), 'v2_shared') ||
+       contains(fromJson(github.event.client_payload.filters), 'v2_e2e'))
+    runs-on: ubuntu-latest
+    name: V2 E2E Dependencies
+    timeout-minutes: 20
+    env:
+      CI: 1
+      TESTCONTAINERS_REUSE_ENABLE: 'false'
+
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Monorepo install
+        uses: ./.github/actions/pnpm-install
+        with:
+          install-args: |
+            --filter
+            @teable/v2-e2e...
+
+      - name: ☁️ Upload workspace dependencies
+        uses: ./.github/actions/workspace-deps-upload
+        with:
+          name: v2-e2e-deps-${{ github.run_id }}
+
+  v2-unit:
+    needs: [v2-unit-deps]
+    if: >-
+      !cancelled() && needs.v2-unit-deps.result == 'success'
+    runs-on: ubuntu-latest
+    name: V2 Unit Tests (${{ matrix.pkg.name }})
+    timeout-minutes: 30
+    env:
+      CI: 1
+      TESTCONTAINERS_REUSE_ENABLE: 'false'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg:
+          - name: '@teable/v2-adapter-db-postgres-pg'
+            gate: v2_adapter_db_postgres_pg
+          - name: '@teable/v2-adapter-repository-postgres'
+            gate: v2_adapter_repository_postgres
+          - name: '@teable/v2-adapter-table-repository-postgres'
+            gate: v2_adapter_table_repository_postgres
+          - name: '@teable/v2-adapter-table-query-ops-postgres'
+            gate: v2_adapter_table_query_ops_postgres
+            postgres: true
+          - name: '@teable/v2-core'
+            gate: v2_core
+          - name: '@teable/v2-formula-sql-pg'
+            gate: v2_formula_sql_pg
+          - name: '@teable/v2-table-query-ops'
+            gate: v2_table_query_ops
+
+    # Empty image skips the service container for matrix entries without
+    # `postgres: true` — only adapter-table-query-ops-postgres needs it.
+    services:
+      postgres:
+        image: ${{ matrix.pkg.postgres && 'postgres:16-alpine' || '' }}
+        env:
+          POSTGRES_DB: teable_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d teable_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: 🚪 Gate check
+        id: gate
+        env:
+          FILTERS: ${{ github.event.client_payload.filters }}
+        run: |
+          if echo "$FILTERS" | grep -qE '"(v2_shared|${{ matrix.pkg.gate }})"'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "package unchanged — skipping"
+          fi
+
+      - name: 📦 Checkout teable-ee
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Restore workspace dependencies
+        if: steps.gate.outputs.run == 'true'
+        uses: ./.github/actions/workspace-deps-download
+        with:
+          name: v2-unit-deps-${{ github.run_id }}
+
+      - name: 🧪 Run unit tests
+        if: steps.gate.outputs.run == 'true'
+        env:
+          PRISMA_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/teable_test
+        run: |
+          mkdir -p "$LOG_DIR"
+          SLUG=$(echo "${{ matrix.pkg.name }}" | tr '@/' '--')
+          echo "SLUG=$SLUG" >> "$GITHUB_ENV"
+          status=0
+          {
+            echo "=== ${{ matrix.pkg.name }} test-unit-cover ==="
+            pnpm -F "${{ matrix.pkg.name }}" --if-present test-unit-cover
+          } >> "$LOG_DIR/v2-unit-$SLUG.log" 2>&1 || status=$?
+          echo "v2 unit exit=$status ($(wc -l < "$LOG_DIR/v2-unit-$SLUG.log") log lines)"
+          exit $status
+
+      - name: 📤 Ship log
+        if: always() && steps.gate.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
         run: |
-          gh api repos/teableio/teable-ee/dispatches \
-            -f event_type=ee-remote-ci-done \
-            -f "client_payload[pr_number]=${{ github.event.client_payload.pr_number }}" \
-            -f "client_payload[ee_sha]=${EE_SHA}" \
-            -f "client_payload[suites]=${{ github.event.client_payload.suites }}" \
-            -f "client_payload[log_tag]=${LOG_TAG}" \
-            -f "client_payload[remote_run_url]=${RUN_URL}" \
-            -f "client_payload[results][build]=${{ needs.build.result }}" \
-            -f "client_payload[results][typecheck]=${{ needs.typecheck.result }}" \
-            -f "client_payload[results][lint]=${{ needs.lint.result }}"
+          mkdir -p "$LOG_DIR"
+          SLUG="${SLUG:-$(echo "${{ matrix.pkg.name }}" | tr '@/' '--')}"
+          [ -f "$LOG_DIR/v2-unit-$SLUG.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-unit-$SLUG.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/v2-unit-$SLUG.log" -R "$LOGS_REPO" --clobber
+
+  v2-e2e:
+    needs: [v2-e2e-deps]
+    if: >-
+      !cancelled() && needs.v2-e2e-deps.result == 'success'
+    runs-on: ubuntu-latest
+    name: V2 E2E Tests (Shard ${{ matrix.shard }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      matrix:
+        shard:
+          - 1/4
+          - 2/4
+          - 3/4
+          - 4/4
+    env:
+      CI: 1
+      TESTCONTAINERS_REUSE_ENABLE: 'false'
+
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Restore workspace dependencies
+        uses: ./.github/actions/workspace-deps-download
+        with:
+          name: v2-e2e-deps-${{ github.run_id }}
+
+      - name: 🧪 Run E2E tests (shard ${{ matrix.shard }})
+        run: |
+          mkdir -p "$LOG_DIR"
+          SLUG=$(echo "${{ matrix.shard }}" | tr '/' '-')
+          echo "SLUG=$SLUG" >> "$GITHUB_ENV"
+          status=0
+          {
+            echo "=== v2 e2e shard ${{ matrix.shard }} ==="
+            pnpm -C community/packages/v2/e2e exec vitest run --silent --bail 1 --exclude src/field-conversion-deadlock.e2e.spec.ts --shard=${{ matrix.shard }}
+          } >> "$LOG_DIR/v2-e2e-$SLUG.log" 2>&1 || status=$?
+          echo "v2 e2e exit=$status ($(wc -l < "$LOG_DIR/v2-e2e-$SLUG.log") log lines)"
+          exit $status
+
+      - name: 📤 Ship log
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          SLUG="${SLUG:-$(echo "${{ matrix.shard }}" | tr '/' '-')}"
+          [ -f "$LOG_DIR/v2-e2e-$SLUG.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-e2e-$SLUG.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-$SLUG.log" -R "$LOGS_REPO" --clobber
+
+  v2-e2e-postgres-only:
+    needs: [v2-e2e-deps]
+    if: >-
+      !cancelled() && needs.v2-e2e-deps.result == 'success'
+    runs-on: ubuntu-latest
+    name: V2 E2E Tests (Postgres Only)
+    timeout-minutes: 30
+    env:
+      CI: 1
+      TESTCONTAINERS_REUSE_ENABLE: 'false'
+
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Restore workspace dependencies
+        uses: ./.github/actions/workspace-deps-download
+        with:
+          name: v2-e2e-deps-${{ github.run_id }}
+
+      - name: 🧪 Run Postgres-only E2E tests
+        run: |
+          mkdir -p "$LOG_DIR"
+          status=0
+          {
+            echo "=== v2 e2e postgres-only ==="
+            pnpm -C community/packages/v2/e2e exec vitest run --silent=true --bail 1 src/field-conversion-deadlock.e2e.spec.ts
+          } >> "$LOG_DIR/v2-e2e-postgres-only.log" 2>&1 || status=$?
+          echo "v2 e2e postgres-only exit=$status ($(wc -l < "$LOG_DIR/v2-e2e-postgres-only.log") log lines)"
+          exit $status
+
+      - name: 📤 Ship log
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          [ -f "$LOG_DIR/v2-e2e-postgres-only.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-e2e-postgres-only.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-postgres-only.log" -R "$LOGS_REPO" --clobber
+
+  v2-verdict:
+    needs: [v2-unit-deps, v2-e2e-deps, v2-unit, v2-e2e, v2-e2e-postgres-only]
+    if: always() && contains(github.event.client_payload.suites, 'v2')
+    runs-on: ubuntu-latest
+    name: V2 verdict
+    timeout-minutes: 5
+    steps:
+      - name: 🧾 Write v2.result
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          R_UNIT_DEPS: ${{ needs.v2-unit-deps.result }}
+          R_E2E_DEPS: ${{ needs.v2-e2e-deps.result }}
+          R_UNIT: ${{ needs.v2-unit.result }}
+          R_E2E: ${{ needs.v2-e2e.result }}
+          R_PG_ONLY: ${{ needs.v2-e2e-postgres-only.result }}
+        run: |
+          VERDICT=success
+          for r in "$R_UNIT_DEPS" "$R_E2E_DEPS" "$R_UNIT" "$R_E2E" "$R_PG_ONLY"; do
+            [ "$r" = "failure" ] && VERDICT=failure
+          done
+          if [ "$VERDICT" = "success" ]; then
+            for r in "$R_UNIT_DEPS" "$R_E2E_DEPS" "$R_UNIT" "$R_E2E" "$R_PG_ONLY"; do
+              [ "$r" = "cancelled" ] && VERDICT=cancelled
+            done
+          fi
+          {
+            echo "$VERDICT"
+            echo "unit-deps=$R_UNIT_DEPS e2e-deps=$R_E2E_DEPS unit=$R_UNIT e2e=$R_E2E postgres-only=$R_PG_ONLY"
+            echo "run=$RUN_URL"
+          } > v2.result
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" v2.result -R "$LOGS_REPO" --clobber
