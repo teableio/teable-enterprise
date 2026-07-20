@@ -12,6 +12,11 @@ on:
         required: false
         default: 'ai,cn'
         type: string
+      best_effort:
+        description: 'Warn instead of fail when a preheat call errors'
+        required: false
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       image_tag:
@@ -21,9 +26,17 @@ on:
         required: false
         default: 'ai,cn'
         type: string
+      # Launch workflows pass true: a preheat miss only costs first-spawn
+      # latency, and reusable-call jobs cannot use continue-on-error, so the
+      # downgrade to a warning has to happen here.
+      best_effort:
+        required: false
+        default: false
+        type: boolean
     # required: false so a single-target caller (e.g. manual-sealos-deploy
     # preheating cn only) doesn't have to provide the other cloud's token;
-    # a selected target with a missing token still fails its step loudly.
+    # a selected target with a missing token still fails its step loudly
+    # (or warns, under best_effort).
     secrets:
       INFRA_TEABLE_AI_PREHEAT_TOKEN:
         required: false
@@ -40,6 +53,7 @@ jobs:
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
           PREHEAT_TOKEN: ${{ secrets.INFRA_TEABLE_AI_PREHEAT_TOKEN }}
+          BEST_EFFORT: ${{ inputs.best_effort }}
         run: |
           set -euo pipefail
 
@@ -49,16 +63,20 @@ jobs:
             -X POST 'https://infra.teable.ai/api/image-preheats' \
             -H "Authorization: Bearer ${PREHEAT_TOKEN}" \
             -H 'Content-Type: application/json' \
-            --data "$payload")"
+            --data "$payload")" || http_code="000"
 
-          response="$(cat /tmp/preheat-ai-response.json)"
+          response="$(cat /tmp/preheat-ai-response.json 2>/dev/null || echo '')"
           echo "Preheat image: ${image}"
           echo "HTTP status: ${http_code}"
           echo "Response: ${response}"
 
           if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-            echo "::error::teable.ai image preheat failed with HTTP ${http_code}"
-            exit 1
+            if [ "$BEST_EFFORT" = "true" ]; then
+              echo "::warning::teable.ai image preheat failed with HTTP ${http_code} (best-effort, not failing the run)"
+            else
+              echo "::error::teable.ai image preheat failed with HTTP ${http_code}"
+              exit 1
+            fi
           fi
 
       - name: Preheat teable.cn sandbox agent image
@@ -66,6 +84,7 @@ jobs:
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
           PREHEAT_TOKEN: ${{ secrets.INFRA_TEABLE_CN_PREHEAT_TOKEN }}
+          BEST_EFFORT: ${{ inputs.best_effort }}
         run: |
           set -euo pipefail
 
@@ -75,14 +94,18 @@ jobs:
             -X POST 'https://infra.teable.cn/api/image-preheats' \
             -H "Authorization: Bearer ${PREHEAT_TOKEN}" \
             -H 'Content-Type: application/json' \
-            --data "$payload")"
+            --data "$payload")" || http_code="000"
 
-          response="$(cat /tmp/preheat-cn-response.json)"
+          response="$(cat /tmp/preheat-cn-response.json 2>/dev/null || echo '')"
           echo "Preheat image: ${image}"
           echo "HTTP status: ${http_code}"
           echo "Response: ${response}"
 
           if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-            echo "::error::teable.cn image preheat failed with HTTP ${http_code}"
-            exit 1
+            if [ "$BEST_EFFORT" = "true" ]; then
+              echo "::warning::teable.cn image preheat failed with HTTP ${http_code} (best-effort, not failing the run)"
+            else
+              echo "::error::teable.cn image preheat failed with HTTP ${http_code}"
+              exit 1
+            fi
           fi
