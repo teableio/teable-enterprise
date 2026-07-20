@@ -1,0 +1,327 @@
+# EE Remote CI — runs teable-ee suites on teable-enterprise's free 4c16G
+# public-repo runners (teable-ee's private runners are 2c7G and metered).
+#
+# SOURCE OF TRUTH lives in teable-ee at .github/enterprise-ci/ee-remote-ci.yaml
+# and is synced here by sync-ci-to-enterprise.yml — never edit the copy in
+# teable-enterprise directly.
+#
+# Privacy contract: teable-ee is private, this repo is public, so run logs and
+# artifacts here are world-readable. Every step that can print source code
+# (build errors, type errors, lint output, test failures) redirects stdout and
+# stderr into a log file; the public log carries only exit codes and line
+# counts. Full logs ship to the private teable-ci-logs repo as release assets
+# and are rendered back inside teable-ee by remote-ci-report.yml, which
+# deletes the release after ingestion. Suite results land on the teable-ee
+# commit as `remote-ci/*` statuses.
+
+name: EE Remote CI
+
+run-name: 'EE Remote CI — PR #${{ github.event.client_payload.pr_number }} (${{ github.event.client_payload.suites }})'
+
+on:
+  repository_dispatch:
+    types: [ee-remote-ci]
+
+concurrency:
+  group: ee-remote-ci-${{ github.event.client_payload.pr_number || github.event.client_payload.ee_ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  EE_SHA: ${{ github.event.client_payload.ee_sha }}
+  LOG_TAG: run-${{ github.run_id }}-${{ github.run_attempt }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  LOG_DIR: /tmp/ci-logs
+
+jobs:
+  # ── Suite: lint (mirrors teable-ee "Linting and Types") ────────────────
+  build:
+    if: contains(github.event.client_payload.suites, 'lint')
+    runs-on: ubuntu-latest
+    name: Build
+    timeout-minutes: 30
+
+    env:
+      TEABLE_TSDOWN_DISABLE_DTS: '1'
+
+    steps:
+      - name: 🚦 Mark status running
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          gh api "repos/teableio/teable-ee/statuses/${EE_SHA}" \
+            -f state=pending -f context='remote-ci/build' \
+            -f description='running on enterprise 4c16g runner' \
+            -f target_url="${RUN_URL}" >/dev/null
+
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Monorepo install
+        uses: ./.github/actions/pnpm-install
+
+      - name: 🧩 Generate Prisma Client
+        working-directory: packages/db-main-prisma
+        run: |
+          mkdir -p "$LOG_DIR"
+          status=0
+          {
+            echo "=== prisma generate ==="
+            pnpm -F @teable/db-main-prisma-ee prisma-generate --schema ./prisma/postgres/schema.prisma
+          } >> "$LOG_DIR/build.log" 2>&1 || status=$?
+          echo "prisma generate exit=$status ($(wc -l < "$LOG_DIR/build.log") log lines)"
+          exit $status
+
+      - name: 🏗 Run build
+        run: |
+          status=0
+          {
+            echo "=== build community/packages + packages ==="
+            pnpm -r --filter "./community/packages/**" --sort --workspace-concurrency=4 run build &&
+            pnpm -r --filter "./packages/**" --sort --workspace-concurrency=4 run build
+          } >> "$LOG_DIR/build.log" 2>&1 || status=$?
+          echo "build exit=$status ($(wc -l < "$LOG_DIR/build.log") log lines total)"
+          [ "$status" -ne 0 ] && echo "❌ build failed — full output arrives in the teable-ee report run (PR status link)"
+          exit $status
+
+      - name: 📤 Ship log & finalize status
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
+          PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          [ -f "$LOG_DIR/build.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/build.log"
+          gh release create "$LOG_TAG" -R teableio/teable-ci-logs \
+            --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" \
+            --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/build.log" -R teableio/teable-ci-logs --clobber
+          case "$JOB_STATUS" in
+            success)   STATE=success; DESC='passed on enterprise runner';;
+            cancelled) STATE=error;   DESC='cancelled (superseded or manual)';;
+            *)         STATE=failure; DESC='failed — full log in teable-ee report run';;
+          esac
+          gh api "repos/teableio/teable-ee/statuses/${EE_SHA}" \
+            -f state="$STATE" -f context='remote-ci/build' \
+            -f description="$DESC" -f target_url="${RUN_URL}" >/dev/null
+
+  typecheck:
+    if: contains(github.event.client_payload.suites, 'lint')
+    runs-on: ubuntu-latest
+    name: Typecheck
+    timeout-minutes: 40
+
+    env:
+      NODE_OPTIONS: '--max-old-space-size=8192'
+      TEABLE_TSDOWN_DISABLE_DTS: '1'
+
+    steps:
+      - name: 🚦 Mark status running
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          gh api "repos/teableio/teable-ee/statuses/${EE_SHA}" \
+            -f state=pending -f context='remote-ci/typecheck' \
+            -f description='running on enterprise 4c16g runner' \
+            -f target_url="${RUN_URL}" >/dev/null
+
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Monorepo install
+        uses: ./.github/actions/pnpm-install
+
+      - name: 🧩 Generate Prisma Client
+        working-directory: packages/db-main-prisma
+        run: |
+          mkdir -p "$LOG_DIR"
+          status=0
+          {
+            echo "=== prisma generate ==="
+            pnpm -F @teable/db-main-prisma-ee prisma-generate --schema ./prisma/postgres/schema.prisma
+          } >> "$LOG_DIR/typecheck.log" 2>&1 || status=$?
+          echo "prisma generate exit=$status ($(wc -l < "$LOG_DIR/typecheck.log") log lines)"
+          exit $status
+
+      - name: 🏗 Build typecheck dependencies
+        run: |
+          status=0
+          {
+            echo "=== build typecheck deps ==="
+            pnpm -r --filter "./community/packages/**" --sort --workspace-concurrency=1 run build &&
+            pnpm -r --filter "./packages/**" --sort --workspace-concurrency=1 run build
+          } >> "$LOG_DIR/typecheck.log" 2>&1 || status=$?
+          echo "deps build exit=$status ($(wc -l < "$LOG_DIR/typecheck.log") log lines)"
+          exit $status
+
+      - name: 🕵️ Typecheck
+        run: |
+          status=0
+          {
+            echo "=== typecheck ==="
+            pnpm g:typecheck &&
+            pnpm g:typecheck:community &&
+            pnpm g:typecheck:community:backend
+          } >> "$LOG_DIR/typecheck.log" 2>&1 || status=$?
+          echo "typecheck exit=$status ($(wc -l < "$LOG_DIR/typecheck.log") log lines total)"
+          [ "$status" -ne 0 ] && echo "❌ typecheck failed — full output arrives in the teable-ee report run (PR status link)"
+          exit $status
+
+      - name: 📤 Ship log & finalize status
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
+          PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          [ -f "$LOG_DIR/typecheck.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/typecheck.log"
+          gh release create "$LOG_TAG" -R teableio/teable-ci-logs \
+            --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" \
+            --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/typecheck.log" -R teableio/teable-ci-logs --clobber
+          case "$JOB_STATUS" in
+            success)   STATE=success; DESC='passed on enterprise runner';;
+            cancelled) STATE=error;   DESC='cancelled (superseded or manual)';;
+            *)         STATE=failure; DESC='failed — full log in teable-ee report run';;
+          esac
+          gh api "repos/teableio/teable-ee/statuses/${EE_SHA}" \
+            -f state="$STATE" -f context='remote-ci/typecheck' \
+            -f description="$DESC" -f target_url="${RUN_URL}" >/dev/null
+
+  lint:
+    if: contains(github.event.client_payload.suites, 'lint')
+    runs-on: ubuntu-latest
+    name: Lint
+    timeout-minutes: 30
+
+    steps:
+      - name: 🚦 Mark status running
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          gh api "repos/teableio/teable-ee/statuses/${EE_SHA}" \
+            -f state=pending -f context='remote-ci/lint' \
+            -f description='running on enterprise 4c16g runner' \
+            -f target_url="${RUN_URL}" >/dev/null
+
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Monorepo install
+        uses: ./.github/actions/pnpm-install
+
+      # Community db-main-prisma imports named exports from @prisma/client,
+      # which only exist after generation; without this the import/export lint rule fails.
+      - name: 🧩 Generate Prisma Client
+        run: |
+          mkdir -p "$LOG_DIR"
+          status=0
+          {
+            echo "=== prisma generate (community) ==="
+            pnpm -F @teable/db-main-prisma prisma-generate-ci
+          } >> "$LOG_DIR/lint.log" 2>&1 || status=$?
+          echo "prisma generate exit=$status ($(wc -l < "$LOG_DIR/lint.log") log lines)"
+          exit $status
+
+      - name: 🏗 Build community lint dependencies
+        run: |
+          status=0
+          {
+            echo "=== build plugin deps ==="
+            pnpm -r --filter "@teable/plugin^..." --sort --workspace-concurrency=4 run build
+          } >> "$LOG_DIR/lint.log" 2>&1 || status=$?
+          echo "deps build exit=$status ($(wc -l < "$LOG_DIR/lint.log") log lines)"
+          exit $status
+
+      - name: 🔬 Linter
+        run: |
+          status=0
+          {
+            echo "=== lint ==="
+            pnpm g:lint &&
+            pnpm g:lint:community &&
+            pnpm g:lint-styles &&
+            pnpm g:lint-styles:community
+          } >> "$LOG_DIR/lint.log" 2>&1 || status=$?
+          echo "lint exit=$status ($(wc -l < "$LOG_DIR/lint.log") log lines total)"
+          [ "$status" -ne 0 ] && echo "❌ lint failed — full output arrives in the teable-ee report run (PR status link)"
+          exit $status
+
+      - name: 📤 Ship log & finalize status
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
+          PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          [ -f "$LOG_DIR/lint.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/lint.log"
+          gh release create "$LOG_TAG" -R teableio/teable-ci-logs \
+            --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" \
+            --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/lint.log" -R teableio/teable-ci-logs --clobber
+          case "$JOB_STATUS" in
+            success)   STATE=success; DESC='passed on enterprise runner';;
+            cancelled) STATE=error;   DESC='cancelled (superseded or manual)';;
+            *)         STATE=failure; DESC='failed — full log in teable-ee report run';;
+          esac
+          gh api "repos/teableio/teable-ee/statuses/${EE_SHA}" \
+            -f state="$STATE" -f context='remote-ci/lint' \
+            -f description="$DESC" -f target_url="${RUN_URL}" >/dev/null
+
+  # ── Ship results + log pointer back to teable-ee ───────────────────────
+  report-back:
+    needs: [build, typecheck, lint]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: 📨 Dispatch results to teable-ee
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          gh api repos/teableio/teable-ee/dispatches \
+            -f event_type=ee-remote-ci-done \
+            -f "client_payload[pr_number]=${{ github.event.client_payload.pr_number }}" \
+            -f "client_payload[ee_sha]=${EE_SHA}" \
+            -f "client_payload[suites]=${{ github.event.client_payload.suites }}" \
+            -f "client_payload[log_tag]=${LOG_TAG}" \
+            -f "client_payload[remote_run_url]=${RUN_URL}" \
+            -f "client_payload[results][build]=${{ needs.build.result }}" \
+            -f "client_payload[results][typecheck]=${{ needs.typecheck.result }}" \
+            -f "client_payload[results][lint]=${{ needs.lint.result }}"
