@@ -7,16 +7,28 @@ on:
         description: 'Release image tag (e.g., release.2026-06-11T01-53-35Z.1879)'
         required: true
         type: string
+      targets:
+        description: 'Comma-separated clouds to preheat: ai, cn'
+        required: false
+        default: 'ai,cn'
+        type: string
   workflow_call:
     inputs:
       image_tag:
         required: true
         type: string
+      targets:
+        required: false
+        default: 'ai,cn'
+        type: string
+    # required: false so a single-target caller (e.g. manual-sealos-deploy
+    # preheating cn only) doesn't have to provide the other cloud's token;
+    # a selected target with a missing token still fails its step loudly.
     secrets:
       INFRA_TEABLE_AI_PREHEAT_TOKEN:
-        required: true
+        required: false
       INFRA_TEABLE_CN_PREHEAT_TOKEN:
-        required: true
+        required: false
 
 jobs:
   preheat:
@@ -24,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Preheat teable.ai sandbox agent image
+        if: contains(inputs.targets, 'ai')
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
           PREHEAT_TOKEN: ${{ secrets.INFRA_TEABLE_AI_PREHEAT_TOKEN }}
@@ -49,6 +62,7 @@ jobs:
           fi
 
       - name: Preheat teable.cn sandbox agent image
+        if: contains(inputs.targets, 'cn')
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
           PREHEAT_TOKEN: ${{ secrets.INFRA_TEABLE_CN_PREHEAT_TOKEN }}
