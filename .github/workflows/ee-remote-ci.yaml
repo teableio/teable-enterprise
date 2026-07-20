@@ -865,6 +865,7 @@ jobs:
           - name: '@teable/v2-adapter-table-query-ops-postgres'
             gate: v2_adapter_table_query_ops_postgres
             postgres: true
+            dburl: 'postgresql://postgres:postgres@localhost:5432/teable_test'
           - name: '@teable/v2-core'
             gate: v2_core
           - name: '@teable/v2-formula-sql-pg'
@@ -925,9 +926,13 @@ jobs:
 
       - name: 🧪 Run unit tests
         if: steps.gate.outputs.run == 'true'
-        env:
-          PRISMA_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/teable_test
         run: |
+          # Only the query-ops package runs against the service container; the
+          # rest use testcontainers/pglite and must NOT see PRISMA_DATABASE_URL
+          # (a set value reroutes them to localhost:5432 → ECONNREFUSED).
+          if [ -n "${{ matrix.pkg.dburl }}" ]; then
+            export PRISMA_DATABASE_URL="${{ matrix.pkg.dburl }}"
+          fi
           mkdir -p "$LOG_DIR"
           SLUG=$(echo "${{ matrix.pkg.name }}" | tr '@/' '--')
           echo "SLUG=$SLUG" >> "$GITHUB_ENV"
