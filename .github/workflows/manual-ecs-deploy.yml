@@ -433,6 +433,7 @@ jobs:
     uses: ./.github/workflows/preheat-sandbox-agent-cloud.yaml
     with:
       image_tag: ${{ inputs.image_tag }}
+      best_effort: true
     secrets: inherit
 
   # With the release stamped and deployed, the accumulated cloud staging

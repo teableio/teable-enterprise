@@ -105,6 +105,9 @@ on:
         required: false
       ALI_DOCKER_PASSWORD:
         required: false
+      # Used by the preheat-sandbox-agent job — same contract as above.
+      INFRA_TEABLE_CN_PREHEAT_TOKEN:
+        required: false
 
 jobs:
   # teable.cn deploys official release.<id> tags from Aliyun, but Aliyun
@@ -175,6 +178,20 @@ jobs:
               "${DST_REGISTRY}/${image}:${TAG}" \
               "$DST_CREDS"
           done
+
+  # Preheat CN sandbox-agent nodes as soon as the agent tag lands on Aliyun,
+  # so a CN-first launch doesn't wait for the AI launch's both-cloud preheat.
+  # Best-effort: not part of the notify gating — a preheat miss only costs
+  # first-spawn latency.
+  preheat-sandbox-agent:
+    needs: ensure-aliyun
+    if: needs.ensure-aliyun.result == 'success'
+    uses: ./.github/workflows/preheat-sandbox-agent-cloud.yaml
+    with:
+      image_tag: ${{ inputs.image_tag }}
+      targets: cn
+      best_effort: true
+    secrets: inherit
 
   deploy:
     name: Deploy to Sealos
