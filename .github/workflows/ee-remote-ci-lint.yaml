@@ -30,64 +30,6 @@ env:
   LOGS_REPO: teableio/teable-ci-logs
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    name: Build
-    timeout-minutes: 20
-
-    env:
-      TEABLE_TSDOWN_DISABLE_DTS: '1'
-
-    steps:
-      - name: 📦 Checkout teable-ee
-        uses: actions/checkout@v4
-        with:
-          repository: teableio/teable-ee
-          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
-          token: ${{ secrets.PACKAGES_KEY }}
-          persist-credentials: false
-
-      - name: 🟢 Use Node.js 22.22.3
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22.22.3
-
-      - name: 📥 Monorepo install
-        uses: ./.github/actions/pnpm-install
-
-      - name: 🧩 Generate Prisma Client
-        working-directory: packages/db-main-prisma
-        run: |
-          mkdir -p "$LOG_DIR"
-          status=0
-          {
-            echo "=== prisma generate ==="
-            pnpm -F @teable/db-main-prisma-ee prisma-generate --schema ./prisma/postgres/schema.prisma
-          } >> "$LOG_DIR/lint-build.log" 2>&1 || status=$?
-          echo "prisma generate exit=$status ($(wc -l < "$LOG_DIR/lint-build.log") log lines)"
-          exit $status
-
-      - name: 🏗 Run build
-        run: |
-          status=0
-          {
-            echo "=== build community/packages + packages ==="
-            pnpm -r --filter "./community/packages/**" --sort --workspace-concurrency=4 run build &&
-            pnpm -r --filter "./packages/**" --sort --workspace-concurrency=4 run build
-          } >> "$LOG_DIR/lint-build.log" 2>&1 || status=$?
-          echo "build exit=$status ($(wc -l < "$LOG_DIR/lint-build.log") log lines total)"
-          exit $status
-
-      - name: 📤 Ship log
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-        run: |
-          mkdir -p "$LOG_DIR"
-          [ -f "$LOG_DIR/lint-build.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/lint-build.log"
-          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/lint-build.log" -R "$LOGS_REPO" --clobber
-
   typecheck:
     runs-on: ubuntu-latest
     name: Typecheck
@@ -131,21 +73,26 @@ jobs:
           status=0
           {
             echo "=== build typecheck deps ==="
-            pnpm -r --filter "./community/packages/**" --sort --workspace-concurrency=1 run build &&
-            pnpm -r --filter "./packages/**" --sort --workspace-concurrency=1 run build
+            pnpm -r --filter "./community/packages/**" --sort --workspace-concurrency=4 run build &&
+            pnpm -r --filter "./packages/**" --sort --workspace-concurrency=4 run build
           } >> "$LOG_DIR/lint-typecheck.log" 2>&1 || status=$?
           echo "deps build exit=$status ($(wc -l < "$LOG_DIR/lint-typecheck.log") log lines)"
           exit $status
 
       - name: 🕵️ Typecheck
         run: |
+          # The three scopes are independent tsc invocations — run them in
+          # parallel (16GB comfortably fits them; heap cap is per-process).
+          pnpm g:typecheck > "$LOG_DIR/tc-root.log" 2>&1 & p1=$!
+          pnpm g:typecheck:community > "$LOG_DIR/tc-community.log" 2>&1 & p2=$!
+          pnpm g:typecheck:community:backend > "$LOG_DIR/tc-backend.log" 2>&1 & p3=$!
           status=0
-          {
-            echo "=== typecheck ==="
-            pnpm g:typecheck &&
-            pnpm g:typecheck:community &&
-            pnpm g:typecheck:community:backend
-          } >> "$LOG_DIR/lint-typecheck.log" 2>&1 || status=$?
+          wait $p1 || status=1
+          wait $p2 || status=1
+          wait $p3 || status=1
+          for part in root community backend; do
+            { echo "=== typecheck ($part) ==="; cat "$LOG_DIR/tc-$part.log"; } >> "$LOG_DIR/lint-typecheck.log"
+          done
           echo "typecheck exit=$status ($(wc -l < "$LOG_DIR/lint-typecheck.log") log lines total)"
           exit $status
 
@@ -206,14 +153,19 @@ jobs:
 
       - name: 🔬 Linter
         run: |
+          # The four lint scopes are independent — run them in parallel.
+          pnpm g:lint > "$LOG_DIR/li-ee.log" 2>&1 & p1=$!
+          pnpm g:lint:community > "$LOG_DIR/li-community.log" 2>&1 & p2=$!
+          pnpm g:lint-styles > "$LOG_DIR/li-styles-ee.log" 2>&1 & p3=$!
+          pnpm g:lint-styles:community > "$LOG_DIR/li-styles-community.log" 2>&1 & p4=$!
           status=0
-          {
-            echo "=== lint ==="
-            pnpm g:lint &&
-            pnpm g:lint:community &&
-            pnpm g:lint-styles &&
-            pnpm g:lint-styles:community
-          } >> "$LOG_DIR/lint-eslint.log" 2>&1 || status=$?
+          wait $p1 || status=1
+          wait $p2 || status=1
+          wait $p3 || status=1
+          wait $p4 || status=1
+          for part in ee community styles-ee styles-community; do
+            { echo "=== lint ($part) ==="; cat "$LOG_DIR/li-$part.log"; } >> "$LOG_DIR/lint-eslint.log"
+          done
           echo "lint exit=$status ($(wc -l < "$LOG_DIR/lint-eslint.log") log lines total)"
           exit $status
 
@@ -228,7 +180,7 @@ jobs:
           gh release upload "$LOG_TAG" "$LOG_DIR/lint-eslint.log" -R "$LOGS_REPO" --clobber
 
   verdict:
-    needs: [build, typecheck, lint]
+    needs: [typecheck, lint]
     if: always()
     runs-on: ubuntu-latest
     name: Lint verdict
@@ -257,7 +209,7 @@ jobs:
         uses: ./.github/actions/remote-ci-conclude
         with:
           suite: lint
-          results: 'build=${{ needs.build.result }} typecheck=${{ needs.typecheck.result }} lint=${{ needs.lint.result }}'
+          results: 'typecheck=${{ needs.typecheck.result }} lint=${{ needs.lint.result }}'
           app-token: ${{ steps.app.outputs.token }}
           logs-token: ${{ secrets.PACKAGES_KEY }}
 
@@ -274,4 +226,4 @@ jobs:
             -f "client_payload[log_tag]=${LOG_TAG}" \
             -f "client_payload[remote_run_url]=${RUN_URL}" \
             -f "client_payload[check_run_id]=${{ github.event.client_payload.check_run_id }}" \
-            -f "client_payload[results]=build=${{ needs.build.result }} typecheck=${{ needs.typecheck.result }} lint=${{ needs.lint.result }}"
+            -f "client_payload[results]=typecheck=${{ needs.typecheck.result }} lint=${{ needs.lint.result }}"
