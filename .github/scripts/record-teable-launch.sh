@@ -15,6 +15,12 @@ case "$REGION" in
   *) echo "Unsupported region: $REGION"; exit 1 ;;
 esac
 
+operation_type="${OPERATION_TYPE:-Release}"
+if [ "$operation_type" != "Release" ] && [ "$operation_type" != "Rollback" ]; then
+  echo "Unsupported operation type: $operation_type"
+  exit 1
+fi
+
 if [ -n "${RELEASE_RECORD_ID:-}" ] && [ -n "${PUBLISH_LOCK_ID:-}" ]; then
   read_http_code=$(curl -sS -w "%{http_code}" -o /tmp/release-lock.json \
     "${TEABLE_API_BASE}/table/${RELEASES_TABLE_ID}/record/${RELEASE_RECORD_ID}?fieldKeyType=dbFieldName" \
@@ -60,6 +66,7 @@ payload=$(jq -n \
   --arg snapshot "${RELEASE_CREATED_TIME:-}" \
   --arg refinedChangelog "${REFINED_CHANGELOG:-}" \
   --arg refinedChangelogZh "${REFINED_CHANGELOG_ZH:-}" \
+  --arg operationType "$operation_type" \
   --argjson relatedReleaseIds "$related_release_ids_json" \
   '{
     "fieldKeyType": "dbFieldName",
@@ -74,7 +81,9 @@ payload=$(jq -n \
           "Deploy_snapshot_time": (if $snapshot != "" then $snapshot else null end),
           "Related_Releases": (if ($relatedReleaseIds | length) > 0 then $relatedReleaseIds else null end),
           "Refined_Changelog": (if $refinedChangelog != "" then $refinedChangelog else null end),
-          "Refined_Changelog_Zhong_Wen": (if $refinedChangelogZh != "" then $refinedChangelogZh else null end)
+          "Refined_Changelog_Zhong_Wen": (if $refinedChangelogZh != "" then $refinedChangelogZh else null end),
+          "Operation_Type": $operationType,
+          "Rollback_Status": (if $operationType == "Rollback" then "Succeeded" else null end)
         }
       }
     ]

@@ -38,6 +38,11 @@ on:
         description: 'Release Publisher lock identifier'
         required: false
         default: ''
+      record_launch:
+        description: 'Create and finalize Teable Launch records in this workflow'
+        required: false
+        type: boolean
+        default: true
   workflow_call:
     inputs:
       image_tag:
@@ -84,6 +89,11 @@ on:
         required: false
         type: string
         default: ''
+      record_launch:
+        description: 'Create and finalize Teable Launch records in this workflow'
+        required: false
+        type: boolean
+        default: true
     outputs:
       start_time:
         description: 'Deployment start timestamp'
@@ -469,6 +479,7 @@ jobs:
     name: Record Deployment in Teable
     needs: [prepare, deploy-sandbox, deploy-app, promote-latest, sync-aliyun]
     if: >-
+      inputs.record_launch != false &&
       needs.deploy-sandbox.result == 'success' &&
       needs.deploy-app.result == 'success' &&
       needs.promote-latest.result == 'success' &&
@@ -497,6 +508,7 @@ jobs:
     name: Finalize Release publishing progress
     needs: notify
     if: >-
+      inputs.record_launch != false &&
       needs.notify.result == 'success' &&
       inputs.release_record_id != '' &&
       inputs.publish_lock_id != ''
