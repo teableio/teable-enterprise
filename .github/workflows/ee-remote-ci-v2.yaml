@@ -233,12 +233,19 @@ jobs:
         if: always() && steps.gate.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
         run: |
           mkdir -p "$LOG_DIR"
           SLUG="${SLUG:-$(echo "${{ matrix.pkg.name }}" | tr '@/' '--')}"
           [ -f "$LOG_DIR/v2-unit-$SLUG.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-unit-$SLUG.log"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
           gh release upload "$LOG_TAG" "$LOG_DIR/v2-unit-$SLUG.log" -R "$LOGS_REPO" --clobber
+          # Failure marker — the conclude step tails only marked logs instead
+          # of guessing from log text (which false-positived on ERROR noise).
+          if [ "$JOB_STATUS" != "success" ]; then
+            echo failed > "$LOG_DIR/v2-unit-$SLUG.failed"
+            gh release upload "$LOG_TAG" "$LOG_DIR/v2-unit-$SLUG.failed" -R "$LOGS_REPO" --clobber
+          fi
 
   e2e:
     needs: [e2e-deps]
@@ -296,12 +303,19 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
         run: |
           mkdir -p "$LOG_DIR"
           SLUG="${SLUG:-$(echo "${{ matrix.shard }}" | tr '/' '-')}"
           [ -f "$LOG_DIR/v2-e2e-$SLUG.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-e2e-$SLUG.log"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
           gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-$SLUG.log" -R "$LOGS_REPO" --clobber
+          # Failure marker — the conclude step tails only marked logs instead
+          # of guessing from log text (which false-positived on ERROR noise).
+          if [ "$JOB_STATUS" != "success" ]; then
+            echo failed > "$LOG_DIR/v2-e2e-$SLUG.failed"
+            gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-$SLUG.failed" -R "$LOGS_REPO" --clobber
+          fi
 
   e2e-postgres-only:
     needs: [e2e-deps]
@@ -349,11 +363,18 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
         run: |
           mkdir -p "$LOG_DIR"
           [ -f "$LOG_DIR/v2-e2e-postgres-only.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-e2e-postgres-only.log"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
           gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-postgres-only.log" -R "$LOGS_REPO" --clobber
+          # Failure marker — the conclude step tails only marked logs instead
+          # of guessing from log text (which false-positived on ERROR noise).
+          if [ "$JOB_STATUS" != "success" ]; then
+            echo failed > "$LOG_DIR/v2-e2e-postgres-only.failed"
+            gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-postgres-only.failed" -R "$LOGS_REPO" --clobber
+          fi
 
   verdict:
     needs: [unit-deps, e2e-deps, unit, e2e, e2e-postgres-only]

@@ -226,6 +226,7 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
         run: |
           mkdir -p "$LOG_DIR"
           [ -f "$LOG_DIR/e2e.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/e2e.log"
@@ -247,6 +248,12 @@ jobs:
           gh release upload "$LOG_TAG" "$LOG_DIR/e2e.log" -R "$LOGS_REPO" --clobber
           if [ -f "$LOG_DIR/e2e-artifacts.tar.gz" ]; then
             gh release upload "$LOG_TAG" "$LOG_DIR/e2e-artifacts.tar.gz" -R "$LOGS_REPO" --clobber
+          fi
+          # Failure marker — the conclude step tails only marked logs instead
+          # of guessing from log text (which false-positived on ERROR noise).
+          if [ "$JOB_STATUS" != "success" ]; then
+            echo failed > "$LOG_DIR/e2e.failed"
+            gh release upload "$LOG_TAG" "$LOG_DIR/e2e.failed" -R "$LOGS_REPO" --clobber
           fi
 
   verdict:
