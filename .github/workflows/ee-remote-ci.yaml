@@ -9,13 +9,15 @@
 # artifacts here are world-readable. Every step that can print source code
 # (build errors, type errors, lint/test output) redirects stdout and stderr
 # into a log file; the public log carries only exit codes and line counts.
-# Logs, playwright artifacts, and per-suite verdict files (<suite>.result,
-# first line = success|failure|cancelled) ship to the private teable-ci-logs
-# repo as release assets under the log_tag given in the dispatch payload.
-# teable-ee's "Remote CI" receiver jobs poll for the verdict files, render the
-# logs privately, and turn red/green — this workflow posts nothing to GitHub
-# checks itself, and a hung/lost run here surfaces as a receiver timeout (red)
-# over there.
+# Logs and playwright artifacts ship to the private teable-ci-logs repo as
+# release assets under the log_tag given in the dispatch payload.
+#
+# Result surface: each suite has a GitHub check run on teable-ee (ids arrive
+# in client_payload.check_runs, created by the dispatch job or the rerun
+# worker). The per-suite verdict jobs conclude those check runs through the
+# teable-remote-ci App — failure tails included — and report-back triggers the
+# private full-log render on teable-ee. A run that dies without concluding is
+# swept red by ee-remote-ci-watchdog.yaml.
 
 name: EE Remote CI
 
@@ -251,31 +253,32 @@ jobs:
     name: Lint verdict
     timeout-minutes: 5
     steps:
-      - name: 🧾 Write lint.result
-        env:
-          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-          R_BUILD: ${{ needs.build.result }}
-          R_TYPECHECK: ${{ needs.typecheck.result }}
-          R_LINT: ${{ needs.lint.result }}
-        run: |
-          VERDICT=success
-          for r in "$R_BUILD" "$R_TYPECHECK" "$R_LINT"; do
-            [ "$r" = "failure" ] && VERDICT=failure
-          done
-          if [ "$VERDICT" = "success" ]; then
-            for r in "$R_BUILD" "$R_TYPECHECK" "$R_LINT"; do
-              [ "$r" = "cancelled" ] && VERDICT=cancelled
-            done
-          fi
-          {
-            echo "$VERDICT"
-            echo "build=$R_BUILD typecheck=$R_TYPECHECK lint=$R_LINT"
-            echo "run=$RUN_URL"
-          } > lint.result
-          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" lint.result -R "$LOGS_REPO" --clobber
+      - name: 📦 Checkout teable-ee (.github only)
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github
 
-  # ── Suite: unit (mirrors teable-ee "Unit Tests") ───────────────────────
+      - name: 🎫 Mint App token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+
+      - name: 🧾 Conclude check run
+        uses: ./.github/actions/remote-ci-conclude
+        with:
+          suite: lint
+          results: 'build=${{ needs.build.result }} typecheck=${{ needs.typecheck.result }} lint=${{ needs.lint.result }}'
+          app-token: ${{ steps.app.outputs.token }}
+          logs-token: ${{ secrets.PACKAGES_KEY }}
   unit:
     if: contains(github.event.client_payload.suites, 'unit')
     runs-on: ubuntu-latest
@@ -369,25 +372,32 @@ jobs:
     name: Unit verdict
     timeout-minutes: 5
     steps:
-      - name: 🧾 Write unit.result
-        env:
-          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-          R_UNIT: ${{ needs.unit.result }}
-        run: |
-          case "$R_UNIT" in
-            success) VERDICT=success;;
-            cancelled) VERDICT=cancelled;;
-            *) VERDICT=failure;;
-          esac
-          {
-            echo "$VERDICT"
-            echo "matrix=$R_UNIT"
-            echo "run=$RUN_URL"
-          } > unit.result
-          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" unit.result -R "$LOGS_REPO" --clobber
+      - name: 📦 Checkout teable-ee (.github only)
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github
 
-  # ── Suite: integration (mirrors teable-ee "Integration Tests") ─────────
+      - name: 🎫 Mint App token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+
+      - name: 🧾 Conclude check run
+        uses: ./.github/actions/remote-ci-conclude
+        with:
+          suite: unit
+          results: 'matrix=${{ needs.unit.result }}'
+          app-token: ${{ steps.app.outputs.token }}
+          logs-token: ${{ secrets.PACKAGES_KEY }}
   integration:
     if: contains(github.event.client_payload.suites, 'integration')
     runs-on: ubuntu-latest
@@ -491,25 +501,32 @@ jobs:
     name: Integration verdict
     timeout-minutes: 5
     steps:
-      - name: 🧾 Write integration.result
-        env:
-          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-          R_INTEGRATION: ${{ needs.integration.result }}
-        run: |
-          case "$R_INTEGRATION" in
-            success) VERDICT=success;;
-            cancelled) VERDICT=cancelled;;
-            *) VERDICT=failure;;
-          esac
-          {
-            echo "$VERDICT"
-            echo "matrix=$R_INTEGRATION"
-            echo "run=$RUN_URL"
-          } > integration.result
-          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" integration.result -R "$LOGS_REPO" --clobber
+      - name: 📦 Checkout teable-ee (.github only)
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github
 
-  # ── Suite: e2e (mirrors teable-ee "Frontend E2E Tests") ────────────────
+      - name: 🎫 Mint App token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+
+      - name: 🧾 Conclude check run
+        uses: ./.github/actions/remote-ci-conclude
+        with:
+          suite: integration
+          results: 'matrix=${{ needs.integration.result }}'
+          app-token: ${{ steps.app.outputs.token }}
+          logs-token: ${{ secrets.PACKAGES_KEY }}
   e2e:
     if: contains(github.event.client_payload.suites, 'e2e')
     runs-on: ubuntu-latest
@@ -710,7 +727,6 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-          JOB_STATUS: ${{ job.status }}
         run: |
           mkdir -p "$LOG_DIR"
           [ -f "$LOG_DIR/e2e.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/e2e.log"
@@ -728,21 +744,45 @@ jobs:
           if [ -n "$ART_DIRS" ]; then
             tar -czf "$LOG_DIR/e2e-artifacts.tar.gz" $ART_DIRS || true
           fi
-          case "$JOB_STATUS" in
-            success) VERDICT=success;;
-            cancelled) VERDICT=cancelled;;
-            *) VERDICT=failure;;
-          esac
-          {
-            echo "$VERDICT"
-            echo "run=$RUN_URL"
-          } > e2e.result
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
           gh release upload "$LOG_TAG" "$LOG_DIR/e2e.log" -R "$LOGS_REPO" --clobber
           if [ -f "$LOG_DIR/e2e-artifacts.tar.gz" ]; then
             gh release upload "$LOG_TAG" "$LOG_DIR/e2e-artifacts.tar.gz" -R "$LOGS_REPO" --clobber
           fi
-          gh release upload "$LOG_TAG" e2e.result -R "$LOGS_REPO" --clobber
+
+  e2e-verdict:
+    needs: [e2e]
+    if: always() && contains(github.event.client_payload.suites, 'e2e')
+    runs-on: ubuntu-latest
+    name: E2E verdict
+    timeout-minutes: 5
+    steps:
+      - name: 📦 Checkout teable-ee (.github only)
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github
+
+      - name: 🎫 Mint App token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+
+      - name: 🧾 Conclude check run
+        uses: ./.github/actions/remote-ci-conclude
+        with:
+          suite: e2e
+          results: 'e2e=${{ needs.e2e.result }}'
+          app-token: ${{ steps.app.outputs.token }}
+          logs-token: ${{ secrets.PACKAGES_KEY }}
 
   # ── Suite: v2 (mirrors teable-ee "V2 Tests") ───────────────────────────
   # Fine-grained package gates come precomputed from the teable-ee dispatch
@@ -1075,28 +1115,59 @@ jobs:
     name: V2 verdict
     timeout-minutes: 5
     steps:
-      - name: 🧾 Write v2.result
+      - name: 📦 Checkout teable-ee (.github only)
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github
+
+      - name: 🎫 Mint App token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+
+      - name: 🧾 Conclude check run
+        uses: ./.github/actions/remote-ci-conclude
+        with:
+          suite: v2
+          results: 'unit-deps=${{ needs.v2-unit-deps.result }} e2e-deps=${{ needs.v2-e2e-deps.result }} unit=${{ needs.v2-unit.result }} e2e=${{ needs.v2-e2e.result }} postgres-only=${{ needs.v2-e2e-postgres-only.result }}'
+          app-token: ${{ steps.app.outputs.token }}
+          logs-token: ${{ secrets.PACKAGES_KEY }}
+
+  # ── Full-log render trigger back on teable-ee ──────────────────────────
+  report-back:
+    needs: [build, typecheck, lint, unit, integration, e2e, v2-unit-deps, v2-e2e-deps, v2-unit, v2-e2e, v2-e2e-postgres-only]
+    if: always()
+    runs-on: ubuntu-latest
+    name: Report back
+    timeout-minutes: 5
+    steps:
+      - name: 📨 Dispatch ee-remote-ci-done
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-          R_UNIT_DEPS: ${{ needs.v2-unit-deps.result }}
-          R_E2E_DEPS: ${{ needs.v2-e2e-deps.result }}
-          R_UNIT: ${{ needs.v2-unit.result }}
-          R_E2E: ${{ needs.v2-e2e.result }}
-          R_PG_ONLY: ${{ needs.v2-e2e-postgres-only.result }}
         run: |
-          VERDICT=success
-          for r in "$R_UNIT_DEPS" "$R_E2E_DEPS" "$R_UNIT" "$R_E2E" "$R_PG_ONLY"; do
-            [ "$r" = "failure" ] && VERDICT=failure
-          done
-          if [ "$VERDICT" = "success" ]; then
-            for r in "$R_UNIT_DEPS" "$R_E2E_DEPS" "$R_UNIT" "$R_E2E" "$R_PG_ONLY"; do
-              [ "$r" = "cancelled" ] && VERDICT=cancelled
-            done
-          fi
-          {
-            echo "$VERDICT"
-            echo "unit-deps=$R_UNIT_DEPS e2e-deps=$R_E2E_DEPS unit=$R_UNIT e2e=$R_E2E postgres-only=$R_PG_ONLY"
-            echo "run=$RUN_URL"
-          } > v2.result
-          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" v2.result -R "$LOGS_REPO" --clobber
+          gh api repos/teableio/teable-ee/dispatches \
+            -f event_type=ee-remote-ci-done \
+            -f "client_payload[pr_number]=${{ github.event.client_payload.pr_number }}" \
+            -f "client_payload[ee_sha]=${EE_SHA}" \
+            -f "client_payload[suites]=${{ github.event.client_payload.suites }}" \
+            -f "client_payload[log_tag]=${LOG_TAG}" \
+            -f "client_payload[remote_run_url]=${RUN_URL}" \
+            -f "client_payload[check_runs]=${{ github.event.client_payload.check_runs }}" \
+            -f "client_payload[results][build]=${{ needs.build.result }}" \
+            -f "client_payload[results][typecheck]=${{ needs.typecheck.result }}" \
+            -f "client_payload[results][lint]=${{ needs.lint.result }}" \
+            -f "client_payload[results][unit]=${{ needs.unit.result }}" \
+            -f "client_payload[results][integration]=${{ needs.integration.result }}" \
+            -f "client_payload[results][e2e]=${{ needs.e2e.result }}" \
+            -f "client_payload[results][v2-unit]=${{ needs.v2-unit.result }}" \
+            -f "client_payload[results][v2-e2e]=${{ needs.v2-e2e.result }}" \
+            -f "client_payload[results][v2-e2e-postgres-only]=${{ needs.v2-e2e-postgres-only.result }}"

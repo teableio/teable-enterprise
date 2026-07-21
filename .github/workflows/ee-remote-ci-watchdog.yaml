@@ -1,0 +1,58 @@
+# Liveness watchdog for the Remote CI check runs on teable-ee. If an
+# EE Remote CI run here dies without concluding its check runs (runner lost,
+# workflow broken, dispatch dropped), the checks would spin forever — this
+# sweep fails any of our App's check runs still in_progress past the longest
+# suite ceiling. Runs on this repo because minutes here are free.
+#
+# SOURCE OF TRUTH lives in teable-ee at .github/enterprise-ci/ — synced by
+# sync-ci-to-enterprise.yml.
+
+name: EE Remote CI Watchdog
+
+on:
+  schedule:
+    - cron: '*/20 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ee-remote-ci-watchdog
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 🎫 Mint App token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+
+      - name: 🧹 Fail stale check runs
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APP_ID: ${{ secrets.RCI_APP_ID }}
+          STALE_MINUTES: 75
+        run: |
+          CUTOFF=$(date -u -d "$STALE_MINUTES minutes ago" +%Y-%m-%dT%H:%M:%SZ)
+          SHAS=$( { gh api "repos/teableio/teable-ee/pulls?state=open&per_page=50" --jq '.[].head.sha'; \
+                    gh api "repos/teableio/teable-ee/commits/develop" --jq '.sha'; } | sort -u )
+          for sha in $SHAS; do
+            gh api "repos/teableio/teable-ee/commits/$sha/check-runs?app_id=${APP_ID}&status=in_progress&per_page=50" \
+              --jq ".check_runs[] | select(.started_at < \"$CUTOFF\") | .id" 2>/dev/null | \
+            while read -r id; do
+              echo "failing stale check run $id on $sha"
+              gh api -X PATCH "repos/teableio/teable-ee/check-runs/$id" \
+                -f status=completed -f conclusion=failure \
+                -f "output[title]=watchdog: remote run lost" \
+                -f "output[summary]=No verdict arrived from teable-enterprise within ${STALE_MINUTES} minutes — the remote run was lost, hung, or never started. Re-run the check to dispatch it again." > /dev/null
+            done
+          done
+          echo "sweep done"
