@@ -271,14 +271,18 @@ jobs:
         with:
           args: annotate deployment/teable-${{ env.INSTANCE_NAME }}-sandbox originImageName="${{ env.SANDBOX_IMAGE }}" --overwrite
 
-      - name: Update main deployment image (container + init container)
+      - name: Update main deployment image (container + init containers)
         if: steps.check_deploy.outcome == 'success'
         uses: actions-hub/kubectl@master
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
           MAIN_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud-preview:${{ needs.build-push.outputs.main_commit_sha }}
         with:
-          args: set image deployment/teable-${{ env.INSTANCE_NAME }} teable-${{ env.INSTANCE_NAME }}=${{ env.MAIN_IMAGE }} db-migrate=${{ env.MAIN_IMAGE }}
+          # instance-init included: since teable-ee#2657 it runs the app
+          # image too, and existing envs must converge off the old docker.io
+          # psql image (unreachable from the hzh cluster) on their next
+          # update — the update path never re-renders the template.
+          args: set image deployment/teable-${{ env.INSTANCE_NAME }} teable-${{ env.INSTANCE_NAME }}=${{ env.MAIN_IMAGE }} db-migrate=${{ env.MAIN_IMAGE }} instance-init=${{ env.MAIN_IMAGE }}
 
       - name: Update main deployment annotations
         if: steps.check_deploy.outcome == 'success'
