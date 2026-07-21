@@ -13,8 +13,8 @@ name: Publish Release Note
 #      record (whatever the human left there is what ships) and pushes it
 #      to three places:
 #        - GitHub Release on teableio/teable (markdown, make_latest)
-#        - ghcr version descriptions for teable/teable-ee (plain-text
-#          list via an index annotation re-stamp of release.<id>)
+#        - ghcr version descriptions for teable/teable-ee (a stable link to
+#          the matching GitHub Release via an index annotation re-stamp)
 #        - Docker Hub "What's New" block in the teable/teable-ee repo
 #          overviews (plain-text list, newest 5 kept)
 #      Every step is idempotent — re-running the button re-publishes.
@@ -163,19 +163,18 @@ jobs:
 
       # ghcr shows a per-version description sourced from the
       # org.opencontainers.image.description annotation on the manifest
-      # index. Re-create the release.<id> tag on itself with the
-      # annotation: blobs are reused, the tag moves to the annotated index
-      # (the old index becomes an untagged orphan — harmless).
+      # index. Keep this value short and point readers to the canonical
+      # GitHub Release, where the complete reviewed note is published.
       - name: Stamp ghcr version descriptions
         env:
           DRY: ${{ steps.mode.outputs.dry }}
         run: |
           set -euo pipefail
-          DESC="$(cat note.txt)"
+          DESC="https://github.com/${OSS_REPO}/releases/tag/${RELEASE_ID}"
           for image in teable teable-ee; do
             ref="ghcr.io/teableio/${image}:${RELEASE_ID}"
             if [ "$DRY" = "true" ]; then
-              echo "[dry-run] would re-stamp ${ref} with description annotation"
+              echo "[dry-run] would re-stamp ${ref} with description: ${DESC}"
               continue
             fi
             docker buildx imagetools create \
