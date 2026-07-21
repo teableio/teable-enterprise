@@ -804,6 +804,9 @@ jobs:
     env:
       CI: 1
       TESTCONTAINERS_REUSE_ENABLE: 'false'
+      # Ephemeral runners need no leak reaper; its socket connect is a known
+      # CI flake ("Failed to connect to Reaper").
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
 
     steps:
       - name: 📦 Checkout teable-ee
@@ -854,6 +857,9 @@ jobs:
     env:
       CI: 1
       TESTCONTAINERS_REUSE_ENABLE: 'false'
+      # Ephemeral runners need no leak reaper; its socket connect is a known
+      # CI flake ("Failed to connect to Reaper").
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
 
     steps:
       - name: 📦 Checkout teable-ee
@@ -891,6 +897,9 @@ jobs:
     env:
       CI: 1
       TESTCONTAINERS_REUSE_ENABLE: 'false'
+      # Ephemeral runners need no leak reaper; its socket connect is a known
+      # CI flake ("Failed to connect to Reaper").
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
 
     strategy:
       fail-fast: false
@@ -1013,6 +1022,9 @@ jobs:
     env:
       CI: 1
       TESTCONTAINERS_REUSE_ENABLE: 'false'
+      # Ephemeral runners need no leak reaper; its socket connect is a known
+      # CI flake ("Failed to connect to Reaper").
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
 
     steps:
       - name: 📦 Checkout teable-ee
@@ -1067,6 +1079,9 @@ jobs:
     env:
       CI: 1
       TESTCONTAINERS_REUSE_ENABLE: 'false'
+      # Ephemeral runners need no leak reaper; its socket connect is a known
+      # CI flake ("Failed to connect to Reaper").
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
 
     steps:
       - name: 📦 Checkout teable-ee
@@ -1144,7 +1159,20 @@ jobs:
 
   # ── Full-log render trigger back on teable-ee ──────────────────────────
   report-back:
-    needs: [build, typecheck, lint, unit, integration, e2e, v2-unit-deps, v2-e2e-deps, v2-unit, v2-e2e, v2-e2e-postgres-only]
+    needs:
+      [
+        build,
+        typecheck,
+        lint,
+        unit,
+        integration,
+        e2e,
+        v2-unit-deps,
+        v2-e2e-deps,
+        v2-unit,
+        v2-e2e,
+        v2-e2e-postgres-only,
+      ]
     if: always()
     runs-on: ubuntu-latest
     name: Report back
