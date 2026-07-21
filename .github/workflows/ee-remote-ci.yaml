@@ -35,6 +35,8 @@ concurrency:
 
 permissions:
   contents: read
+  # Verdict jobs read this run's own job timings for the check-run summary.
+  actions: read
 
 env:
   EE_SHA: ${{ github.event.client_payload.ee_sha }}
