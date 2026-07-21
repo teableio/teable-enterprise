@@ -9,9 +9,9 @@ name: Publish Release Note
 #      reads an announcement for an image tag that does not exist yet.
 #      (The cloud production deploy runs in parallel from its own
 #      dispatch; the self-host announcement does not depend on it.)
-#   2. publish     — reads the CURRENT "Release note" field of the given
-#      record (whatever the human left there is what ships) and pushes it
-#      to three places:
+#   2. publish     — publishes the reviewed release note supplied by the
+#      Release Publisher. Manual/repository replays can fall back to the
+#      selected record's "Release note" field for backward compatibility:
 #        - GitHub Release on teableio/teable (markdown, make_latest)
 #        - ghcr version descriptions for teable/teable-ee (a stable link to
 #          the matching GitHub Release via an index annotation re-stamp)
@@ -32,8 +32,13 @@ on:
         required: true
         type: string
       record_id:
-        description: 'Releases table record id holding the reviewed note'
+        description: 'Releases table record id used for backward-compatible note lookup'
         required: true
+        type: string
+      release_note:
+        description: 'Reviewed English release note; keeps the source Release record unchanged'
+        required: false
+        default: ''
         type: string
       dry_run:
         description: 'Print what would be published without writing anywhere'
@@ -73,18 +78,23 @@ jobs:
             echo "dry=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Fetch the reviewed note from the Releases table
+      - name: Resolve the reviewed release note
         env:
           TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          INPUT_RELEASE_NOTE: ${{ github.event.client_payload.release_note || inputs.release_note }}
         run: |
           set -euo pipefail
-          curl -fsS -H "Authorization: Bearer ${TEABLE_API_TOKEN}" \
-            "https://app.teable.ai/api/table/${RELEASES_TABLE}/record/${RECORD_ID}?fieldKeyType=name" \
-            > record.json
+          if [ -n "$INPUT_RELEASE_NOTE" ]; then
+            printf '%s\n' "$INPUT_RELEASE_NOTE" > note.md
+          else
+            curl -fsS -H "Authorization: Bearer ${TEABLE_API_TOKEN}" \
+              "https://app.teable.ai/api/table/${RELEASES_TABLE}/record/${RECORD_ID}?fieldKeyType=name" \
+              > record.json
+            jq -r '.fields["Release note"] // empty' record.json > note.md
+          fi
 
-          jq -r '.fields["Release note"] // empty' record.json > note.md
           if [ ! -s note.md ]; then
-            echo "::error::Record ${RECORD_ID} has an empty Release note — nothing to publish"
+            echo "::error::No reviewed release note was supplied or found on ${RECORD_ID}"
             exit 1
           fi
 
