@@ -1,0 +1,405 @@
+# EE Remote CI — v2 suite (mirrors teable-ee "V2 Tests").
+# One workflow per suite so partial reruns produce clean run pages. Fine-
+# grained package gates come precomputed from the teable-ee dispatch job
+# (dorny/paths-filter "changes" array in client_payload.filters). SOURCE OF
+# TRUTH lives in teable-ee .github/enterprise-ci/ and is synced here.
+
+name: EE Remote CI (v2)
+
+run-name: 'EE Remote CI v2 — PR #${{ github.event.client_payload.pr_number }} ${{ github.event.client_payload.log_tag }}'
+
+on:
+  repository_dispatch:
+    types: [ee-remote-ci-v2]
+
+concurrency:
+  group: ee-remote-ci-v2-${{ github.event.client_payload.pr_number || github.event.client_payload.ee_ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  EE_SHA: ${{ github.event.client_payload.ee_sha }}
+  LOG_TAG: ${{ github.event.client_payload.log_tag }}
+  PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  LOG_DIR: /tmp/ci-logs
+  LOGS_REPO: teableio/teable-ci-logs
+
+jobs:
+  unit-deps:
+    if: >-
+      contains(fromJson(github.event.client_payload.filters), 'v2_shared') ||
+      contains(fromJson(github.event.client_payload.filters), 'v2_adapter_db_postgres_pg') ||
+      contains(fromJson(github.event.client_payload.filters), 'v2_adapter_repository_postgres') ||
+      contains(fromJson(github.event.client_payload.filters), 'v2_adapter_table_query_ops_postgres') ||
+      contains(fromJson(github.event.client_payload.filters), 'v2_adapter_table_repository_postgres') ||
+      contains(fromJson(github.event.client_payload.filters), 'v2_core') ||
+      contains(fromJson(github.event.client_payload.filters), 'v2_formula_sql_pg') ||
+      contains(fromJson(github.event.client_payload.filters), 'v2_table_query_ops')
+    runs-on: ubuntu-latest
+    name: V2 Unit Dependencies
+    timeout-minutes: 15
+    env:
+      CI: 1
+      TESTCONTAINERS_REUSE_ENABLE: 'false'
+      # Ephemeral runners need no leak reaper; its socket connect is a known
+      # CI flake ("Failed to connect to Reaper").
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
+
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Monorepo install
+        uses: ./.github/actions/pnpm-install
+        with:
+          install-args: |
+            --filter
+            @teable/v2-adapter-db-postgres-pg...
+            --filter
+            @teable/v2-adapter-repository-postgres...
+            --filter
+            @teable/v2-adapter-table-query-ops-postgres...
+            --filter
+            @teable/v2-adapter-table-repository-postgres...
+            --filter
+            @teable/v2-core...
+            --filter
+            @teable/v2-formula-sql-pg...
+            --filter
+            @teable/v2-table-query-ops...
+
+      - name: ☁️ Upload workspace dependencies
+        uses: ./.github/actions/workspace-deps-upload
+        with:
+          name: v2-unit-deps-${{ github.run_id }}
+
+  e2e-deps:
+    if: >-
+      contains(fromJson(github.event.client_payload.filters), 'v2_shared') ||
+      contains(fromJson(github.event.client_payload.filters), 'v2_e2e')
+    runs-on: ubuntu-latest
+    name: V2 E2E Dependencies
+    timeout-minutes: 15
+    env:
+      CI: 1
+      TESTCONTAINERS_REUSE_ENABLE: 'false'
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
+
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Monorepo install
+        uses: ./.github/actions/pnpm-install
+        with:
+          install-args: |
+            --filter
+            @teable/v2-e2e...
+
+      - name: ☁️ Upload workspace dependencies
+        uses: ./.github/actions/workspace-deps-upload
+        with:
+          name: v2-e2e-deps-${{ github.run_id }}
+
+  unit:
+    needs: [unit-deps]
+    if: >-
+      !cancelled() && needs.unit-deps.result == 'success'
+    runs-on: ubuntu-latest
+    name: V2 Unit Tests (${{ matrix.pkg.name }})
+    timeout-minutes: 20
+    env:
+      CI: 1
+      TESTCONTAINERS_REUSE_ENABLE: 'false'
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg:
+          - name: '@teable/v2-adapter-db-postgres-pg'
+            gate: v2_adapter_db_postgres_pg
+          - name: '@teable/v2-adapter-repository-postgres'
+            gate: v2_adapter_repository_postgres
+          - name: '@teable/v2-adapter-table-repository-postgres'
+            gate: v2_adapter_table_repository_postgres
+          - name: '@teable/v2-adapter-table-query-ops-postgres'
+            gate: v2_adapter_table_query_ops_postgres
+            postgres: true
+            dburl: 'postgresql://postgres:postgres@localhost:5432/teable_test'
+          - name: '@teable/v2-core'
+            gate: v2_core
+          - name: '@teable/v2-formula-sql-pg'
+            gate: v2_formula_sql_pg
+          - name: '@teable/v2-table-query-ops'
+            gate: v2_table_query_ops
+
+    # Empty image skips the service container for matrix entries without
+    # `postgres: true` — only adapter-table-query-ops-postgres needs it.
+    services:
+      postgres:
+        image: ${{ matrix.pkg.postgres && 'postgres:16-alpine' || '' }}
+        env:
+          POSTGRES_DB: teable_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d teable_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: 🚪 Gate check
+        id: gate
+        env:
+          FILTERS: ${{ github.event.client_payload.filters }}
+        run: |
+          if echo "$FILTERS" | grep -qE '"(v2_shared|${{ matrix.pkg.gate }})"'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "package unchanged — skipping"
+          fi
+
+      - name: 📦 Checkout teable-ee
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Restore workspace dependencies
+        if: steps.gate.outputs.run == 'true'
+        uses: ./.github/actions/workspace-deps-download
+        with:
+          name: v2-unit-deps-${{ github.run_id }}
+
+      - name: 🧪 Run unit tests
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          # Only the query-ops package runs against the service container; the
+          # rest use testcontainers/pglite and must NOT see PRISMA_DATABASE_URL
+          # (a set value reroutes them to localhost:5432 → ECONNREFUSED).
+          if [ -n "${{ matrix.pkg.dburl }}" ]; then
+            export PRISMA_DATABASE_URL="${{ matrix.pkg.dburl }}"
+          fi
+          mkdir -p "$LOG_DIR"
+          SLUG=$(echo "${{ matrix.pkg.name }}" | tr '@/' '--')
+          echo "SLUG=$SLUG" >> "$GITHUB_ENV"
+          status=0
+          {
+            echo "=== ${{ matrix.pkg.name }} test-unit-cover ==="
+            pnpm -F "${{ matrix.pkg.name }}" --if-present test-unit-cover
+          } >> "$LOG_DIR/v2-unit-$SLUG.log" 2>&1 || status=$?
+          echo "v2 unit exit=$status ($(wc -l < "$LOG_DIR/v2-unit-$SLUG.log") log lines)"
+          exit $status
+
+      - name: 📤 Ship log
+        if: always() && steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          SLUG="${SLUG:-$(echo "${{ matrix.pkg.name }}" | tr '@/' '--')}"
+          [ -f "$LOG_DIR/v2-unit-$SLUG.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-unit-$SLUG.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/v2-unit-$SLUG.log" -R "$LOGS_REPO" --clobber
+
+  e2e:
+    needs: [e2e-deps]
+    if: >-
+      !cancelled() && needs.e2e-deps.result == 'success'
+    runs-on: ubuntu-latest
+    name: V2 E2E Tests (Shard ${{ matrix.shard }})
+    timeout-minutes: 25
+    strategy:
+      fail-fast: true
+      matrix:
+        shard:
+          - 1/4
+          - 2/4
+          - 3/4
+          - 4/4
+    env:
+      CI: 1
+      TESTCONTAINERS_REUSE_ENABLE: 'false'
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
+
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Restore workspace dependencies
+        uses: ./.github/actions/workspace-deps-download
+        with:
+          name: v2-e2e-deps-${{ github.run_id }}
+
+      - name: 🧪 Run E2E tests (shard ${{ matrix.shard }})
+        run: |
+          mkdir -p "$LOG_DIR"
+          SLUG=$(echo "${{ matrix.shard }}" | tr '/' '-')
+          echo "SLUG=$SLUG" >> "$GITHUB_ENV"
+          status=0
+          {
+            echo "=== v2 e2e shard ${{ matrix.shard }} ==="
+            pnpm -C community/packages/v2/e2e exec vitest run --silent --bail 1 --exclude src/field-conversion-deadlock.e2e.spec.ts --shard=${{ matrix.shard }}
+          } >> "$LOG_DIR/v2-e2e-$SLUG.log" 2>&1 || status=$?
+          echo "v2 e2e exit=$status ($(wc -l < "$LOG_DIR/v2-e2e-$SLUG.log") log lines)"
+          exit $status
+
+      - name: 📤 Ship log
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          SLUG="${SLUG:-$(echo "${{ matrix.shard }}" | tr '/' '-')}"
+          [ -f "$LOG_DIR/v2-e2e-$SLUG.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-e2e-$SLUG.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-$SLUG.log" -R "$LOGS_REPO" --clobber
+
+  e2e-postgres-only:
+    needs: [e2e-deps]
+    if: >-
+      !cancelled() && needs.e2e-deps.result == 'success'
+    runs-on: ubuntu-latest
+    name: V2 E2E Tests (Postgres Only)
+    timeout-minutes: 20
+    env:
+      CI: 1
+      TESTCONTAINERS_REUSE_ENABLE: 'false'
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
+
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Restore workspace dependencies
+        uses: ./.github/actions/workspace-deps-download
+        with:
+          name: v2-e2e-deps-${{ github.run_id }}
+
+      - name: 🧪 Run Postgres-only E2E tests
+        run: |
+          mkdir -p "$LOG_DIR"
+          status=0
+          {
+            echo "=== v2 e2e postgres-only ==="
+            pnpm -C community/packages/v2/e2e exec vitest run --silent=true --bail 1 src/field-conversion-deadlock.e2e.spec.ts
+          } >> "$LOG_DIR/v2-e2e-postgres-only.log" 2>&1 || status=$?
+          echo "v2 e2e postgres-only exit=$status ($(wc -l < "$LOG_DIR/v2-e2e-postgres-only.log") log lines)"
+          exit $status
+
+      - name: 📤 Ship log
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          [ -f "$LOG_DIR/v2-e2e-postgres-only.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-e2e-postgres-only.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-postgres-only.log" -R "$LOGS_REPO" --clobber
+
+  verdict:
+    needs: [unit-deps, e2e-deps, unit, e2e, e2e-postgres-only]
+    if: always()
+    runs-on: ubuntu-latest
+    name: V2 verdict
+    timeout-minutes: 5
+    steps:
+      - name: 📦 Checkout teable-ee (.github only)
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github
+
+      - name: 🎫 Mint App token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+
+      - name: 🧾 Conclude check run
+        uses: ./.github/actions/remote-ci-conclude
+        with:
+          suite: v2
+          results: 'unit-deps=${{ needs.unit-deps.result }} e2e-deps=${{ needs.e2e-deps.result }} unit=${{ needs.unit.result }} e2e=${{ needs.e2e.result }} postgres-only=${{ needs.e2e-postgres-only.result }}'
+          app-token: ${{ steps.app.outputs.token }}
+          logs-token: ${{ secrets.PACKAGES_KEY }}
+
+      - name: 📨 Dispatch ee-remote-ci-done
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          gh api repos/teableio/teable-ee/dispatches \
+            -f event_type=ee-remote-ci-done \
+            -f "client_payload[suite]=v2" \
+            -f "client_payload[pr_number]=${PR_NUMBER}" \
+            -f "client_payload[ee_sha]=${EE_SHA}" \
+            -f "client_payload[log_tag]=${LOG_TAG}" \
+            -f "client_payload[remote_run_url]=${RUN_URL}" \
+            -f "client_payload[check_run_id]=${{ github.event.client_payload.check_run_id }}" \
+            -f "client_payload[results]=unit-deps=${{ needs.unit-deps.result }} e2e-deps=${{ needs.e2e-deps.result }} unit=${{ needs.unit.result }} e2e=${{ needs.e2e.result }} postgres-only=${{ needs.e2e-postgres-only.result }}"

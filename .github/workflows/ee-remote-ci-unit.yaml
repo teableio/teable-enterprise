@@ -1,0 +1,162 @@
+# EE Remote CI — unit suite (mirrors teable-ee "Unit Tests").
+# One workflow per suite so partial reruns produce clean run pages. SOURCE OF
+# TRUTH lives in teable-ee .github/enterprise-ci/ and is synced here.
+
+name: EE Remote CI (unit)
+
+run-name: 'EE Remote CI unit — PR #${{ github.event.client_payload.pr_number }} ${{ github.event.client_payload.log_tag }}'
+
+on:
+  repository_dispatch:
+    types: [ee-remote-ci-unit]
+
+concurrency:
+  group: ee-remote-ci-unit-${{ github.event.client_payload.pr_number || github.event.client_payload.ee_ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  EE_SHA: ${{ github.event.client_payload.ee_sha }}
+  LOG_TAG: ${{ github.event.client_payload.log_tag }}
+  PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  LOG_DIR: /tmp/ci-logs
+  LOGS_REPO: teableio/teable-ci-logs
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    name: Unit Tests ${{ matrix.suite.name }}
+    timeout-minutes: 20
+
+    env:
+      NODE_OPTIONS: '--max-old-space-size=8192'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - name: backend-ee 1/3
+            filter: '--filter "@teable/backend-ee"'
+            shard: 1/3
+          - name: backend-ee 2/3
+            filter: '--filter "@teable/backend-ee"'
+            shard: 2/3
+          - name: backend-ee 3/3
+            filter: '--filter "@teable/backend-ee"'
+            shard: 3/3
+          - name: packages
+            filter: '--filter "@teable/*-ee" --filter "!@teable/backend-ee"'
+          - name: community packages
+            filter: community
+            shard: ''
+
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Monorepo install
+        uses: ./.github/actions/pnpm-install
+
+      - name: 🧩 Generate Prisma Client
+        working-directory: packages/db-main-prisma
+        run: |
+          mkdir -p "$LOG_DIR"
+          SLUG=$(echo "${{ matrix.suite.name }}" | tr ' /' '--')
+          echo "SLUG=$SLUG" >> "$GITHUB_ENV"
+          status=0
+          {
+            echo "=== prisma generate ==="
+            pnpm -F @teable/db-main-prisma-ee prisma-generate --schema ./prisma/postgres/schema.prisma
+          } >> "$LOG_DIR/unit-$SLUG.log" 2>&1 || status=$?
+          echo "prisma generate exit=$status"
+          exit $status
+
+      - name: 🧪 Run Tests
+        env:
+          VITEST_SHARD: ${{ matrix.suite.shard }}
+        run: |
+          status=0
+          {
+            echo "=== unit tests (${{ matrix.suite.name }}) ==="
+            if [ "${{ matrix.suite.filter }}" = "community" ]; then
+              pnpm g:test-unit:community
+            else
+              pnpm -r ${{ matrix.suite.filter }} --workspace-concurrency=1 test-unit-cover
+            fi
+          } >> "$LOG_DIR/unit-$SLUG.log" 2>&1 || status=$?
+          echo "unit tests exit=$status ($(wc -l < "$LOG_DIR/unit-$SLUG.log") log lines total)"
+          exit $status
+
+      - name: 📤 Ship log
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          SLUG="${SLUG:-$(echo "${{ matrix.suite.name }}" | tr ' /' '--')}"
+          [ -f "$LOG_DIR/unit-$SLUG.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/unit-$SLUG.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/unit-$SLUG.log" -R "$LOGS_REPO" --clobber
+
+  verdict:
+    needs: [unit]
+    if: always()
+    runs-on: ubuntu-latest
+    name: Unit verdict
+    timeout-minutes: 5
+    steps:
+      - name: 📦 Checkout teable-ee (.github only)
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github
+
+      - name: 🎫 Mint App token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+
+      - name: 🧾 Conclude check run
+        uses: ./.github/actions/remote-ci-conclude
+        with:
+          suite: unit
+          results: 'matrix=${{ needs.unit.result }}'
+          app-token: ${{ steps.app.outputs.token }}
+          logs-token: ${{ secrets.PACKAGES_KEY }}
+
+      - name: 📨 Dispatch ee-remote-ci-done
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          gh api repos/teableio/teable-ee/dispatches \
+            -f event_type=ee-remote-ci-done \
+            -f "client_payload[suite]=unit" \
+            -f "client_payload[pr_number]=${PR_NUMBER}" \
+            -f "client_payload[ee_sha]=${EE_SHA}" \
+            -f "client_payload[log_tag]=${LOG_TAG}" \
+            -f "client_payload[remote_run_url]=${RUN_URL}" \
+            -f "client_payload[check_run_id]=${{ github.event.client_payload.check_run_id }}" \
+            -f "client_payload[results]=matrix=${{ needs.unit.result }}"
