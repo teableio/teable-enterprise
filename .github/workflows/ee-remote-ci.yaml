@@ -48,7 +48,7 @@ jobs:
     if: contains(github.event.client_payload.suites, 'lint')
     runs-on: ubuntu-latest
     name: Build
-    timeout-minutes: 30
+    timeout-minutes: 20
 
     env:
       TEABLE_TSDOWN_DISABLE_DTS: '1'
@@ -58,7 +58,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
-          ref: ${{ github.event.client_payload.ee_sha }}
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
@@ -107,7 +107,7 @@ jobs:
     if: contains(github.event.client_payload.suites, 'lint')
     runs-on: ubuntu-latest
     name: Typecheck
-    timeout-minutes: 40
+    timeout-minutes: 25
 
     env:
       NODE_OPTIONS: '--max-old-space-size=8192'
@@ -118,7 +118,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
-          ref: ${{ github.event.client_payload.ee_sha }}
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
@@ -179,14 +179,14 @@ jobs:
     if: contains(github.event.client_payload.suites, 'lint')
     runs-on: ubuntu-latest
     name: Lint
-    timeout-minutes: 30
+    timeout-minutes: 20
 
     steps:
       - name: 📦 Checkout teable-ee
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
-          ref: ${{ github.event.client_payload.ee_sha }}
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
@@ -280,7 +280,7 @@ jobs:
     if: contains(github.event.client_payload.suites, 'unit')
     runs-on: ubuntu-latest
     name: Unit Tests ${{ matrix.suite.name }}
-    timeout-minutes: 30
+    timeout-minutes: 20
 
     env:
       NODE_OPTIONS: '--max-old-space-size=8192'
@@ -309,7 +309,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
-          ref: ${{ github.event.client_payload.ee_sha }}
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
@@ -426,7 +426,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
-          ref: ${{ github.event.client_payload.ee_sha }}
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
@@ -514,14 +514,14 @@ jobs:
     if: contains(github.event.client_payload.suites, 'e2e')
     runs-on: ubuntu-latest
     name: Frontend E2E Tests
-    timeout-minutes: 45
+    timeout-minutes: 40
 
     steps:
       - name: 📦 Checkout teable-ee
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
-          ref: ${{ github.event.client_payload.ee_sha }}
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
@@ -760,7 +760,7 @@ jobs:
        contains(fromJson(github.event.client_payload.filters), 'v2_table_query_ops'))
     runs-on: ubuntu-latest
     name: V2 Unit Dependencies
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
       CI: 1
       TESTCONTAINERS_REUSE_ENABLE: 'false'
@@ -770,7 +770,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
-          ref: ${{ github.event.client_payload.ee_sha }}
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
@@ -810,7 +810,7 @@ jobs:
        contains(fromJson(github.event.client_payload.filters), 'v2_e2e'))
     runs-on: ubuntu-latest
     name: V2 E2E Dependencies
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
       CI: 1
       TESTCONTAINERS_REUSE_ENABLE: 'false'
@@ -820,7 +820,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
-          ref: ${{ github.event.client_payload.ee_sha }}
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
@@ -847,7 +847,7 @@ jobs:
       !cancelled() && needs.v2-unit-deps.result == 'success'
     runs-on: ubuntu-latest
     name: V2 Unit Tests (${{ matrix.pkg.name }})
-    timeout-minutes: 30
+    timeout-minutes: 20
     env:
       CI: 1
       TESTCONTAINERS_REUSE_ENABLE: 'false'
@@ -908,7 +908,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
-          ref: ${{ github.event.client_payload.ee_sha }}
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
@@ -961,7 +961,7 @@ jobs:
       !cancelled() && needs.v2-e2e-deps.result == 'success'
     runs-on: ubuntu-latest
     name: V2 E2E Tests (Shard ${{ matrix.shard }})
-    timeout-minutes: 30
+    timeout-minutes: 25
     strategy:
       fail-fast: true
       matrix:
@@ -979,7 +979,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
-          ref: ${{ github.event.client_payload.ee_sha }}
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
@@ -1023,7 +1023,7 @@ jobs:
       !cancelled() && needs.v2-e2e-deps.result == 'success'
     runs-on: ubuntu-latest
     name: V2 E2E Tests (Postgres Only)
-    timeout-minutes: 30
+    timeout-minutes: 20
     env:
       CI: 1
       TESTCONTAINERS_REUSE_ENABLE: 'false'
@@ -1033,7 +1033,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
-          ref: ${{ github.event.client_payload.ee_sha }}
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
