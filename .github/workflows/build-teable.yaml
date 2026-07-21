@@ -4,11 +4,15 @@ name: Build teable (unified)
 # args (edition flag, Sentry sourcemaps, CDN asset prefix), and since the
 # deps-cache/agent-fast-lane work the EE build is no slower than cloud — so
 # a single trigger builds everything, with one release id, shared deps cache,
-# and the agent built exactly once. The editions keep INDEPENDENT release
-# statuses: separate build matrices, separate sync chains, separate tracking
-# records — an EE-only leg failure does not block the cloud release or vice
-# versa. The cloud lane's old cross-workflow verify-agent poll is gone: cloud
-# syncs simply `needs: merge-agent-manifest` in-run.
+# and the agent built exactly once. The editions share ONE release status:
+# separate build matrices and sync chains, but a single outcome written to
+# both tracking records — a release id is Released only when BOTH lanes
+# fully published. Partial success is deliberately not a recordable state:
+# release.2313 had its cloud lane finish and report success while the EE
+# arm64 leg was concurrency-cancelled minutes later, so the release button
+# offered an id whose EE artifacts never existed and promotion died on a
+# missing beta tag. The cloud lane's old cross-workflow verify-agent poll
+# is gone: cloud syncs simply `needs: merge-agent-manifest` in-run.
 #
 # mode=rehearsal (validation runs): builds everything and pushes ONLY the
 # pinned beta-* tag — no beta/latest movement, no dockerhub/ECR sync, no
@@ -810,15 +814,24 @@ jobs:
               "docker://${ECR_REGISTRY}/${image}:${BETA_TAG}"
           done
 
-  # ── Per-edition statuses (independent releases from one run) ───────────
-
-  determine-status-ee:
+  # ── Unified status (one build, one outcome — no partial success) ───────
+  #
+  # Cloud and EE are one build task that only differs in upload targets, so
+  # they succeed or fail TOGETHER: both tracking records get the same final
+  # status, and it is Released only when every lane fully published. On
+  # routine builds the lanes finish within ~1-2 min of each other; the one
+  # wide gap is an agent-base rebuild (~19 min of EE lag), which is exactly
+  # the window where a concurrency cancel used to leave the cloud record
+  # Released while the EE beta tag never landed (release.2313).
+  determine-status:
     needs:
       [
         prepare-release,
+        build-push-cloud,
         build-push-ee,
         merge-manifests-ee,
         merge-agent-manifest,
+        sync-ecr,
         sync-dockerhub,
       ]
     if: always()
@@ -826,7 +839,7 @@ jobs:
     outputs:
       status: ${{ steps.status.outputs.status }}
     steps:
-      - name: Determine final EE status
+      - name: Determine final unified status
         id: status
         run: |
           # sync-dockerhub legitimately skips on non-develop builds (the
@@ -834,63 +847,37 @@ jobs:
           DOCKERHUB="${{ needs.sync-dockerhub.result }}"
           if [ "${{ needs.prepare-release.outputs.mode }}" != "release" ]; then
             echo "status=Rehearsal" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-agent-manifest.result }}" == "cancelled" ] || [ "$DOCKERHUB" == "cancelled" ]; then
+          elif [ "${{ needs.build-push-cloud.result }}" == "cancelled" ] || [ "${{ needs.build-push-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-agent-manifest.result }}" == "cancelled" ] || [ "${{ needs.sync-ecr.result }}" == "cancelled" ] || [ "$DOCKERHUB" == "cancelled" ]; then
             echo "status=Cancelled" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push-ee.result }}" == "success" ] && [ "${{ needs.merge-manifests-ee.result }}" == "success" ] && [ "${{ needs.merge-agent-manifest.result }}" == "success" ] && { [ "$DOCKERHUB" == "success" ] || [ "$DOCKERHUB" == "skipped" ]; }; then
-            echo "status=Released" >> $GITHUB_OUTPUT
-          else
-            echo "status=Fail" >> $GITHUB_OUTPUT
-          fi
-
-  determine-status-cloud:
-    needs:
-      [
-        prepare-release,
-        build-push-cloud,
-        merge-agent-manifest,
-        sync-ecr,
-      ]
-    if: always()
-    runs-on: ubuntu-latest
-    outputs:
-      status: ${{ steps.status.outputs.status }}
-    steps:
-      - name: Determine final cloud status
-        id: status
-        run: |
-          if [ "${{ needs.prepare-release.outputs.mode }}" != "release" ]; then
-            echo "status=Rehearsal" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push-cloud.result }}" == "cancelled" ] || [ "${{ needs.merge-agent-manifest.result }}" == "cancelled" ] || [ "${{ needs.sync-ecr.result }}" == "cancelled" ]; then
-            echo "status=Cancelled" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push-cloud.result }}" == "success" ] && [ "${{ needs.merge-agent-manifest.result }}" == "success" ] && [ "${{ needs.sync-ecr.result }}" == "success" ]; then
+          elif [ "${{ needs.build-push-cloud.result }}" == "success" ] && [ "${{ needs.build-push-ee.result }}" == "success" ] && [ "${{ needs.merge-manifests-ee.result }}" == "success" ] && [ "${{ needs.merge-agent-manifest.result }}" == "success" ] && [ "${{ needs.sync-ecr.result }}" == "success" ] && { [ "$DOCKERHUB" == "success" ] || [ "$DOCKERHUB" == "skipped" ]; }; then
             echo "status=Released" >> $GITHUB_OUTPUT
           else
             echo "status=Fail" >> $GITHUB_OUTPUT
           fi
 
   track-complete-ee:
-    needs: [prepare-release, track-start-ee, determine-status-ee]
+    needs: [prepare-release, track-start-ee, determine-status]
     if: always() && needs.prepare-release.outputs.mode == 'release' && needs.track-start-ee.result == 'success'
     uses: ./.github/workflows/track-build-teable.yaml
     with:
       action: update
       edition: ee
       record_id: ${{ needs.track-start-ee.outputs.record_id }}
-      status: ${{ needs.determine-status-ee.outputs.status }}
+      status: ${{ needs.determine-status.outputs.status }}
       start_time: ${{ needs.track-start-ee.outputs.start_time }}
     secrets:
       TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
       PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
 
   track-complete-cloud:
-    needs: [prepare-release, track-start-cloud, determine-status-cloud]
+    needs: [prepare-release, track-start-cloud, determine-status]
     if: always() && needs.prepare-release.outputs.mode == 'release' && needs.track-start-cloud.result == 'success'
     uses: ./.github/workflows/track-build-teable.yaml
     with:
       action: update
       edition: cloud
       record_id: ${{ needs.track-start-cloud.outputs.record_id }}
-      status: ${{ needs.determine-status-cloud.outputs.status }}
+      status: ${{ needs.determine-status.outputs.status }}
       start_time: ${{ needs.track-start-cloud.outputs.start_time }}
     secrets:
       TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
