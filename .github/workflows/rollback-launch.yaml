@@ -1,0 +1,160 @@
+name: Rollback Launch
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_launch_id:
+        description: 'Launch record selected as rollback target'
+        required: true
+        type: string
+      image_tag:
+        description: 'Immutable release.* tag used by Cloud and EE'
+        required: true
+        type: string
+      region:
+        description: 'Cloud region to roll back'
+        required: true
+        type: choice
+        options:
+          - teable.ai
+          - teable.cn
+      trigger:
+        description: 'Who triggered this rollback'
+        required: true
+        type: string
+      rollback_lock_id:
+        description: 'Release Publisher rollback lock identifier'
+        required: true
+        type: string
+
+jobs:
+  validate-lock:
+    name: Validate Launch rollback lock
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate rollback request
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          SOURCE_LAUNCH_ID: ${{ inputs.source_launch_id }}
+          ROLLBACK_LOCK_ID: ${{ inputs.rollback_lock_id }}
+          REGION: ${{ inputs.region }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: bash .github/scripts/validate-teable-rollback.sh
+
+  deploy-ai:
+    name: Roll back teable.ai Cloud
+    needs: validate-lock
+    if: inputs.region == 'teable.ai'
+    uses: ./.github/workflows/manual-ecs-deploy.yml
+    with:
+      image_tag: ${{ inputs.image_tag }}
+      trigger: ${{ inputs.trigger }}
+      record_launch: false
+    secrets: inherit
+
+  deploy-cn:
+    name: Roll back teable.cn Cloud
+    needs: validate-lock
+    if: inputs.region == 'teable.cn'
+    uses: ./.github/workflows/manual-sealos-deploy.yaml
+    with:
+      image_tag: ${{ inputs.image_tag }}
+      trigger: ${{ inputs.trigger }}
+      record_launch: false
+    secrets: inherit
+
+  promote-ee:
+    name: Roll back EE latest
+    needs: validate-lock
+    uses: ./.github/workflows/promote-latest-ee.yaml
+    with:
+      release_id: ${{ inputs.image_tag }}
+    secrets: inherit
+
+  record-rollback:
+    name: Record successful rollback Launch
+    needs: [validate-lock, deploy-ai, deploy-cn, promote-ee]
+    if: >-
+      always() &&
+      needs.validate-lock.result == 'success' &&
+      needs.promote-ee.result == 'success' &&
+      ((inputs.region == 'teable.ai' && needs.deploy-ai.result == 'success') ||
+       (inputs.region == 'teable.cn' && needs.deploy-cn.result == 'success'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create Rollback Launch and release lock
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          SOURCE_LAUNCH_ID: ${{ inputs.source_launch_id }}
+          ROLLBACK_LOCK_ID: ${{ inputs.rollback_lock_id }}
+          REGION: ${{ inputs.region }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          TRIGGER: ${{ inputs.trigger }}
+        run: bash .github/scripts/complete-teable-rollback.sh
+
+  notify-failure:
+    name: Report rollback failure
+    needs: [validate-lock, deploy-ai, deploy-cn, promote-ee, record-rollback]
+    if: >-
+      always() &&
+      (needs.validate-lock.result == 'failure' ||
+       needs.promote-ee.result == 'failure' ||
+       (inputs.region == 'teable.ai' && needs.deploy-ai.result != 'success') ||
+       (inputs.region == 'teable.cn' && needs.deploy-cn.result != 'success') ||
+       needs.record-rollback.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        if: needs.validate-lock.result == 'success'
+        uses: actions/checkout@v4
+
+      - name: Preserve failed rollback lock
+        if: needs.validate-lock.result == 'success'
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          SOURCE_LAUNCH_ID: ${{ inputs.source_launch_id }}
+          ROLLBACK_LOCK_ID: ${{ inputs.rollback_lock_id }}
+          ERROR_SUMMARY: 'Cloud deployment, EE latest promotion, or Launch recording failed'
+        run: bash .github/scripts/mark-teable-rollback-failed.sh
+
+      - name: Send Feishu failure notification
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.LARK_BOT_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "$FEISHU_WEBHOOK_URL" ]; then
+            echo "LARK_BOT_URL is not configured"
+            exit 1
+          fi
+
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          card_payload=$(jq -n \
+            --arg title "Rollback 失败 ${{ inputs.image_tag }}" \
+            --arg region "${{ inputs.region }}" \
+            --arg validate "${{ needs.validate-lock.result }}" \
+            --arg cloudAi "${{ needs.deploy-ai.result }}" \
+            --arg cloudCn "${{ needs.deploy-cn.result }}" \
+            --arg ee "${{ needs.promote-ee.result }}" \
+            --arg record "${{ needs.record-rollback.result }}" \
+            --arg url "$run_url" \
+            '{
+              "msg_type": "interactive",
+              "card": {
+                "header": {
+                  "title": {"tag": "plain_text", "content": $title},
+                  "template": "red"
+                },
+                "elements": [
+                  {"tag": "div", "text": {"tag": "lark_md", "content": ("**环境**: " + $region + "\n**锁校验**: " + $validate + "\n**Cloud AI**: " + $cloudAi + "\n**Cloud CN**: " + $cloudCn + "\n**EE latest**: " + $ee + "\n**Launch 记录**: " + $record + "\n回滚锁保留至过期，请先核对线上 Cloud 与 EE latest 状态。\n[查看 Actions](" + $url + ")")}}
+                ]
+              }
+            }')
+          curl -fsS -X POST "$FEISHU_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "$card_payload" >/dev/null
