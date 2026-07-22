@@ -7,8 +7,8 @@ name: Promote teable EE to latest
 #   1. ghcr: stamp release.<id> on the public packages from the staging
 #      source (skip if already stamped — re-promotes work after the beta
 #      twin is reaped), then move latest.
-#   2. Docker Hub: copy release.<id> + latest from ghcr (the per-merge sync
-#      ships only the floating beta channel).
+#   2. Docker Hub: copy release.<id> + latest from ghcr (builds publish
+#      nothing to Docker Hub — this promotion is the only writer).
 #   3. Aliyun EE mirror: latest + release.<id>, including the canonical
 #      agent tag (the sync's ee lane skips latest for the agent by design).
 #   4. Notify teable-infra (teable-stable-promoted).
@@ -99,10 +99,8 @@ jobs:
           done
 
           # The agent already carries release.<id> on ghcr (tagged at build
-          # time), and develop merges ship it to Docker Hub per merge — but
-          # branch/hotfix builds skip that beta-channel sync, so copy it
-          # here too (idempotent) to guarantee any promoted id has its
-          # agent on Docker Hub: self-hosted apps pull
+          # time); builds ship nothing to Docker Hub, so this copy is what
+          # puts the promoted id's agent there: self-hosted apps pull
           # <prefix>:<their BUILD_VERSION> at sandbox spawn. Aliyun gets
           # the agent release tag via sync-aliyun below.
           skopeo copy --all \

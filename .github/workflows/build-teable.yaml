@@ -15,8 +15,7 @@ name: Build teable (unified)
 # is gone: cloud syncs simply `needs: merge-agent-manifest` in-run.
 #
 # mode=rehearsal (validation runs): builds everything and pushes ONLY the
-# pinned beta-* tag — no beta/latest movement, no dockerhub/ECR sync, no
-# tracking records.
+# pinned beta-* tag — no latest movement, no ECR sync, no tracking records.
 #
 # Channel split — "a release.* tag means an official release":
 #   - Every build keeps release.<ts>.<seq> as its IDENTITY (BUILD_VERSION
@@ -30,8 +29,10 @@ name: Build teable (unified)
 #     They then reap old beta-* versions; ghcr-gc.yaml backstops.
 #   - The PUBLIC packages (teable, teable-ee) never see staging tags at
 #     all: EE app staging builds live in the INTERNAL twin package
-#     teable-staging, and only promotion copies them out. The floating
-#     public beta channel still tracks develop (stamped cross-repo).
+#     teable-staging, and only promotion copies them out. There is NO
+#     floating public beta channel: staging is consumed from AWS ECR
+#     (cloud, beta-* twin) and the internal ghcr twin (EE) only —
+#     nothing reaches Docker Hub or the public packages per merge.
 #   - The agent is the one exception: it is tagged release.<id> on every
 #     build, because every app build (staging or production) pulls
 #     <prefix>:<its own BUILD_VERSION> at sandbox spawn.
@@ -42,7 +43,6 @@ concurrency:
 
 env:
   REGISTRY_GITHUB: ghcr.io/teableio
-  REGISTRY_DOCKERHUB: docker.io/teableio
 
 on:
   workflow_dispatch:
@@ -82,7 +82,6 @@ jobs:
       agent_base_tag: ${{ steps.agent_base.outputs.tag }}
       mode: ${{ steps.release.outputs.mode }}
       beta_tag: ${{ steps.release.outputs.beta_tag }}
-      float_beta: ${{ steps.release.outputs.float_beta }}
     steps:
       - name: Checkout private repository
         uses: actions/checkout@v4
@@ -115,7 +114,6 @@ jobs:
           INPUT_RELEASE_TIMESTAMP: ${{ github.event.client_payload.release_timestamp || inputs.release_timestamp }}
           INPUT_RELEASE_SEQUENCE: ${{ github.event.client_payload.release_sequence || inputs.release_sequence }}
           INPUT_MODE: ${{ inputs.mode }}
-          SOURCE_REF: ${{ github.event.client_payload.source_ref || inputs.source_ref || 'develop' }}
           SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
         run: |
           # EE app staging pushes land in the INTERNAL teable-staging twin so
@@ -157,14 +155,8 @@ jobs:
           # No sha tags (the release record maps release-id -> commit), and
           # the cloud latest tag is NOT moved here — latest means "current
           # production" and only manual-ecs-deploy moves it after a
-          # successful deploy. The public EE beta channel keeps floating
-          # with develop; rehearsals and branch/ref builds never move it.
+          # successful deploy.
           BETA_TAG="beta-${RELEASE_ID#release.}"
-          if [ "$MODE" = "rehearsal" ] || [ "$SOURCE_REF" != "develop" ]; then
-            FLOAT_BETA="false"
-          else
-            FLOAT_BETA="true"
-          fi
 
           {
             echo "ee_target_matrix_json=$EE_TARGET_MATRIX_JSON"
@@ -175,7 +167,6 @@ jobs:
             echo "release_sequence=$RELEASE_SEQUENCE"
             echo "mode=$MODE"
             echo "beta_tag=$BETA_TAG"
-            echo "float_beta=$FLOAT_BETA"
           } >> "$GITHUB_OUTPUT"
           echo "Release id: $RELEASE_ID (mode=$MODE)"
 
@@ -684,13 +675,12 @@ jobs:
           pattern: digests-${{ matrix.target }}-linux-*
           merge-multiple: true
 
-      - name: Create staging manifests and float the beta channel
+      - name: Create staging manifests
         env:
           STAGING_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}
           RELEASE_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.release_image }}
           ALIAS_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.alias_image }}
           BETA_TAG: ${{ needs.prepare-release.outputs.beta_tag }}
-          FLOAT_BETA: ${{ needs.prepare-release.outputs.float_beta }}
         run: |
           mapfile -t DIGEST_FILES < <(find "/tmp/digests/${{ matrix.target }}" -type f -name '*.digest' | sort)
 
@@ -719,62 +709,11 @@ jobs:
               "${STAGING_IMAGE}:${BETA_TAG}"
           fi
 
-          # The public beta CHANNEL keeps tracking develop — only the
-          # floating pointer moves; no pinned staging tag ever lands on the
-          # public packages.
-          if [ "${FLOAT_BETA}" = "true" ]; then
-            docker buildx imagetools create \
-              --tag "${RELEASE_IMAGE}:beta" \
-              "${STAGING_IMAGE}:${BETA_TAG}"
-            docker buildx imagetools create \
-              --tag "${ALIAS_IMAGE}:beta" \
-              "${RELEASE_IMAGE}:beta"
-          fi
-
   # ── EE distribution chain ──────────────────────────────────────────────
-
-  # Per-merge Docker Hub sync is the beta channel only. The pinned release
-  # tags, the Aliyun mirror, and the agent preheat all moved to release time
-  # (manual-ecs-deploy for cloud, promote-latest-ee for EE) — a staging build
-  # publishes nothing durable. Skipped entirely on non-develop builds, which
-  # never move the beta channel.
-  sync-dockerhub:
-    needs: [prepare-release, merge-manifests-ee, merge-agent-manifest]
-    if: needs.prepare-release.outputs.mode == 'release' && needs.merge-manifests-ee.result == 'success' && needs.merge-agent-manifest.result == 'success' && needs.prepare-release.outputs.float_beta == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Install skopeo
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y skopeo
-
-      - name: Sync beta channel to Docker Hub
-        env:
-          SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
-          DST_CREDS: ${{ vars.DOCKER_HUB_NAME }}:${{ secrets.DOCKER_HUB_AK }}
-          RELEASE_ID: ${{ needs.prepare-release.outputs.release_id }}
-        run: |
-          set -euo pipefail
-
-          for image in teable teable-ee teable-sandbox teable-sandbox-ee; do
-            skopeo copy --all \
-              --src-creds="$SRC_CREDS" \
-              --dest-creds="$DST_CREDS" \
-              "docker://${{ env.REGISTRY_GITHUB }}/${image}:beta" \
-              "docker://${{ env.REGISTRY_DOCKERHUB }}/${image}:beta"
-          done
-
-          # The agent is the one image whose PINNED release tag must still
-          # ship per merge: a running app resolves its agent image as
-          # <prefix>:<its own BUILD_VERSION (release id)> at sandbox spawn,
-          # so a beta user who pulled today needs today's agent release tag
-          # for as long as they run that app build. (Same reason the
-          # teable-sandbox-agent package is exempt from beta cleanup.)
-          skopeo copy --all \
-            --src-creds="$SRC_CREDS" \
-            --dest-creds="$DST_CREDS" \
-            "docker://${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent:${RELEASE_ID}" \
-            "docker://${{ env.REGISTRY_DOCKERHUB }}/teable-sandbox-agent:${RELEASE_ID}"
+  # Nothing ships per merge: there is no public beta channel, so Docker Hub,
+  # Aliyun, and the public release tags are all written only at promote time
+  # (promote-latest-ee). Staging consumers pull the beta-* twin from AWS ECR
+  # (cloud) or the internal teable-staging package (EE).
 
   # ── Cloud distribution chain ───────────────────────────────────────────
 
@@ -832,7 +771,6 @@ jobs:
         merge-manifests-ee,
         merge-agent-manifest,
         sync-ecr,
-        sync-dockerhub,
       ]
     if: always()
     runs-on: ubuntu-latest
@@ -842,14 +780,11 @@ jobs:
       - name: Determine final unified status
         id: status
         run: |
-          # sync-dockerhub legitimately skips on non-develop builds (the
-          # beta channel doesn't move), so "skipped" counts as success.
-          DOCKERHUB="${{ needs.sync-dockerhub.result }}"
           if [ "${{ needs.prepare-release.outputs.mode }}" != "release" ]; then
             echo "status=Rehearsal" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push-cloud.result }}" == "cancelled" ] || [ "${{ needs.build-push-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-agent-manifest.result }}" == "cancelled" ] || [ "${{ needs.sync-ecr.result }}" == "cancelled" ] || [ "$DOCKERHUB" == "cancelled" ]; then
+          elif [ "${{ needs.build-push-cloud.result }}" == "cancelled" ] || [ "${{ needs.build-push-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-agent-manifest.result }}" == "cancelled" ] || [ "${{ needs.sync-ecr.result }}" == "cancelled" ]; then
             echo "status=Cancelled" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push-cloud.result }}" == "success" ] && [ "${{ needs.build-push-ee.result }}" == "success" ] && [ "${{ needs.merge-manifests-ee.result }}" == "success" ] && [ "${{ needs.merge-agent-manifest.result }}" == "success" ] && [ "${{ needs.sync-ecr.result }}" == "success" ] && { [ "$DOCKERHUB" == "success" ] || [ "$DOCKERHUB" == "skipped" ]; }; then
+          elif [ "${{ needs.build-push-cloud.result }}" == "success" ] && [ "${{ needs.build-push-ee.result }}" == "success" ] && [ "${{ needs.merge-manifests-ee.result }}" == "success" ] && [ "${{ needs.merge-agent-manifest.result }}" == "success" ] && [ "${{ needs.sync-ecr.result }}" == "success" ]; then
             echo "status=Released" >> $GITHUB_OUTPUT
           else
             echo "status=Fail" >> $GITHUB_OUTPUT
