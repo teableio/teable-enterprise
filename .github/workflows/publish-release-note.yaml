@@ -173,14 +173,14 @@ jobs:
 
       # ghcr shows a per-version description sourced from the
       # org.opencontainers.image.description annotation on the manifest
-      # index. Keep this value short and point readers to the canonical
-      # GitHub Release, where the complete reviewed note is published.
+      # index. Keep this value short and label the canonical GitHub Release,
+      # where the complete reviewed note is published.
       - name: Stamp ghcr version descriptions
         env:
           DRY: ${{ steps.mode.outputs.dry }}
         run: |
           set -euo pipefail
-          DESC="https://github.com/${OSS_REPO}/releases/tag/${RELEASE_ID}"
+          DESC="Release note: https://github.com/${OSS_REPO}/releases/tag/${RELEASE_ID}"
           for image in teable teable-ee; do
             ref="ghcr.io/teableio/${image}:${RELEASE_ID}"
             if [ "$DRY" = "true" ]; then
