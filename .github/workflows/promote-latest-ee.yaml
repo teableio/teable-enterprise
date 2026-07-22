@@ -6,7 +6,8 @@ name: Promote teable EE to latest
 # Promotion turns a chosen build into the official release:
 #   1. ghcr: stamp release.<id> on the public packages from the staging
 #      source (skip if already stamped — re-promotes work after the beta
-#      twin is reaped), then move latest.
+#      twin is reaped), bake the release-note pointer annotation into the
+#      app index, then derive latest + aliases from it.
 #   2. Docker Hub: copy release.<id> + latest from ghcr (builds publish
 #      nothing to Docker Hub — this promotion is the only writer).
 #   3. Aliyun EE mirror: latest + release.<id>, including the canonical
@@ -35,6 +36,7 @@ env:
   REGISTRY_GITHUB: ghcr.io/teableio
   REGISTRY_DOCKERHUB: docker.io/teableio
   RELEASE_ID: ${{ github.event.client_payload.release_id || inputs.release_id }}
+  OSS_REPO: teableio/teable
 
 jobs:
   promote-latest:
@@ -79,6 +81,24 @@ jobs:
               docker buildx imagetools create \
                 --tag "${REGISTRY_GITHUB}/${RELEASE}:${RELEASE_ID}" \
                 "${REGISTRY_GITHUB}/${STAGING}:${BETA_TAG}"
+            fi
+
+            # Bake the release-note pointer into the app index BEFORE latest,
+            # the aliases, and the registry mirrors are derived from it —
+            # annotating rewrites the index (new digest), and doing it after
+            # the fan-out (as publish-release-note used to) left ghcr's
+            # release tag on a different digest than latest/Docker Hub/
+            # Aliyun. ghcr renders org.opencontainers.image.description as
+            # the version description. Idempotent: re-promotes re-apply the
+            # same annotation and land on the same digest. The URL may not
+            # resolve for the few minutes until publish-release-note creates
+            # the GitHub Release (and never does for a bare promote-ee),
+            # which matches how the old post-hoc stamp behaved.
+            if [ "$RELEASE" = "teable" ]; then
+              docker buildx imagetools create \
+                --annotation "index:org.opencontainers.image.description=Release note: https://github.com/${OSS_REPO}/releases/tag/${RELEASE_ID}" \
+                --tag "${REGISTRY_GITHUB}/${RELEASE}:${RELEASE_ID}" \
+                "${REGISTRY_GITHUB}/${RELEASE}:${RELEASE_ID}"
             fi
 
             docker buildx imagetools create \

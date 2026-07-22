@@ -159,39 +159,11 @@ jobs:
             echo "Created release ${RELEASE_ID}"
           fi
 
-      - name: Login to GitHub container registry
-        if: steps.mode.outputs.dry == 'false'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.PACKAGES_KEY }}
-
-      - name: Set up Docker Buildx
-        if: steps.mode.outputs.dry == 'false'
-        uses: docker/setup-buildx-action@v3
-
-      # ghcr shows a per-version description sourced from the
-      # org.opencontainers.image.description annotation on the manifest
-      # index. Keep this value short and label the canonical GitHub Release,
-      # where the complete reviewed note is published.
-      - name: Stamp ghcr version descriptions
-        env:
-          DRY: ${{ steps.mode.outputs.dry }}
-        run: |
-          set -euo pipefail
-          DESC="Release note: https://github.com/${OSS_REPO}/releases/tag/${RELEASE_ID}"
-          for image in teable teable-ee; do
-            ref="ghcr.io/teableio/${image}:${RELEASE_ID}"
-            if [ "$DRY" = "true" ]; then
-              echo "[dry-run] would re-stamp ${ref} with description: ${DESC}"
-              continue
-            fi
-            docker buildx imagetools create \
-              --annotation "index:org.opencontainers.image.description=${DESC}" \
-              --tag "${ref}" \
-              "${ref}"
-          done
+      # The ghcr version description (org.opencontainers.image.description
+      # pointing at the GitHub Release) is baked into the index by
+      # promote-latest-ee BEFORE latest/aliases/mirrors are derived from it.
+      # Re-annotating here after the fan-out would fork the release tag onto
+      # a new digest and desync it from latest and the mirrors.
 
       - name: Update Docker Hub What's New
         env:
