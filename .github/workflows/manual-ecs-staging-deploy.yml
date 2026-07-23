@@ -133,7 +133,7 @@ jobs:
   # patched static set to the assets bucket, invalidate the CDN edge, and
   # push the patched image back under the SAME staging tag — the deploy flow
   # keeps referencing beta-<id> exactly as before; the patch is invisible to
-  # everything downstream. Idempotency comes from the io.teable.asset-prefix
+  # everything downstream. Idempotency comes from the teable.asset-prefix
   # image label, not from tag names. ECR-only (this workflow has no ghcr
   # credentials), which means the in-place push makes ECR's beta-<id> diverge
   # from ghcr's — ghcr stays the authoritative UNPATCHED artifact, and the
@@ -169,7 +169,7 @@ jobs:
         run: |
           set -euo pipefail
           docker pull "${ECR_IMAGE}:${STAGING_TAG}"
-          CURRENT=$(docker inspect --format '{{index .Config.Labels "io.teable.asset-prefix"}}' \
+          CURRENT=$(docker inspect --format '{{index .Config.Labels "teable.asset-prefix"}}' \
             "${ECR_IMAGE}:${STAGING_TAG}" 2>/dev/null || echo "")
           if [ "$CURRENT" = "$CDN_ORIGIN" ]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
@@ -200,7 +200,7 @@ jobs:
           ARG CDN_ORIGIN
           RUN node /app/scripts/patch-asset-prefix.mjs "${CDN_ORIGIN}" /app
           ENV NEXT_BUILD_ENV_ASSET_PREFIX=${CDN_ORIGIN}
-          LABEL io.teable.asset-prefix=${CDN_ORIGIN}
+          LABEL teable.asset-prefix=${CDN_ORIGIN}
           EOF
           echo "patched=true" >> "$GITHUB_OUTPUT"
 
