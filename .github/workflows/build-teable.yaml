@@ -846,6 +846,11 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-west-2
 
+      # arm64 ships from ghcr ONLY. ECR deliberately receives just the amd64
+      # variant (a plain image manifest, not an index): the ECS fleet is
+      # amd64, and a single-arch ECR tag keeps the staging CDN patch's
+      # in-place tag overwrite (manual-ecs-staging-deploy) trivially safe —
+      # no multi-arch index for it to clobber.
       - name: Sync images to ECR
         env:
           SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
@@ -858,7 +863,7 @@ jobs:
           IMAGES=("teable-cloud" "teable-sandbox-cloud")
 
           for image in "${IMAGES[@]}"; do
-            skopeo copy --all \
+            skopeo copy --override-arch amd64 --override-os linux \
               --src-creds="$SRC_CREDS" \
               --dest-creds="AWS:${ECR_PASSWORD}" \
               "docker://${{ env.REGISTRY_GITHUB }}/${image}:${BETA_TAG}" \
