@@ -258,6 +258,28 @@ jobs:
               --exclude "*" --include "*.${ext_type%%:*}" \
               --content-type "${ext_type#*:}"
           done
+
+          # Outcome check, not extension allowlist: NOTHING we upload may be
+          # stored as octet-stream. A future build introducing an extension
+          # the CLI cannot guess fails HERE, loudly, instead of silently
+          # degrading on the CDN — add a content-type pass above and re-run
+          # (safe: the image is neither pushed nor deployed yet, re-upload
+          # simply overwrites). One head-object per distinct extension.
+          for ext in $(find ./static-out -type f | sed 's/.*\.//' | sort -u); do
+            # -print -quit instead of `| head -1`: head closing the pipe
+            # early SIGPIPEs find, which pipefail turns into a job failure.
+            sample=$(find ./static-out -type f -name "*.${ext}" -print -quit)
+            key="_next/static/${sample#./static-out/}"
+            ct=$(aws s3api head-object --bucket "${ASSET_BUCKET}" --key "$key" \
+              --query ContentType --output text)
+            echo "content-type check: .${ext} -> ${ct} (${key})"
+            case "$ct" in
+              *octet-stream*)
+                echo "::error::.${ext} files landed as ${ct} — add an explicit --content-type pass for this extension"
+                exit 1
+                ;;
+            esac
+          done
           echo "uploaded $(find ./static-out -type f | wc -l) files"
 
       - name: Invalidate CloudFront runtime chunks and wait
