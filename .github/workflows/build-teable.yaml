@@ -567,34 +567,9 @@ jobs:
         if: matrix.file == 'Dockerfile'
         run: node ./scripts/generate-docker-contexts.mjs
 
-      # No Sealos (CN) upload here: that bucket is owned by the CN deploy's
-      # patch-cdn job — build-time uploads overwrite patched same-name chunks
-      # (the 2026-07-23 staging incident). The S3 upload below has the same
-      # hazard and is slated for removal.
-      - name: Prepare upload assets config
-        if: matrix.file == 'Dockerfile' && matrix.platform == 'linux/amd64'
-        id: upload_assets
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        run: |
-          node <<'EOF'
-          const fs = require('node:fs');
-
-          const uploadAssetsList = [
-            [
-              'aws-objectstorage',
-              'https://s3.us-west-2.amazonaws.com',
-              process.env.AWS_ACCESS_KEY_ID,
-              process.env.AWS_SECRET_ACCESS_KEY,
-              'teable-next-asset',
-            ],
-          ];
-
-          const encoded = Buffer.from(JSON.stringify(uploadAssetsList)).toString('base64');
-          process.stdout.write(`::add-mask::${encoded}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `list_b64=${encoded}\n`);
-          EOF
+      # No build-time asset uploads: both CDN buckets are owned by the deploy
+      # patch-cdn jobs. Build-time uploads overwrite patched same-name chunks
+      # (the 2026-07-23 staging incident).
 
       # Freeing disk costs 1-4 min of pure rm -rf (measured variance); run it
       # in the background so it overlaps the buildx setup and cache import
@@ -642,7 +617,6 @@ jobs:
             SENTRY_AUTH_TOKEN=${{ secrets.SENTRY_AUTH_TOKEN }}
             SENTRY_SOURCEMAPS_UPLOAD=${{ matrix.platform == 'linux/amd64' }}
             NEXT_BUILD_ENV_ASSET_PREFIX=${{ matrix.platform == 'linux/amd64' && vars.NEXT_BUILD_ENV_ASSET_PREFIX || '' }}
-            UPLOAD_ASSETS_LIST_B64=${{ steps.upload_assets.outputs.list_b64 }}
             BUILD_VERSION=${{ needs.prepare-release.outputs.release_id }}
             FRONTEND_RELEASE=${{ needs.prepare-release.outputs.release_id }}
             GIT_COMMIT_SHA=${{ needs.prepare-release.outputs.source_sha }}
