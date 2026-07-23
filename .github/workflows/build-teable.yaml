@@ -75,6 +75,7 @@ jobs:
       ee_matrix_json: ${{ steps.release.outputs.ee_matrix_json }}
       ee_target_matrix_json: ${{ steps.release.outputs.ee_target_matrix_json }}
       cloud_matrix_json: ${{ steps.release.outputs.cloud_matrix_json }}
+      cloud_target_matrix_json: ${{ steps.release.outputs.cloud_target_matrix_json }}
       release_id: ${{ steps.release.outputs.release_id }}
       release_timestamp: ${{ steps.release.outputs.release_timestamp }}
       release_sequence: ${{ steps.release.outputs.release_sequence }}
@@ -122,7 +123,8 @@ jobs:
           # place. release_image/alias_image are where promotion publishes.
           EE_TARGET_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-staging","release_image":"teable","alias_image":"teable-ee"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","release_image":"teable-sandbox","alias_image":"teable-sandbox-ee"}]}'
           EE_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-staging","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"app","file":"Dockerfile","image":"teable-staging","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"}]}'
-          CLOUD_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"}]}'
+          CLOUD_TARGET_MATRIX_JSON='{"include":[{"target":"app","image":"teable-cloud"},{"target":"sandbox","image":"teable-sandbox-cloud"}]}'
+          CLOUD_MATRIX_JSON='{"include":[{"target":"app","file":"Dockerfile","image":"teable-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"app","file":"Dockerfile","image":"teable-cloud","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud","platform":"linux/amd64","platform_key":"linux-amd64","runner":"ubuntu-latest"},{"target":"sandbox","file":"Dockerfile.sandbox","image":"teable-sandbox-cloud","platform":"linux/arm64","platform_key":"linux-arm64","runner":"ubuntu-24.04-arm"}]}'
 
           if [ -n "$INPUT_RELEASE_ID" ]; then
             RELEASE_ID="$INPUT_RELEASE_ID"
@@ -162,6 +164,7 @@ jobs:
             echo "ee_target_matrix_json=$EE_TARGET_MATRIX_JSON"
             echo "ee_matrix_json=$EE_MATRIX_JSON"
             echo "cloud_matrix_json=$CLOUD_MATRIX_JSON"
+            echo "cloud_target_matrix_json=$CLOUD_TARGET_MATRIX_JSON"
             echo "release_id=$RELEASE_ID"
             echo "release_timestamp=$RELEASE_TIMESTAMP"
             echo "release_sequence=$RELEASE_SEQUENCE"
@@ -516,9 +519,16 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # Cloud images are amd64-only, so they push their tags directly — no digest
-  # merge needed. Edition-specific bits: CLOUD edition flag, Sentry sourcemap
-  # upload, CDN asset prefix, and the Next static asset upload config.
+  # Cloud images are multi-arch (amd64 + arm64, native runners): each leg
+  # pushes by digest and merge-manifests-cloud stitches the beta manifest,
+  # mirroring the EE flow. Edition-specific bits: CLOUD edition flag, Sentry
+  # sourcemap upload, CDN asset prefix, and the Next static asset upload
+  # config. Both legs keep IDENTICAL build args — including the sourcemap and
+  # asset uploads — because the frontend is compiled per-leg and content
+  # hashes are not guaranteed to match across arches: if only amd64 uploaded,
+  # an arm64 image whose chunks hashed differently would reference CDN assets
+  # that were never uploaded. Re-uploading is idempotent (content-hashed S3
+  # keys, checksum-deduped Sentry artifacts), so the duplicate is harmless.
   # Deliberately NOT gated on ensure-agent-base: the cloud images don't
   # consume the agent base, and in the old two-workflow world a base failure
   # never stopped the cloud images from being built and pushed (only the
@@ -548,11 +558,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.18.0
-
-      - name: Compose image tags
-        id: tags
-        run: |
-          echo "list=${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}:${{ needs.prepare-release.outputs.beta_tag }}" >> "$GITHUB_OUTPUT"
 
       - name: Prepare generated Docker contexts
         if: matrix.file == 'Dockerfile'
@@ -623,14 +628,13 @@ jobs:
             echo 'CACHE_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
+      - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: dockers/teable/${{ matrix.file }}
           platforms: ${{ matrix.platform }}
-          tags: ${{ steps.tags.outputs.list }}
           build-args: |
             ENABLE_CSP=false
             NEXT_BUILD_ENV_EDITION=CLOUD
@@ -643,12 +647,27 @@ jobs:
             BUILD_VERSION=${{ needs.prepare-release.outputs.release_id }}
             FRONTEND_RELEASE=${{ needs.prepare-release.outputs.release_id }}
             GIT_COMMIT_SHA=${{ needs.prepare-release.outputs.source_sha }}
-          push: true
+          outputs: type=image,name=${{ env.REGISTRY_GITHUB }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           provenance: false
           # Import-only scoped deps cache — the deps stages are edition-
           # independent (the edition build-arg is consumed after them), so the
           # same cache serves both editions. Empty for the sandbox leg.
           cache-from: ${{ steps.depscache.outputs.list }}
+
+      - name: Export digest artifact
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.platform_key }}.digest"
+
+      # The cloud- prefix keeps these artifacts out of the EE merge's
+      # digests-<target>-linux-* download pattern (targets overlap).
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-cloud-${{ matrix.target }}-${{ matrix.platform_key }}
+          path: /tmp/digests/${{ matrix.platform_key }}.digest
+          if-no-files-found: error
+          retention-days: 1
 
   # Canary for the deploy-time CDN patch: dry-run this repo's
   # .github/scripts/patch-asset-prefix.mjs against the freshly built app
@@ -658,9 +677,14 @@ jobs:
   # Deliberately NOT part of determine-status: a failure here never blocks a
   # release of the current, already-patchable format. Read-only: touches no
   # registry tags and no buckets.
+  #
+  # Gated on merge-manifests-cloud (not build-push-cloud): the cloud legs
+  # push by digest, so the beta tag this job pulls only exists once the
+  # manifest is stitched. The amd64 runner resolves the amd64 variant from
+  # the manifest list — the CDN-fronted one the deploy patch targets.
   verify-cdn-patchability:
-    needs: [prepare-release, build-push-cloud]
-    if: needs.build-push-cloud.result == 'success'
+    needs: [prepare-release, merge-manifests-cloud]
+    if: needs.merge-manifests-cloud.result == 'success'
     runs-on: ubuntu-latest
     steps:
       # This repo's own checkout — the patch script is deploy policy and
@@ -752,9 +776,58 @@ jobs:
 
   # ── Cloud distribution chain ───────────────────────────────────────────
 
-  sync-ecr:
+  merge-manifests-cloud:
     needs: [prepare-release, build-push-cloud]
-    if: needs.prepare-release.outputs.mode == 'release' && needs.build-push-cloud.result == 'success'
+    if: needs.build-push-cloud.result == 'success'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.prepare-release.outputs.cloud_target_matrix_json) }}
+
+    steps:
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Download digest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests/cloud-${{ matrix.target }}
+          pattern: digests-cloud-${{ matrix.target }}-linux-*
+          merge-multiple: true
+
+      # Cloud stages in place (no public/staging package split), so the
+      # pinned beta tag lands directly on the cloud package.
+      - name: Create beta manifest
+        env:
+          CLOUD_IMAGE: ${{ env.REGISTRY_GITHUB }}/${{ matrix.image }}
+          BETA_TAG: ${{ needs.prepare-release.outputs.beta_tag }}
+        run: |
+          mapfile -t DIGEST_FILES < <(find "/tmp/digests/cloud-${{ matrix.target }}" -type f -name '*.digest' | sort)
+
+          if [ "${#DIGEST_FILES[@]}" -eq 0 ]; then
+            echo "No digest artifacts found for cloud ${{ matrix.target }}" >&2
+            exit 1
+          fi
+
+          SOURCES=()
+          for digest_file in "${DIGEST_FILES[@]}"; do
+            digest="$(tr -d '\n' < "$digest_file")"
+            SOURCES+=("${CLOUD_IMAGE}@${digest}")
+          done
+
+          docker buildx imagetools create \
+            --tag "${CLOUD_IMAGE}:${BETA_TAG}" \
+            "${SOURCES[@]}"
+
+  sync-ecr:
+    needs: [prepare-release, merge-manifests-cloud]
+    if: needs.prepare-release.outputs.mode == 'release' && needs.merge-manifests-cloud.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Install skopeo
@@ -803,6 +876,7 @@ jobs:
         prepare-release,
         build-push-cloud,
         build-push-ee,
+        merge-manifests-cloud,
         merge-manifests-ee,
         merge-agent-manifest,
         sync-ecr,
@@ -817,9 +891,9 @@ jobs:
         run: |
           if [ "${{ needs.prepare-release.outputs.mode }}" != "release" ]; then
             echo "status=Rehearsal" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push-cloud.result }}" == "cancelled" ] || [ "${{ needs.build-push-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-agent-manifest.result }}" == "cancelled" ] || [ "${{ needs.sync-ecr.result }}" == "cancelled" ]; then
+          elif [ "${{ needs.build-push-cloud.result }}" == "cancelled" ] || [ "${{ needs.build-push-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests-cloud.result }}" == "cancelled" ] || [ "${{ needs.merge-manifests-ee.result }}" == "cancelled" ] || [ "${{ needs.merge-agent-manifest.result }}" == "cancelled" ] || [ "${{ needs.sync-ecr.result }}" == "cancelled" ]; then
             echo "status=Cancelled" >> $GITHUB_OUTPUT
-          elif [ "${{ needs.build-push-cloud.result }}" == "success" ] && [ "${{ needs.build-push-ee.result }}" == "success" ] && [ "${{ needs.merge-manifests-ee.result }}" == "success" ] && [ "${{ needs.merge-agent-manifest.result }}" == "success" ] && [ "${{ needs.sync-ecr.result }}" == "success" ]; then
+          elif [ "${{ needs.build-push-cloud.result }}" == "success" ] && [ "${{ needs.build-push-ee.result }}" == "success" ] && [ "${{ needs.merge-manifests-cloud.result }}" == "success" ] && [ "${{ needs.merge-manifests-ee.result }}" == "success" ] && [ "${{ needs.merge-agent-manifest.result }}" == "success" ] && [ "${{ needs.sync-ecr.result }}" == "success" ]; then
             echo "status=Released" >> $GITHUB_OUTPUT
           else
             echo "status=Fail" >> $GITHUB_OUTPUT
