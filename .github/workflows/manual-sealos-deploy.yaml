@@ -118,6 +118,12 @@ on:
       # Used by the preheat-sandbox-agent job — same contract as above.
       INFRA_TEABLE_CN_PREHEAT_TOKEN:
         required: false
+      # Used by the patch-cdn job's asset upload to the Sealos bucket —
+      # same caller contract as above.
+      SEALOS_OBJECTSTORAGE_ACCESS_KEY:
+        required: false
+      SEALOS_OBJECTSTORAGE_SECRET_KEY:
+        required: false
 
 jobs:
   # teable.cn deploys official release.<id> tags from Aliyun, but Aliyun
@@ -203,9 +209,121 @@ jobs:
       best_effort: true
     secrets: inherit
 
+  # CN twin of the staging patch-cdn: patch Aliyun's copy in place with the
+  # CN CDN origin, upload the patched static to the Sealos bucket, push back
+  # under the same tag (ghcr stays clean). Caveats: first cutover needs a
+  # one-time manual Aliyun CDN purge; an AI launch's sync-aliyun overwrites
+  # the patch — re-run this deploy to re-patch.
+  patch-cdn:
+    name: Patch image for CN CDN
+    needs: ensure-aliyun
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      CDN_ORIGIN: https://sss.teable.cn
+      SEALOS_S3_ENDPOINT: https://objectstorageapi.hzh.sealos.run
+      ASSET_BUCKET: 38puz7wo-teable-public
+      ALIYUN_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud
+
+    steps:
+      - name: Login to Aliyun container registry
+        uses: docker/login-action@v3
+        with:
+          registry: registry.cn-shenzhen.aliyuncs.com
+          username: ${{ vars.ALI_DOCKER_USERNAME }}
+          password: ${{ secrets.ALI_DOCKER_PASSWORD }}
+
+      - name: Check if the image is already patched (redeploy fast-path)
+        id: existing
+        run: |
+          set -euo pipefail
+          docker pull "${ALIYUN_IMAGE}:${IMAGE_TAG}"
+          CURRENT=$(docker inspect --format '{{index .Config.Labels "teable.asset-prefix"}}' \
+            "${ALIYUN_IMAGE}:${IMAGE_TAG}" 2>/dev/null || echo "")
+          if [ "$CURRENT" = "$CDN_ORIGIN" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "✅ ${IMAGE_TAG} already carries the ${CDN_ORIGIN} patch; assets are append-only, skipping"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout deploy scripts
+        if: steps.existing.outputs.exists == 'false'
+        uses: actions/checkout@v4
+
+      - name: Build patch layer
+        if: steps.existing.outputs.exists == 'false'
+        id: patch
+        run: |
+          set -euo pipefail
+
+          # Unrecognized bundle format → deploy untouched, don't block.
+          if ! docker run --rm --entrypoint node -e PATCH_DRY_RUN=1 \
+              -v "$PWD/.github/scripts/patch-asset-prefix.mjs:/tmp/patch-asset-prefix.mjs:ro" \
+              "${ALIYUN_IMAGE}:${IMAGE_TAG}" /tmp/patch-asset-prefix.mjs "${CDN_ORIGIN}" /app; then
+            echo "::warning::${IMAGE_TAG} bundle format not recognized by the patch script; deploying it untouched"
+            echo "patched=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          docker build -t app-cdn-variant \
+            --build-arg BASE_IMAGE="${ALIYUN_IMAGE}:${IMAGE_TAG}" \
+            --build-arg CDN_ORIGIN="${CDN_ORIGIN}" \
+            -f - .github/scripts <<'EOF'
+          ARG BASE_IMAGE
+          FROM ${BASE_IMAGE}
+          ARG CDN_ORIGIN
+          RUN --mount=type=bind,source=patch-asset-prefix.mjs,target=/tmp/patch-asset-prefix.mjs \
+              node /tmp/patch-asset-prefix.mjs "${CDN_ORIGIN}" /app
+          ENV NEXT_BUILD_ENV_ASSET_PREFIX=${CDN_ORIGIN}
+          LABEL teable.asset-prefix=${CDN_ORIGIN}
+          EOF
+          echo "patched=true" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-check the patched image
+        if: steps.existing.outputs.exists == 'false' && steps.patch.outputs.patched == 'true'
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh app-cdn-variant -c '
+            set -e
+            SAMPLE=$(ls /app/enterprise/app-ee/.next/static/chunks/turbopack-*.js | head -1)
+            grep -q "'"${CDN_ORIGIN}"'/_next/" "$SAMPLE"
+            [ "$NEXT_BUILD_ENV_ASSET_PREFIX" = "'"${CDN_ORIGIN}"'" ]
+            echo "smoke OK: $SAMPLE"
+          '
+
+      - name: Upload patched static assets to the Sealos bucket (append-only)
+        if: steps.existing.outputs.exists == 'false' && steps.patch.outputs.patched == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.SEALOS_OBJECTSTORAGE_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SEALOS_OBJECTSTORAGE_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          # MinIO-based endpoint may reject aws cli v2's default checksums.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          set -euo pipefail
+          CID=$(docker create app-cdn-variant)
+          docker cp "$CID:/app/enterprise/app-ee/.next/static" ./static-out
+          docker rm "$CID" >/dev/null
+          # NEVER --delete: chunks of other builds must survive.
+          # Fonts land as octet-stream (CLI can't guess those extensions) —
+          # accepted: browsers sniff font magic bytes, nothing breaks.
+          aws s3 cp ./static-out "s3://${ASSET_BUCKET}/_next/static/" \
+            --recursive --only-show-errors \
+            --endpoint-url "${SEALOS_S3_ENDPOINT}"
+          echo "uploaded $(find ./static-out -type f | wc -l) files"
+
+      - name: Push patched image back under the same release tag
+        if: steps.existing.outputs.exists == 'false' && steps.patch.outputs.patched == 'true'
+        run: |
+          set -euo pipefail
+          docker tag app-cdn-variant "${ALIYUN_IMAGE}:${IMAGE_TAG}"
+          docker push "${ALIYUN_IMAGE}:${IMAGE_TAG}"
+
   deploy:
     name: Deploy to Sealos
-    needs: ensure-aliyun
+    needs: [ensure-aliyun, patch-cdn]
     runs-on: ubuntu-latest
     outputs:
       start_time: ${{ steps.start_time.outputs.start }}
