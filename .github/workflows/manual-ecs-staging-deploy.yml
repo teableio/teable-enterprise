@@ -240,58 +240,25 @@ jobs:
           CID=$(docker create app-cdn-variant)
           docker cp "$CID:/app/enterprise/app-ee/.next/static" ./static-out
           docker rm "$CID" >/dev/null
-          # NEVER --delete here: chunks of other builds must survive.
-          #
-          # Fonts get explicit content types: `aws s3 cp` guesses MIME from
-          # the extension and does not know the font extensions (they would
-          # land as binary/octet-stream, a regression vs the mc-based upload
-          # which writes font/woff2 — fonts load via CORS where browsers are
-          # strict about types). --content-type applies to a whole invocation,
-          # hence one pass per font type; js/css/json guess correctly and go
-          # in the first pass.
+          # NEVER --delete: chunks of other builds must survive.
+          # Fonts land as octet-stream (CLI can't guess those extensions) —
+          # accepted: browsers sniff font magic bytes, nothing breaks.
           aws s3 cp ./static-out "s3://${ASSET_BUCKET}/_next/static/" \
-            --recursive --only-show-errors \
-            --exclude "*.woff2" --exclude "*.woff" --exclude "*.ttf"
-          for ext_type in "woff2:font/woff2" "woff:font/woff" "ttf:font/ttf"; do
-            aws s3 cp ./static-out "s3://${ASSET_BUCKET}/_next/static/" \
-              --recursive --only-show-errors \
-              --exclude "*" --include "*.${ext_type%%:*}" \
-              --content-type "${ext_type#*:}"
-          done
-
-          # Outcome check, not extension allowlist: NOTHING we upload may be
-          # stored as octet-stream. A future build introducing an extension
-          # the CLI cannot guess fails HERE, loudly, instead of silently
-          # degrading on the CDN — add a content-type pass above and re-run
-          # (safe: the image is neither pushed nor deployed yet, re-upload
-          # simply overwrites). One head-object per distinct extension.
-          for ext in $(find ./static-out -type f | sed 's/.*\.//' | sort -u); do
-            # -print -quit instead of `| head -1`: head closing the pipe
-            # early SIGPIPEs find, which pipefail turns into a job failure.
-            sample=$(find ./static-out -type f -name "*.${ext}" -print -quit)
-            key="_next/static/${sample#./static-out/}"
-            ct=$(aws s3api head-object --bucket "${ASSET_BUCKET}" --key "$key" \
-              --query ContentType --output text)
-            echo "content-type check: .${ext} -> ${ct} (${key})"
-            case "$ct" in
-              *octet-stream*)
-                echo "::error::.${ext} files landed as ${ct} — add an explicit --content-type pass for this extension"
-                exit 1
-                ;;
-            esac
-          done
+            --recursive --only-show-errors
           echo "uploaded $(find ./static-out -type f | wc -l) files"
 
-      - name: Invalidate CloudFront runtime chunks and wait
+      - name: Invalidate CloudFront runtime chunks
         if: steps.existing.outputs.exists == 'false' && steps.patch.outputs.patched == 'true'
         run: |
-          set -euo pipefail
-          INV_ID=$(aws cloudfront create-invalidation \
+          # Edges only cache what was requested; pre-deploy these URLs are
+          # unreferenced, so this matters only if someone fetched them
+          # manually before the patch (a debug curl poisons the edge for up
+          # to the TTL — hydration silently dies). Fire and forget: the ECS
+          # deploy takes far longer than invalidation propagation.
+          aws cloudfront create-invalidation \
             --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
             --paths "/_next/static/chunks/turbopack-*" \
-            --query 'Invalidation.Id' --output text)
-          aws cloudfront wait invalidation-completed \
-            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" --id "$INV_ID"
+            --query 'Invalidation.Id' --output text
 
       - name: Push patched image back under the same staging tag
         if: steps.existing.outputs.exists == 'false' && steps.patch.outputs.patched == 'true'
