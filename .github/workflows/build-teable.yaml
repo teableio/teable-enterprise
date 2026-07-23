@@ -567,14 +567,16 @@ jobs:
         if: matrix.file == 'Dockerfile'
         run: node ./scripts/generate-docker-contexts.mjs
 
+      # No Sealos (CN) upload here: that bucket is owned by the CN deploy's
+      # patch-cdn job — build-time uploads overwrite patched same-name chunks
+      # (the 2026-07-23 staging incident). The S3 upload below has the same
+      # hazard and is slated for removal.
       - name: Prepare upload assets config
         if: matrix.file == 'Dockerfile' && matrix.platform == 'linux/amd64'
         id: upload_assets
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          SEALOS_OBJECTSTORAGE_ACCESS_KEY: ${{ secrets.SEALOS_OBJECTSTORAGE_ACCESS_KEY }}
-          SEALOS_OBJECTSTORAGE_SECRET_KEY: ${{ secrets.SEALOS_OBJECTSTORAGE_SECRET_KEY }}
         run: |
           node <<'EOF'
           const fs = require('node:fs');
@@ -586,13 +588,6 @@ jobs:
               process.env.AWS_ACCESS_KEY_ID,
               process.env.AWS_SECRET_ACCESS_KEY,
               'teable-next-asset',
-            ],
-            [
-              'sealos-objectstorage',
-              'https://objectstorageapi.hzh.sealos.run',
-              process.env.SEALOS_OBJECTSTORAGE_ACCESS_KEY,
-              process.env.SEALOS_OBJECTSTORAGE_SECRET_KEY,
-              '38puz7wo-teable-public',
             ],
           ];
 
