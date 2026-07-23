@@ -142,9 +142,7 @@ jobs:
   # share the production bucket: keys are content-hashed per build so nothing
   # referenced by a released build is ever touched, and the upload is
   # append-only (never --delete). Images whose bundle format the script does
-  # not recognize are deployed untouched. Multi-arch: only the amd64 variant
-  # is patched (arm64 is the self-contained no-CDN variant) — the push step
-  # re-stitches the index so the arm64 leg survives the in-place update.
+  # not recognize are deployed untouched.
   patch-cdn:
     name: Patch staging image for CDN
     needs: prepare
@@ -266,37 +264,8 @@ jobs:
         if: steps.existing.outputs.exists == 'false' && steps.patch.outputs.patched == 'true'
         run: |
           set -euo pipefail
-
-          # The staging tag is a multi-arch index: amd64 is the CDN-fronted
-          # variant this job patches; arm64 is the self-contained variant (no
-          # prefix baked, never patched — it serves assets from the
-          # container). A plain push of the runner-built amd64 image would
-          # clobber the index and strand arm64 consumers of the tag, so
-          # capture the arm64 digest first and stitch it back in.
-          ARM64_DIGEST=$(docker buildx imagetools inspect --raw "${ECR_IMAGE}:${STAGING_TAG}" \
-            | jq -r '[.manifests[]? | select(.platform.architecture=="arm64" and .platform.os=="linux")][0].digest // empty')
-
-          if [ -z "$ARM64_DIGEST" ]; then
-            # Single-arch tag from before the multi-arch split: overwrite in
-            # place, exactly the old behavior.
-            docker tag app-cdn-variant "${ECR_IMAGE}:${STAGING_TAG}"
-            docker push "${ECR_IMAGE}:${STAGING_TAG}"
-            exit 0
-          fi
-
-          # The patched amd64 needs a registry ref before imagetools can
-          # stitch it into an index. The helper tag is KEPT, not deleted: it
-          # pins the child manifest so an untagged-image cleanup can never
-          # hollow out the index, and its beta- prefix keeps it in the same
-          # cleanup channel as the tag it belongs to. Exact-match tag
-          # resolution in the deploy workflows never picks it up.
-          docker tag app-cdn-variant "${ECR_IMAGE}:${STAGING_TAG}-cdn-amd64"
-          docker push "${ECR_IMAGE}:${STAGING_TAG}-cdn-amd64"
-
-          docker buildx imagetools create \
-            --tag "${ECR_IMAGE}:${STAGING_TAG}" \
-            "${ECR_IMAGE}:${STAGING_TAG}-cdn-amd64" \
-            "${ECR_IMAGE}@${ARM64_DIGEST}"
+          docker tag app-cdn-variant "${ECR_IMAGE}:${STAGING_TAG}"
+          docker push "${ECR_IMAGE}:${STAGING_TAG}"
 
   deploy-sandbox:
     name: Deploy Sandbox to Staging ECS
