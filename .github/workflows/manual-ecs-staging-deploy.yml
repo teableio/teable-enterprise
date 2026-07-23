@@ -241,11 +241,23 @@ jobs:
           docker cp "$CID:/app/enterprise/app-ee/.next/static" ./static-out
           docker rm "$CID" >/dev/null
           # NEVER --delete here: chunks of other builds must survive.
+          #
+          # Fonts get explicit content types: `aws s3 cp` guesses MIME from
+          # the extension and does not know the font extensions (they would
+          # land as binary/octet-stream, a regression vs the mc-based upload
+          # which writes font/woff2 — fonts load via CORS where browsers are
+          # strict about types). --content-type applies to a whole invocation,
+          # hence one pass per font type; js/css/json guess correctly and go
+          # in the first pass.
           aws s3 cp ./static-out "s3://${ASSET_BUCKET}/_next/static/" \
-            --recursive --exclude "*.woff2" --only-show-errors
-          aws s3 cp ./static-out "s3://${ASSET_BUCKET}/_next/static/" \
-            --recursive --exclude "*" --include "*.woff2" \
-            --content-type font/woff2 --only-show-errors
+            --recursive --only-show-errors \
+            --exclude "*.woff2" --exclude "*.woff" --exclude "*.ttf"
+          for ext_type in "woff2:font/woff2" "woff:font/woff" "ttf:font/ttf"; do
+            aws s3 cp ./static-out "s3://${ASSET_BUCKET}/_next/static/" \
+              --recursive --only-show-errors \
+              --exclude "*" --include "*.${ext_type%%:*}" \
+              --content-type "${ext_type#*:}"
+          done
           echo "uploaded $(find ./static-out -type f | wc -l) files"
 
       - name: Invalidate CloudFront runtime chunks and wait
