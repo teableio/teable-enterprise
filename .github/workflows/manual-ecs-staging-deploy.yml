@@ -128,6 +128,145 @@ jobs:
           echo "staging_tag=${STAGING_TAG}" >> "$GITHUB_OUTPUT"
           echo "Deploying registry tag: ${STAGING_TAG}"
 
+  # Staging rehearsal of the CDN release flow: patch the staging image with
+  # the CDN origin (.github/scripts/patch-asset-prefix.mjs, bind-mounted into
+  # the build — nothing baked into product images), upload the patched static
+  # set to the assets bucket, invalidate the CDN edge, and push the patched
+  # image back under the SAME staging tag — the deploy flow keeps referencing
+  # beta-<id> exactly as before; the patch is invisible to everything
+  # downstream. Idempotency comes from the teable.asset-prefix image label,
+  # not from tag names. ECR-only (this workflow has no ghcr credentials),
+  # which means the in-place push makes ECR's beta-<id> diverge from ghcr's —
+  # ghcr stays the authoritative UNPATCHED artifact, and the production
+  # stamp-release sources release tags from ghcr for that reason. Assets
+  # share the production bucket: keys are content-hashed per build so nothing
+  # referenced by a released build is ever touched, and the upload is
+  # append-only (never --delete). Images whose bundle format the script does
+  # not recognize are deployed untouched.
+  patch-cdn:
+    name: Patch staging image for CDN
+    needs: prepare
+    runs-on: ubuntu-latest
+    env:
+      STAGING_TAG: ${{ needs.prepare.outputs.staging_tag }}
+      CDN_ORIGIN: https://sss.teable.ai
+      ASSET_BUCKET: teable-next-asset
+      CLOUDFRONT_DISTRIBUTION_ID: E3PW5TFEINWLOJ
+      ECR_IMAGE: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-cloud
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Login to AWS ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Check if the staging image is already patched (redeploy fast-path)
+        id: existing
+        run: |
+          set -euo pipefail
+          docker pull "${ECR_IMAGE}:${STAGING_TAG}"
+          CURRENT=$(docker inspect --format '{{index .Config.Labels "teable.asset-prefix"}}' \
+            "${ECR_IMAGE}:${STAGING_TAG}" 2>/dev/null || echo "")
+          if [ "$CURRENT" = "$CDN_ORIGIN" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "✅ ${STAGING_TAG} already carries the ${CDN_ORIGIN} patch; assets are append-only, skipping"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout deploy scripts
+        if: steps.existing.outputs.exists == 'false'
+        uses: actions/checkout@v4
+
+      - name: Build patch layer
+        if: steps.existing.outputs.exists == 'false'
+        id: patch
+        run: |
+          set -euo pipefail
+
+          # Pre-flight dry-run with the mounted script: an image whose bundle
+          # format the script does not recognize (pre-Turbopack build, or a
+          # Next upgrade whose pattern is not in the list yet — see the
+          # verify-cdn-patchability canary) is deployed untouched instead of
+          # blocking the staging deploy.
+          if ! docker run --rm --entrypoint node -e PATCH_DRY_RUN=1 \
+              -v "$PWD/.github/scripts/patch-asset-prefix.mjs:/tmp/patch-asset-prefix.mjs:ro" \
+              "${ECR_IMAGE}:${STAGING_TAG}" /tmp/patch-asset-prefix.mjs "${CDN_ORIGIN}" /app; then
+            echo "::warning::${STAGING_TAG} bundle format not recognized by the patch script; deploying it untouched"
+            echo "patched=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Patching is deploy policy: the script and this 4-line wrapper
+          # both live in this repo, and the script is bind-mounted into the
+          # build — nothing is baked into product images, so ANY image is
+          # patchable. The teable.asset-prefix label written here is the same
+          # contract the idempotency check above reads.
+          docker build -t app-cdn-variant \
+            --build-arg BASE_IMAGE="${ECR_IMAGE}:${STAGING_TAG}" \
+            --build-arg CDN_ORIGIN="${CDN_ORIGIN}" \
+            -f - .github/scripts <<'EOF'
+          ARG BASE_IMAGE
+          FROM ${BASE_IMAGE}
+          ARG CDN_ORIGIN
+          RUN --mount=type=bind,source=patch-asset-prefix.mjs,target=/tmp/patch-asset-prefix.mjs \
+              node /tmp/patch-asset-prefix.mjs "${CDN_ORIGIN}" /app
+          ENV NEXT_BUILD_ENV_ASSET_PREFIX=${CDN_ORIGIN}
+          LABEL teable.asset-prefix=${CDN_ORIGIN}
+          EOF
+          echo "patched=true" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-check the patched image
+        if: steps.existing.outputs.exists == 'false' && steps.patch.outputs.patched == 'true'
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh app-cdn-variant -c '
+            set -e
+            SAMPLE=$(ls /app/enterprise/app-ee/.next/static/chunks/turbopack-*.js | head -1)
+            grep -q "'"${CDN_ORIGIN}"'/_next/" "$SAMPLE"
+            [ "$NEXT_BUILD_ENV_ASSET_PREFIX" = "'"${CDN_ORIGIN}"'" ]
+            echo "smoke OK: $SAMPLE"
+          '
+
+      - name: Upload patched static assets to S3 (append-only)
+        if: steps.existing.outputs.exists == 'false' && steps.patch.outputs.patched == 'true'
+        run: |
+          set -euo pipefail
+          CID=$(docker create app-cdn-variant)
+          docker cp "$CID:/app/enterprise/app-ee/.next/static" ./static-out
+          docker rm "$CID" >/dev/null
+          # NEVER --delete: chunks of other builds must survive.
+          # Fonts land as octet-stream (CLI can't guess those extensions) —
+          # accepted: browsers sniff font magic bytes, nothing breaks.
+          aws s3 cp ./static-out "s3://${ASSET_BUCKET}/_next/static/" \
+            --recursive --only-show-errors
+          echo "uploaded $(find ./static-out -type f | wc -l) files"
+
+      - name: Invalidate CloudFront runtime chunks
+        if: steps.existing.outputs.exists == 'false' && steps.patch.outputs.patched == 'true'
+        run: |
+          # Edges only cache what was requested; pre-deploy these URLs are
+          # unreferenced, so this matters only if someone fetched them
+          # manually before the patch (a debug curl poisons the edge for up
+          # to the TTL — hydration silently dies). Fire and forget: the ECS
+          # deploy takes far longer than invalidation propagation.
+          aws cloudfront create-invalidation \
+            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+            --paths "/_next/static/chunks/turbopack-*" \
+            --query 'Invalidation.Id' --output text
+
+      - name: Push patched image back under the same staging tag
+        if: steps.existing.outputs.exists == 'false' && steps.patch.outputs.patched == 'true'
+        run: |
+          set -euo pipefail
+          docker tag app-cdn-variant "${ECR_IMAGE}:${STAGING_TAG}"
+          docker push "${ECR_IMAGE}:${STAGING_TAG}"
+
   deploy-sandbox:
     name: Deploy Sandbox to Staging ECS
     needs: prepare
@@ -173,7 +312,9 @@ jobs:
 
   deploy-app:
     name: Deploy Main to Staging ECS
-    needs: prepare
+    # patch-cdn must have finished (patched image pushed back under the same
+    # tag, assets live on the CDN) before anything pulls the image.
+    needs: [prepare, patch-cdn]
     runs-on: ubuntu-latest
 
     steps:

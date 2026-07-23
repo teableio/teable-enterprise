@@ -171,6 +171,14 @@ jobs:
           REGISTRIES=("ghcr.io/teableio" "$ECR_REGISTRY")
           IMAGES=("teable-cloud" "teable-sandbox-cloud")
 
+          # Source EVERY release stamp from ghcr's beta, never from ECR's:
+          # the staging CDN rehearsal (manual-ecs-staging-deploy) patches
+          # ECR's beta-<id> IN PLACE under the same tag, and for now a
+          # production launch must ship the clean UNPATCHED build — CDN
+          # stays a staging-only experiment until it is promoted on purpose.
+          # For untouched builds ghcr and ECR betas are identical, so this
+          # changes nothing for them. imagetools copies blobs cross-registry
+          # as needed.
           for REGISTRY in "${REGISTRIES[@]}"; do
             for IMAGE in "${IMAGES[@]}"; do
               if docker buildx imagetools inspect "$REGISTRY/${IMAGE}:${RELEASE_ID}" >/dev/null 2>&1; then
@@ -179,7 +187,7 @@ jobs:
               fi
               docker buildx imagetools create \
                 --tag "$REGISTRY/${IMAGE}:${RELEASE_ID}" \
-                "$REGISTRY/${IMAGE}:${BETA_TAG}"
+                "ghcr.io/teableio/${IMAGE}:${BETA_TAG}"
             done
           done
 
