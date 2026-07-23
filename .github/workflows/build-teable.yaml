@@ -659,6 +659,39 @@ jobs:
           # same cache serves both editions. Empty for the sandbox leg.
           cache-from: ${{ steps.depscache.outputs.list }}
 
+  # Canary for the release-time CDN patch: dry-run scripts/patch-asset-prefix.mjs
+  # (baked into the image by teable-ee's Dockerfile) against the freshly built
+  # app image. The patch pattern is coupled to Turbopack's minified runtime
+  # output, so a Next/Turbopack upgrade that changes it should surface as a
+  # red X on the develop build — not as a surprise during a launch.
+  # Deliberately NOT part of determine-status: a failure here never blocks a
+  # release of the current, already-patchable format. Read-only: touches no
+  # registry tags and no buckets.
+  verify-cdn-patchability:
+    needs: [prepare-release, build-push-cloud]
+    if: needs.build-push-cloud.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PACKAGES_KEY }}
+
+      - name: Dry-run the asset-prefix patch against the app image
+        env:
+          IMAGE: ghcr.io/teableio/teable-cloud:${{ needs.prepare-release.outputs.beta_tag }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE"
+          if ! docker run --rm --entrypoint sh "$IMAGE" -c 'test -f /app/scripts/patch-asset-prefix.mjs'; then
+            echo "::warning::image predates the baked-in patch script; skipping canary"
+            exit 0
+          fi
+          docker run --rm --entrypoint node -e PATCH_DRY_RUN=1 "$IMAGE" \
+            /app/scripts/patch-asset-prefix.mjs "https://patch-canary.invalid" /app
+
   merge-manifests-ee:
     needs: [prepare-release, build-push-ee]
     if: needs.build-push-ee.result == 'success'
