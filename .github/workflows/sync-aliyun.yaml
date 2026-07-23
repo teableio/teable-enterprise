@@ -73,6 +73,9 @@ jobs:
           FAILED=0
 
           if [ "${{ inputs.edition }}" = "cloud" ]; then
+            # The cloud app images are multi-arch on ghcr, but arm64 ships
+            # from ghcr ONLY — Aliyun (like ECR) stays amd64-only, byte-
+            # identical to the pre-multi-arch behavior.
             IMAGES=("teable-cloud" "teable-sandbox-cloud")
             for image in "${IMAGES[@]}"; do
               for tag in "${TAGS[@]}"; do
@@ -80,7 +83,7 @@ jobs:
                 retry_copy \
                   "${SRC_REGISTRY}/${image}:${tag}" \
                   "${DST_REGISTRY}/${image}:${tag}" \
-                  "--all" \
+                  "--override-arch amd64 --override-os linux" \
                   || FAILED=1
               done
             done
