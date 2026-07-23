@@ -129,19 +129,20 @@ jobs:
           echo "Deploying registry tag: ${STAGING_TAG}"
 
   # Staging rehearsal of the CDN release flow: patch the staging image with
-  # the CDN origin (in-image scripts/patch-asset-prefix.mjs), upload the
-  # patched static set to the assets bucket, invalidate the CDN edge, and
-  # push the patched image back under the SAME staging tag — the deploy flow
-  # keeps referencing beta-<id> exactly as before; the patch is invisible to
-  # everything downstream. Idempotency comes from the teable.asset-prefix
-  # image label, not from tag names. ECR-only (this workflow has no ghcr
-  # credentials), which means the in-place push makes ECR's beta-<id> diverge
-  # from ghcr's — ghcr stays the authoritative UNPATCHED artifact, and the
-  # production stamp-release sources release tags from ghcr for that reason.
-  # Assets share the production bucket: keys are content-hashed per build so
-  # nothing referenced by a released build is ever touched, and the upload is
-  # append-only (never --delete). Images without the baked-in patch script
-  # (pre-feature builds) are left completely untouched.
+  # the CDN origin (.github/scripts/patch-asset-prefix.mjs, bind-mounted into
+  # the build — nothing baked into product images), upload the patched static
+  # set to the assets bucket, invalidate the CDN edge, and push the patched
+  # image back under the SAME staging tag — the deploy flow keeps referencing
+  # beta-<id> exactly as before; the patch is invisible to everything
+  # downstream. Idempotency comes from the teable.asset-prefix image label,
+  # not from tag names. ECR-only (this workflow has no ghcr credentials),
+  # which means the in-place push makes ECR's beta-<id> diverge from ghcr's —
+  # ghcr stays the authoritative UNPATCHED artifact, and the production
+  # stamp-release sources release tags from ghcr for that reason. Assets
+  # share the production bucket: keys are content-hashed per build so nothing
+  # referenced by a released build is ever touched, and the upload is
+  # append-only (never --delete). Images whose bundle format the script does
+  # not recognize are deployed untouched.
   patch-cdn:
     name: Patch staging image for CDN
     needs: prepare
@@ -178,33 +179,43 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Checkout deploy scripts
+        if: steps.existing.outputs.exists == 'false'
+        uses: actions/checkout@v4
+
       - name: Build patch layer
         if: steps.existing.outputs.exists == 'false'
         id: patch
         run: |
           set -euo pipefail
 
-          if ! docker run --rm --entrypoint sh "${ECR_IMAGE}:${STAGING_TAG}" \
-              -c 'test -f /app/scripts/patch-asset-prefix.mjs'; then
-            echo "::warning::${STAGING_TAG} predates the baked-in patch script; deploying it untouched"
+          # Pre-flight dry-run with the mounted script: an image whose bundle
+          # format the script does not recognize (pre-Turbopack build, or a
+          # Next upgrade whose pattern is not in the list yet — see the
+          # verify-cdn-patchability canary) is deployed untouched instead of
+          # blocking the staging deploy.
+          if ! docker run --rm --entrypoint node -e PATCH_DRY_RUN=1 \
+              -v "$PWD/.github/scripts/patch-asset-prefix.mjs:/tmp/patch-asset-prefix.mjs:ro" \
+              "${ECR_IMAGE}:${STAGING_TAG}" /tmp/patch-asset-prefix.mjs "${CDN_ORIGIN}" /app; then
+            echo "::warning::${STAGING_TAG} bundle format not recognized by the patch script; deploying it untouched"
             echo "patched=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Ownership split, on purpose: the fragile, build-coupled logic is
-          # the patch SCRIPT, which ships inside the image (version-locked to
-          # the .next output it patches). This 4-line wrapper is deploy
-          # policy — the teable.asset-prefix label it writes is the same
-          # contract this workflow reads for idempotency above, so both ends
-          # live in this one file.
+          # Patching is deploy policy: the script and this 4-line wrapper
+          # both live in this repo, and the script is bind-mounted into the
+          # build — nothing is baked into product images, so ANY image is
+          # patchable. The teable.asset-prefix label written here is the same
+          # contract the idempotency check above reads.
           docker build -t app-cdn-variant \
             --build-arg BASE_IMAGE="${ECR_IMAGE}:${STAGING_TAG}" \
             --build-arg CDN_ORIGIN="${CDN_ORIGIN}" \
-            -f - . <<'EOF'
+            -f - .github/scripts <<'EOF'
           ARG BASE_IMAGE
           FROM ${BASE_IMAGE}
           ARG CDN_ORIGIN
-          RUN node /app/scripts/patch-asset-prefix.mjs "${CDN_ORIGIN}" /app
+          RUN --mount=type=bind,source=patch-asset-prefix.mjs,target=/tmp/patch-asset-prefix.mjs \
+              node /tmp/patch-asset-prefix.mjs "${CDN_ORIGIN}" /app
           ENV NEXT_BUILD_ENV_ASSET_PREFIX=${CDN_ORIGIN}
           LABEL teable.asset-prefix=${CDN_ORIGIN}
           EOF
