@@ -185,23 +185,22 @@ jobs:
           set -euo pipefail
 
           if ! docker run --rm --entrypoint sh "${ECR_IMAGE}:${STAGING_TAG}" \
-              -c 'test -f /app/scripts/patch-asset-prefix.mjs'; then
-            echo "::warning::${STAGING_TAG} predates the baked-in patch script; deploying it untouched"
+              -c 'test -f /app/scripts/patch-asset-prefix.mjs && test -f /app/scripts/Dockerfile.cdn-patch'; then
+            echo "::warning::${STAGING_TAG} predates the baked-in patch toolkit; deploying it untouched"
             echo "patched=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
+          # Single source of truth: the patch Dockerfile ships inside the
+          # image next to the patch script (teable-ee bakes both), version-
+          # locked to the artifacts it patches. Extract and build with it —
+          # this workflow carries no inlined copy that could drift.
+          docker run --rm --entrypoint cat "${ECR_IMAGE}:${STAGING_TAG}" \
+            /app/scripts/Dockerfile.cdn-patch > cdn-patch.Dockerfile
           docker build -t app-cdn-variant \
             --build-arg BASE_IMAGE="${ECR_IMAGE}:${STAGING_TAG}" \
             --build-arg CDN_ORIGIN="${CDN_ORIGIN}" \
-            -f - . <<'EOF'
-          ARG BASE_IMAGE
-          FROM ${BASE_IMAGE}
-          ARG CDN_ORIGIN
-          RUN node /app/scripts/patch-asset-prefix.mjs "${CDN_ORIGIN}" /app
-          ENV NEXT_BUILD_ENV_ASSET_PREFIX=${CDN_ORIGIN}
-          LABEL teable.asset-prefix=${CDN_ORIGIN}
-          EOF
+            -f cdn-patch.Dockerfile .
           echo "patched=true" >> "$GITHUB_OUTPUT"
 
       - name: Smoke-check the patched image
