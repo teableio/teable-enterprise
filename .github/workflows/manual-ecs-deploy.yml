@@ -191,6 +191,130 @@ jobs:
             done
           done
 
+  # Production twin of the staging patch-cdn. Prefers promoting the staging-
+  # patched beta (ship what staging tested; its assets are already in S3);
+  # otherwise patches the clean release stamp in place. ghcr stays clean —
+  # sync-aliyun keeps shipping unpatched images to CN, which patches its own.
+  patch-cdn:
+    name: Patch app image for CDN
+    needs: [prepare, stamp-release]
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_ID: ${{ inputs.image_tag }}
+      CDN_ORIGIN: https://sss.teable.ai
+      ASSET_BUCKET: teable-next-asset
+      ECR_IMAGE: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-cloud
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Login to AWS ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Check if the release is already patched (rollback fast-path)
+        id: existing
+        run: |
+          set -euo pipefail
+          docker pull "${ECR_IMAGE}:${RELEASE_ID}"
+          CURRENT=$(docker inspect --format '{{index .Config.Labels "teable.asset-prefix"}}' \
+            "${ECR_IMAGE}:${RELEASE_ID}" 2>/dev/null || echo "")
+          if [ "$CURRENT" = "$CDN_ORIGIN" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "✅ ${RELEASE_ID} already carries the ${CDN_ORIGIN} patch; skipping"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Promote the staging-patched beta if available
+        if: steps.existing.outputs.exists == 'false'
+        id: promote
+        run: |
+          set -euo pipefail
+          BETA_TAG="beta-${RELEASE_ID#release.}"
+          if docker pull "${ECR_IMAGE}:${BETA_TAG}" 2>/dev/null; then
+            LABEL=$(docker inspect --format '{{index .Config.Labels "teable.asset-prefix"}}' \
+              "${ECR_IMAGE}:${BETA_TAG}" 2>/dev/null || echo "")
+            if [ "$LABEL" = "$CDN_ORIGIN" ]; then
+              docker tag "${ECR_IMAGE}:${BETA_TAG}" "${ECR_IMAGE}:${RELEASE_ID}"
+              docker push "${ECR_IMAGE}:${RELEASE_ID}"
+              echo "promoted=true" >> "$GITHUB_OUTPUT"
+              echo "✅ promoted staging-patched ${BETA_TAG} (assets already uploaded by staging)"
+              exit 0
+            fi
+          fi
+          echo "promoted=false" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout deploy scripts
+        if: steps.existing.outputs.exists == 'false' && steps.promote.outputs.promoted == 'false'
+        uses: actions/checkout@v4
+
+      - name: Build patch layer
+        if: steps.existing.outputs.exists == 'false' && steps.promote.outputs.promoted == 'false'
+        id: patch
+        run: |
+          set -euo pipefail
+
+          # Unrecognized bundle format → launch untouched, don't block.
+          if ! docker run --rm --entrypoint node -e PATCH_DRY_RUN=1 \
+              -v "$PWD/.github/scripts/patch-asset-prefix.mjs:/tmp/patch-asset-prefix.mjs:ro" \
+              "${ECR_IMAGE}:${RELEASE_ID}" /tmp/patch-asset-prefix.mjs "${CDN_ORIGIN}" /app; then
+            echo "::warning::${RELEASE_ID} bundle format not recognized by the patch script; launching untouched"
+            echo "patched=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          docker build -t app-cdn-variant \
+            --build-arg BASE_IMAGE="${ECR_IMAGE}:${RELEASE_ID}" \
+            --build-arg CDN_ORIGIN="${CDN_ORIGIN}" \
+            -f - .github/scripts <<'EOF'
+          ARG BASE_IMAGE
+          FROM ${BASE_IMAGE}
+          ARG CDN_ORIGIN
+          RUN --mount=type=bind,source=patch-asset-prefix.mjs,target=/tmp/patch-asset-prefix.mjs \
+              node /tmp/patch-asset-prefix.mjs "${CDN_ORIGIN}" /app
+          ENV NEXT_BUILD_ENV_ASSET_PREFIX=${CDN_ORIGIN}
+          LABEL teable.asset-prefix=${CDN_ORIGIN}
+          EOF
+          echo "patched=true" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-check the patched image
+        if: steps.existing.outputs.exists == 'false' && steps.promote.outputs.promoted == 'false' && steps.patch.outputs.patched == 'true'
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh app-cdn-variant -c '
+            set -e
+            SAMPLE=$(ls /app/enterprise/app-ee/.next/static/chunks/turbopack-*.js | head -1)
+            grep -q "'"${CDN_ORIGIN}"'/_next/" "$SAMPLE"
+            [ "$NEXT_BUILD_ENV_ASSET_PREFIX" = "'"${CDN_ORIGIN}"'" ]
+            echo "smoke OK: $SAMPLE"
+          '
+
+      - name: Upload patched static assets to S3 (append-only)
+        if: steps.existing.outputs.exists == 'false' && steps.promote.outputs.promoted == 'false' && steps.patch.outputs.patched == 'true'
+        run: |
+          set -euo pipefail
+          CID=$(docker create app-cdn-variant)
+          docker cp "$CID:/app/enterprise/app-ee/.next/static" ./static-out
+          docker rm "$CID" >/dev/null
+          # NEVER --delete: chunks of other builds must survive.
+          # Fonts land as octet-stream (CLI can't guess those extensions) —
+          # accepted: browsers sniff font magic bytes, nothing breaks.
+          aws s3 cp ./static-out "s3://${ASSET_BUCKET}/_next/static/" \
+            --recursive --only-show-errors
+          echo "uploaded $(find ./static-out -type f | wc -l) files"
+
+      - name: Push patched image under the release tag
+        if: steps.existing.outputs.exists == 'false' && steps.promote.outputs.promoted == 'false' && steps.patch.outputs.patched == 'true'
+        run: |
+          set -euo pipefail
+          docker tag app-cdn-variant "${ECR_IMAGE}:${RELEASE_ID}"
+          docker push "${ECR_IMAGE}:${RELEASE_ID}"
+
   deploy-sandbox:
     name: Deploy Sandbox to ECS
     needs: [prepare, stamp-release]
@@ -236,9 +360,9 @@ jobs:
 
   deploy-app:
     name: Deploy Main to ECS
-    # stamp-release must have produced the release.<id> tag before the
-    # migration one-off task or the service tries to pull it.
-    needs: [prepare, stamp-release]
+    # patch-cdn must have finalized the release.<id> tag (and its assets)
+    # before the migration one-off task or the service pulls it.
+    needs: [prepare, stamp-release, patch-cdn]
     runs-on: ubuntu-latest
 
     steps:

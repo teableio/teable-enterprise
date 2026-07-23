@@ -151,7 +151,6 @@ jobs:
       STAGING_TAG: ${{ needs.prepare.outputs.staging_tag }}
       CDN_ORIGIN: https://sss.teable.ai
       ASSET_BUCKET: teable-next-asset
-      CLOUDFRONT_DISTRIBUTION_ID: E3PW5TFEINWLOJ
       ECR_IMAGE: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-cloud
 
     steps:
@@ -246,19 +245,6 @@ jobs:
           aws s3 cp ./static-out "s3://${ASSET_BUCKET}/_next/static/" \
             --recursive --only-show-errors
           echo "uploaded $(find ./static-out -type f | wc -l) files"
-
-      - name: Invalidate CloudFront runtime chunks
-        if: steps.existing.outputs.exists == 'false' && steps.patch.outputs.patched == 'true'
-        run: |
-          # Edges only cache what was requested; pre-deploy these URLs are
-          # unreferenced, so this matters only if someone fetched them
-          # manually before the patch (a debug curl poisons the edge for up
-          # to the TTL — hydration silently dies). Fire and forget: the ECS
-          # deploy takes far longer than invalidation propagation.
-          aws cloudfront create-invalidation \
-            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
-            --paths "/_next/static/chunks/turbopack-*" \
-            --query 'Invalidation.Id' --output text
 
       - name: Push patched image back under the same staging tag
         if: steps.existing.outputs.exists == 'false' && steps.patch.outputs.patched == 'true'
