@@ -1,0 +1,243 @@
+# EE Remote CI — search suite (mirrors retired teable-ee
+# "V2 Search Access Paths").
+# One workflow per suite so partial reruns produce clean run pages. SOURCE OF
+# TRUTH lives in teable-ee .github/enterprise-ci/ and is synced here.
+
+name: EE Remote CI (search)
+
+run-name: 'EE Remote CI search — PR #${{ github.event.client_payload.pr_number }} ${{ github.event.client_payload.log_tag }}'
+
+on:
+  repository_dispatch:
+    types: [ee-remote-ci-search]
+
+concurrency:
+  group: ee-remote-ci-search-${{ github.event.client_payload.pr_number || github.event.client_payload.ee_ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  EE_SHA: ${{ github.event.client_payload.ee_sha }}
+  LOG_TAG: ${{ github.event.client_payload.log_tag }}
+  PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  LOG_DIR: /tmp/ci-logs
+  LOGS_REPO: teableio/teable-ci-logs
+  SEARCH_DEPS_ARTIFACT_NAME: search-access-path-deps-${{ github.run_id }}
+
+jobs:
+  deps:
+    runs-on: ubuntu-latest
+    name: Search Access Path Dependencies
+    timeout-minutes: 15
+    env:
+      CI: 1
+
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Install workspace dependencies
+        uses: ./.github/actions/pnpm-install
+        with:
+          install-args: |
+            --filter
+            @teable/v2-adapter-table-query-ops-postgres...
+            --filter
+            @teable/v2-adapter-table-repository-postgres...
+
+      - name: ☁️ Upload workspace dependencies
+        uses: ./.github/actions/workspace-deps-upload
+        with:
+          name: ${{ env.SEARCH_DEPS_ARTIFACT_NAME }}
+
+  substring-contract-pglite:
+    needs: [deps]
+    runs-on: ubuntu-latest
+    name: Substring Correctness and Fallback Contracts (PGlite)
+    timeout-minutes: 10
+    env:
+      CI: 1
+
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Restore workspace dependencies
+        uses: ./.github/actions/workspace-deps-download
+        with:
+          name: ${{ env.SEARCH_DEPS_ARTIFACT_NAME }}
+
+      - name: 🧪 Run substring and fallback contracts
+        run: |
+          mkdir -p "$LOG_DIR"
+          status=0
+          {
+            pnpm --filter @teable/v2-table-query-ops exec vitest run \
+              src/searchVectorDefinition.spec.ts \
+              src/searchVectorValidation.spec.ts \
+              --silent --bail 1 &&
+            pnpm --filter @teable/v2-adapter-table-repository-postgres exec vitest run \
+              src/record/repository/RecordSearchWhereBuilder.pglite.spec.ts \
+              --silent --bail 1
+          } >> "$LOG_DIR/search-pglite.log" 2>&1 || status=$?
+          echo "search pglite exit=$status ($(wc -l < "$LOG_DIR/search-pglite.log") log lines)"
+          exit $status
+
+      - name: 📤 Ship log
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          [ -f "$LOG_DIR/search-pglite.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/search-pglite.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/search-pglite.log" -R "$LOGS_REPO" --clobber
+          if [ "$JOB_STATUS" != "success" ]; then
+            echo failed > "$LOG_DIR/search-pglite.failed"
+            gh release upload "$LOG_TAG" "$LOG_DIR/search-pglite.failed" -R "$LOGS_REPO" --clobber
+          fi
+
+  gin-access-path-postgres:
+    needs: [deps]
+    runs-on: ubuntu-latest
+    name: GIN Access Path Correctness and Performance (PostgreSQL)
+    timeout-minutes: 15
+    env:
+      CI: 1
+      PRISMA_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/teable_search_vector_test
+      TEABLE_V2_RUN_SEARCH_VECTOR_PG_INTEGRATION: '1'
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: teable_search_vector_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d teable_search_vector_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Restore workspace dependencies
+        uses: ./.github/actions/workspace-deps-download
+        with:
+          name: ${{ env.SEARCH_DEPS_ARTIFACT_NAME }}
+
+      - name: 🧪 Run generated-column and GIN acceptance
+        run: |
+          mkdir -p "$LOG_DIR"
+          status=0
+          {
+            pnpm --filter @teable/v2-adapter-table-query-ops-postgres exec vitest run \
+              src/searchVector.integration.spec.ts \
+              src/searchVector.lifecycle.db.spec.ts \
+              --bail 1
+          } >> "$LOG_DIR/search-postgres.log" 2>&1 || status=$?
+          echo "search postgres exit=$status ($(wc -l < "$LOG_DIR/search-postgres.log") log lines)"
+          exit $status
+
+      - name: 📤 Ship log
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          [ -f "$LOG_DIR/search-postgres.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/search-postgres.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/search-postgres.log" -R "$LOGS_REPO" --clobber
+          if [ "$JOB_STATUS" != "success" ]; then
+            echo failed > "$LOG_DIR/search-postgres.failed"
+            gh release upload "$LOG_TAG" "$LOG_DIR/search-postgres.failed" -R "$LOGS_REPO" --clobber
+          fi
+
+  verdict:
+    needs: [deps, substring-contract-pglite, gin-access-path-postgres]
+    if: always()
+    runs-on: ubuntu-latest
+    name: V2 Search Access Paths verdict
+    timeout-minutes: 5
+    steps:
+      - name: 📦 Checkout teable-ee (.github only)
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github
+
+      - name: 🎫 Mint App token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+
+      - name: 🧾 Conclude check run
+        uses: ./.github/actions/remote-ci-conclude
+        with:
+          suite: search
+          results: 'deps=${{ needs.deps.result }} pglite=${{ needs.substring-contract-pglite.result }} postgres=${{ needs.gin-access-path-postgres.result }}'
+          app-token: ${{ steps.app.outputs.token }}
+          logs-token: ${{ secrets.PACKAGES_KEY }}
+
+      - name: 📨 Dispatch ee-remote-ci-done
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          gh api repos/teableio/teable-ee/dispatches \
+            -f event_type=ee-remote-ci-done \
+            -f "client_payload[suite]=search" \
+            -f "client_payload[pr_number]=${PR_NUMBER}" \
+            -f "client_payload[ee_sha]=${EE_SHA}" \
+            -f "client_payload[log_tag]=${LOG_TAG}" \
+            -f "client_payload[remote_run_url]=${RUN_URL}" \
+            -f "client_payload[check_run_id]=${{ github.event.client_payload.check_run_id }}" \
+            -f "client_payload[results]=deps=${{ needs.deps.result }} pglite=${{ needs.substring-contract-pglite.result }} postgres=${{ needs.gin-access-path-postgres.result }}"
