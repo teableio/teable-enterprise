@@ -257,186 +257,11 @@ jobs:
           docker tag app-cdn-variant "${ECR_IMAGE}:${STAGING_TAG}"
           docker push "${ECR_IMAGE}:${STAGING_TAG}"
 
-  deploy-sandbox:
-    name: Deploy Sandbox to Staging ECS
-    needs: prepare
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-west-2
-
-      - name: Download sandbox task definition
-        run: |
-          aws ecs describe-task-definition \
-            --task-definition teable-sandbox-staging \
-            --query taskDefinition > sandbox-task-definition-raw.json
-
-      - name: Clean sandbox task definition for registration
-        run: |
-          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy, .enableFaultInjection, .faultInjectionPolicy)' \
-            sandbox-task-definition-raw.json > sandbox-task-definition.json
-
-      - name: Render sandbox task definition with new image
-        id: render-sandbox-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: sandbox-task-definition.json
-          container-name: sandbox
-          image: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-sandbox-cloud:${{ needs.prepare.outputs.staging_tag }}
-
-      - name: Deploy sandbox to ECS service
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-        with:
-          task-definition: ${{ steps.render-sandbox-task-def.outputs.task-definition }}
-          service: teable-sandbox-service
-          cluster: teable-staging
-          wait-for-service-stability: true
-
-  deploy-app:
-    name: Deploy Main to Staging ECS
-    # patch-cdn must have finished (patched image pushed back under the same
-    # tag, assets live on the CDN) before anything pulls the image.
-    needs: [prepare, patch-cdn]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-west-2
-
-      - name: Download current task definition
-        run: |
-          aws ecs describe-task-definition \
-            --task-definition teable-staging \
-            --query taskDefinition > task-definition-raw.json
-
-      - name: Clean task definition for registration
-        run: |
-          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy, .enableFaultInjection, .faultInjectionPolicy)' \
-            task-definition-raw.json > task-definition.json
-
-      - name: Render task definition with new image
-        id: render-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: task-definition.json
-          container-name: teable
-          image: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-cloud:${{ needs.prepare.outputs.staging_tag }}
-
-      - name: Run database migration as one-off task
-        run: |
-          # Get network config from the service for RunTask
-          NETWORK_CONFIG=$(aws ecs describe-services \
-            --cluster teable-staging \
-            --services teable-staging-service \
-            --query 'services[0].networkConfiguration' \
-            --output json)
-
-          # Register a temporary task definition with the new image for migration
-          TASK_DEF_ARN=$(aws ecs register-task-definition \
-            --cli-input-json file://${{ steps.render-task-def.outputs.task-definition }} \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
-
-          echo "Running migration with task definition: $TASK_DEF_ARN"
-
-          # Run migration as a one-off task with command override
-          TASK_ARN=$(aws ecs run-task \
-            --cluster teable-staging \
-            --task-definition "$TASK_DEF_ARN" \
-            --launch-type FARGATE \
-            --network-configuration "$NETWORK_CONFIG" \
-            --overrides '{
-              "containerOverrides": [{
-                "name": "teable",
-                "command": ["migrate-only"]
-              }]
-            }' \
-            --query 'tasks[0].taskArn' \
-            --output text)
-
-          echo "Migration task started: $TASK_ARN"
-
-          # Wait for migration task to complete
-          echo "Waiting for migration to complete..."
-          aws ecs wait tasks-stopped --cluster teable-staging --tasks "$TASK_ARN"
-
-          # Check exit code
-          EXIT_CODE=$(aws ecs describe-tasks \
-            --cluster teable-staging \
-            --tasks "$TASK_ARN" \
-            --query 'tasks[0].containers[?name==`teable`].exitCode | [0]' \
-            --output text)
-
-          echo "Migration exit code: $EXIT_CODE"
-          if [ "$EXIT_CODE" != "0" ]; then
-            echo "::error::Database migration failed with exit code $EXIT_CODE"
-            # Print migration task logs for debugging
-            TASK_ID=$(echo "$TASK_ARN" | awk -F'/' '{print $NF}')
-            aws logs get-log-events \
-              --log-group-name /ecs/teable \
-              --log-stream-name "ecs/teable/$TASK_ID" \
-              --limit 50 \
-              --query 'events[*].message' \
-              --output text 2>/dev/null || true
-            exit 1
-          fi
-
-          echo "Database migration completed successfully"
-
-      - name: Update task definition with skip-migrate command
-        run: |
-          # Add skip-migrate command to the main container and remove the db-migrate init container if present
-          jq '(.containerDefinitions[] | select(.name == "teable")).command = ["skip-migrate"]
-              | .containerDefinitions = [.containerDefinitions[] | select(.name != "db-migrate")]
-              | (.containerDefinitions[] | select(.name == "teable")) |= del(.dependsOn)' \
-            "${{ steps.render-task-def.outputs.task-definition }}" > task-definition-skip-migrate.json
-
-      - name: Deploy to ECS service
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-        with:
-          task-definition: task-definition-skip-migrate.json
-          service: teable-staging-service
-          cluster: teable-staging
-          wait-for-service-stability: true
-
-      - name: Ensure BYODB migration worker ECS service
-        env:
-          AWS_REGION: us-west-2
-          ECS_CLUSTER: teable-staging
-          APP_SERVICE: teable-staging-service
-          APP_CONTAINER: teable
-          APP_TASK_DEFINITION_FILE: task-definition-skip-migrate.json
-          WORKER_TASK_FAMILY: teable-staging-byodb-migration-worker
-          WORKER_SERVICE: teable-staging-byodb-migration-worker
-          WORKER_OTEL_SERVICE_NAME: teable-ai-staging-byodb-migration-worker
-        run: .github/scripts/ensure-byodb-migration-worker-ecs.sh
-
-  # Staging serves from EKS (teable-infra cluster) since 2026-07-26; the ECS
-  # side above stays as a warm standby (services at desired 0) and still owns
-  # the one-off DB migration task. This job rolls the EKS deployments to the
-  # same build AFTER the migration has completed inside deploy-app.
-  #
-  # Deploys by DIGEST, not tag: patch-cdn rewrites the staging tag in place,
-  # so a tag reference would neither trigger a rollout on redeploys nor be
-  # safe against node-level image caches.
+  # EKS is THE staging deploy since 2026-07-26 (ECS legs removed 07-27).
+  # DB migration runs as a K8s Job before the deployments roll.
   deploy-eks:
     name: Deploy to Staging EKS
-    needs: [prepare, deploy-app, deploy-sandbox]
+    needs: [prepare, patch-cdn]
     runs-on: ubuntu-latest
     outputs:
       skipped: ${{ steps.roll.outputs.skipped }}
@@ -493,6 +318,50 @@ jobs:
           echo "app:     ${STAGING_TAG} -> ${APP_DIGEST}"
           echo "sandbox: ${STAGING_TAG} -> ${SANDBOX_DIGEST}"
 
+          # ── DB migration as a K8s Job (was an ECS one-off RunTask) ──
+          JOB="migrate-${{ github.run_id }}-${{ github.run_attempt }}"
+          kubectl -n teable-staging delete job "$JOB" --ignore-not-found >/dev/null 2>&1
+          cat <<MIGEOF | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${JOB}
+            namespace: teable-staging
+          spec:
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 7200
+            activeDeadlineSeconds: 900
+            template:
+              spec:
+                restartPolicy: Never
+                nodeSelector: { teable.io/node-pool: general }
+                containers:
+                  - name: migrate
+                    image: ${ECR}/teable/teable-cloud@${APP_DIGEST}
+                    args: ["migrate-only"]
+                    envFrom: [{ secretRef: { name: teable-staging-env } }]
+                    resources:
+                      requests: { cpu: 250m, memory: 1Gi }
+                      limits: { cpu: "2", memory: 3Gi }
+          MIGEOF
+          echo "waiting for migration job ${JOB}..."
+          MIG_OK=""
+          for i in $(seq 1 180); do
+            ST=$(kubectl -n teable-staging get job "${JOB}" \
+              -o jsonpath='{range .status.conditions[*]}{.type}={.status} {end}' 2>/dev/null || echo "")
+            case "$ST" in
+              *Complete=True*) MIG_OK=1; break ;;
+              *Failed=True*)   break ;;
+            esac
+            sleep 5
+          done
+          if [ -z "$MIG_OK" ]; then
+            echo "::error::DB migration failed or timed out"
+            kubectl -n teable-staging logs "job/${JOB}" --tail=100 || true
+            exit 1
+          fi
+          echo "migration completed"
+
           kubectl -n teable-staging set image deploy/teable-staging \
             teable="${ECR}/teable/teable-cloud@${APP_DIGEST}"
           kubectl -n teable-staging set image deploy/teable-staging-byodb-worker \
@@ -535,7 +404,7 @@ jobs:
 
   notify:
     name: Record Deployment in Teable
-    needs: [prepare, deploy-sandbox, deploy-app, deploy-eks]
+    needs: [prepare, deploy-eks]
     if: always()
     runs-on: ubuntu-latest
 
@@ -544,7 +413,7 @@ jobs:
         if: inputs.release_record_id != ''
         env:
           RECORD_ID: ${{ inputs.release_record_id }}
-          DEPLOY_RESULT: ${{ (needs.deploy-app.result == 'success' && needs.deploy-sandbox.result == 'success' && needs.deploy-eks.result == 'success') && 'Deployed' || 'Failed' }}
+          DEPLOY_RESULT: ${{ needs.deploy-eks.result == 'success' && 'Deployed' || 'Failed' }}
         run: |
           echo "Updating record $RECORD_ID Staging Status to $DEPLOY_RESULT"
           update_payload=$(jq -n \
@@ -571,7 +440,7 @@ jobs:
           AUTHOR: ${{ inputs.release_author || inputs.trigger || 'unknown' }}
           PR: ${{ inputs.release_pr || '无' }}
           ISSUES: ${{ inputs.release_issues || '无关联 Issue' }}
-          DEPLOY_SUCCESS: ${{ (needs.deploy-app.result == 'success' && needs.deploy-sandbox.result == 'success' && needs.deploy-eks.result == 'success') && 'true' || 'false' }}
+          DEPLOY_SUCCESS: ${{ needs.deploy-eks.result == 'success' && 'true' || 'false' }}
           EKS_SUPERSEDED: ${{ needs.deploy-eks.outputs.skipped == 'true' && 'true' || 'false' }}
         run: |
           RELEASE_TAG="${IMAGE_TAG}"
