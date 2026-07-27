@@ -81,14 +81,10 @@ on:
       TEABLE_API_TOKEN:
         required: false
 
-# Serialize staging deploys (Codex review on #82): without this, an older
-# run finishing late could roll the shared EKS deployments back to an older
-# digest after a newer run already completed. Queue, never cancel: every
-# triggered build still deploys, strictly in order.
-concurrency:
-  group: staging-deploy
-  cancel-in-progress: false
-
+# NOTE: no workflow-level concurrency — GitHub cancels superseded PENDING
+# runs in a group, which would cancel a whole staging release (incl. its DB
+# migration). Cross-run EKS ordering is guarded inside deploy-eks with a
+# deploy-epoch annotation instead (older attempt refuses to overwrite newer).
 jobs:
   prepare:
     name: Prepare Deployment
@@ -442,6 +438,8 @@ jobs:
     name: Deploy to Staging EKS
     needs: [prepare, deploy-app, deploy-sandbox]
     runs-on: ubuntu-latest
+    outputs:
+      skipped: ${{ steps.roll.outputs.skipped }}
     permissions:
       id-token: write
       contents: read
@@ -451,15 +449,36 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::649941507946:role/teable-staging-eks-deploy
+          role-session-name: eks-staging-deploy
           aws-region: us-west-2
 
       - name: Roll EKS deployments to this build
+        id: roll
         env:
           STAGING_TAG: ${{ needs.prepare.outputs.staging_tag }}
           ECR: 649941507946.dkr.ecr.us-west-2.amazonaws.com
         run: |
           set -euo pipefail
           aws eks update-kubeconfig --region us-west-2 --name teable-infra
+
+          # Ordering guard: token = run id (assigned at run creation, immune
+          # to stage delays); CAS via resourceVersion (see prod twin).
+          MY_ID=${{ github.run_id }}
+          for attempt in 1 2 3 4 5; do
+            read -r RV CUR <<<"$(kubectl -n teable-staging get deploy teable-staging \
+              -o jsonpath='{.metadata.resourceVersion} {.metadata.annotations.teable\.io/deploy-run-id}')"
+            if [ -n "$CUR" ] && [ "$CUR" -gt "$MY_ID" ] 2>/dev/null; then
+              echo "::notice::run $CUR (> mine $MY_ID) already deployed EKS; skipping"
+              echo "skipped=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # rerun of the same run keeps its run_id — resume, don't skip
+            [ "$CUR" = "$MY_ID" ] && echo "resuming own run $MY_ID" && break
+            kubectl -n teable-staging annotate --overwrite --resource-version="$RV" \
+              deploy/teable-staging teable.io/deploy-run-id="$MY_ID" 2>/dev/null && break
+            [ "$attempt" = "5" ] && echo "::error::deploy-run-id CAS failed 5x" && exit 1
+            sleep 2
+          done
 
           # Resolve the digests the staging tags point at RIGHT NOW (after
           # patch-cdn potentially rewrote them earlier in this run).
@@ -481,7 +500,21 @@ jobs:
           kubectl -n teable-staging set image deploy/teable-sandbox \
             sandbox="${ECR}/teable/teable-sandbox-cloud@${SANDBOX_DIGEST}"
 
+          kubectl -n teable-staging annotate --overwrite \
+            deploy/teable-staging-byodb-worker deploy/teable-sandbox \
+            teable.io/deploy-run-id="$MY_ID" teable.io/deploy-release="$STAGING_TAG"
+          kubectl -n teable-staging annotate --overwrite \
+            deploy/teable-staging teable.io/deploy-release="$STAGING_TAG"
+
+          FINAL=$(kubectl -n teable-staging get deploy teable-staging \
+            -o jsonpath='{.metadata.annotations.teable\.io/deploy-run-id}')
+          if [ "$FINAL" != "$MY_ID" ]; then
+            echo "::error::run $FINAL overlapped this deploy — EKS may hold mixed images; redeploy the latest build"
+            exit 1
+          fi
+
       - name: Wait for rollouts
+        if: steps.roll.outputs.skipped != 'true'
         run: |
           set -euo pipefail
           kubectl -n teable-staging rollout status deploy/teable-staging --timeout=300s
@@ -489,6 +522,7 @@ jobs:
           kubectl -n teable-staging rollout status deploy/teable-sandbox --timeout=300s
 
       - name: Smoke check through the ALB
+        if: steps.roll.outputs.skipped != 'true'
         run: |
           set -euo pipefail
           for i in $(seq 1 10); do
@@ -537,8 +571,12 @@ jobs:
           PR: ${{ inputs.release_pr || '无' }}
           ISSUES: ${{ inputs.release_issues || '无关联 Issue' }}
           DEPLOY_SUCCESS: ${{ (needs.deploy-app.result == 'success' && needs.deploy-sandbox.result == 'success' && needs.deploy-eks.result == 'success') && 'true' || 'false' }}
+          EKS_SUPERSEDED: ${{ needs.deploy-eks.outputs.skipped == 'true' && 'true' || 'false' }}
         run: |
           RELEASE_TAG="${IMAGE_TAG}"
+          if [ "$EKS_SUPERSEDED" = "true" ]; then
+            RELEASE_TAG="${RELEASE_TAG}（EKS 侧被更新的 run 取代，未安装本版本）"
+          fi
 
           if [ "$DEPLOY_SUCCESS" = "true" ]; then
             HEADER_COLOR="yellow"
