@@ -101,6 +101,9 @@ on:
       image_tag:
         description: 'Deployed image tag'
         value: ${{ jobs.prepare.outputs.image_tag }}
+      deploy_skipped:
+        description: 'true when a newer run superseded this deploy (nothing was installed)'
+        value: ${{ jobs.deploy-eks.outputs.skipped }}
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
@@ -329,7 +332,7 @@ jobs:
     needs: [prepare, stamp-release, patch-cdn]
     runs-on: ubuntu-latest
     outputs:
-      skipped: ${{ steps.roll.outputs.skipped }}
+      skipped: ${{ (steps.roll.outputs.skipped == 'true' || steps.final.outputs.skipped == 'true') && 'true' || 'false' }}
     permissions:
       id-token: write
       contents: read
@@ -350,6 +353,26 @@ jobs:
         run: |
           set -euo pipefail
           aws eks update-kubeconfig --region us-west-2 --name teable-infra
+
+          # ── Computed-outbox config gate (ported from the removed ECS leg:
+          # reject loopback/missing BACKEND_CACHE_REDIS_URI and
+          # V2_COMPUTED_UPDATE_MODE=sync before anything mutates) ──
+          REDIS_URI=$(kubectl -n teable-prod get secret teable-prod-env \
+            -o jsonpath='{.data.BACKEND_CACHE_REDIS_URI}' | base64 -d 2>/dev/null || echo "")
+          if [ -z "$REDIS_URI" ]; then
+            echo "::error::BullMQ computed outbox requires a shared, non-loopback BACKEND_CACHE_REDIS_URI"
+            exit 1
+          fi
+          if echo "$REDIS_URI" | grep -qE '(^|@|//)(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)(:|/)'; then
+            echo "::error::BullMQ computed outbox requires a shared, non-loopback BACKEND_CACHE_REDIS_URI"
+            exit 1
+          fi
+          VMODE=$(kubectl -n teable-prod get secret teable-prod-env \
+            -o jsonpath='{.data.V2_COMPUTED_UPDATE_MODE}' | base64 -d 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo "")
+          if [ "$VMODE" = "sync" ]; then
+            echo "::error::Remove V2_COMPUTED_UPDATE_MODE=sync before enabling BullMQ computed outbox"
+            exit 1
+          fi
 
           # Ordering guard (Codex on #85): token is the RUN id — assigned at
           # run creation, so a run delayed in patch-cdn/migration still keeps
@@ -503,6 +526,17 @@ jobs:
           done
           echo "::error::app.teable.ai /health never returned 200 after rollout"
           exit 1
+
+      - name: Final ownership check (post-verification)
+        if: steps.roll.outputs.skipped != 'true'
+        id: final
+        run: |
+          FINAL=$(kubectl -n teable-prod get deploy teable-prod \
+            -o jsonpath='{.metadata.annotations.teable\.io/deploy-run-id}')
+          if [ "$FINAL" != "${{ github.run_id }}" ]; then
+            echo "::notice::run $FINAL took over during verification; downstream promotion suppressed"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Alert Feishu on deploy failure
         if: failure()

@@ -264,7 +264,7 @@ jobs:
     needs: [prepare, patch-cdn]
     runs-on: ubuntu-latest
     outputs:
-      skipped: ${{ steps.roll.outputs.skipped }}
+      skipped: ${{ (steps.roll.outputs.skipped == 'true' || steps.final.outputs.skipped == 'true') && 'true' || 'false' }}
     permissions:
       id-token: write
       contents: read
@@ -285,6 +285,20 @@ jobs:
         run: |
           set -euo pipefail
           aws eks update-kubeconfig --region us-west-2 --name teable-infra
+
+          # ── Computed-outbox config gate (see prod twin) ──
+          REDIS_URI=$(kubectl -n teable-staging get secret teable-staging-env \
+            -o jsonpath='{.data.BACKEND_CACHE_REDIS_URI}' | base64 -d 2>/dev/null || echo "")
+          if [ -z "$REDIS_URI" ] || echo "$REDIS_URI" | grep -qE '(^|@|//)(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)(:|/)'; then
+            echo "::error::BullMQ computed outbox requires a shared, non-loopback BACKEND_CACHE_REDIS_URI"
+            exit 1
+          fi
+          VMODE=$(kubectl -n teable-staging get secret teable-staging-env \
+            -o jsonpath='{.data.V2_COMPUTED_UPDATE_MODE}' | base64 -d 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo "")
+          if [ "$VMODE" = "sync" ]; then
+            echo "::error::Remove V2_COMPUTED_UPDATE_MODE=sync before enabling BullMQ computed outbox"
+            exit 1
+          fi
 
           # Ordering guard: token = run id (assigned at run creation, immune
           # to stage delays); CAS via resourceVersion (see prod twin).
@@ -411,6 +425,17 @@ jobs:
           echo "::error::staging /health never returned 200 after EKS rollout"
           exit 1
 
+      - name: Final ownership check (post-verification)
+        if: steps.roll.outputs.skipped != 'true'
+        id: final
+        run: |
+          FINAL=$(kubectl -n teable-staging get deploy teable-staging \
+            -o jsonpath='{.metadata.annotations.teable\.io/deploy-run-id}')
+          if [ "$FINAL" != "${{ github.run_id }}" ]; then
+            echo "::notice::run $FINAL took over during verification"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+          fi
+
   notify:
     name: Record Deployment in Teable
     needs: [prepare, deploy-eks]
@@ -422,7 +447,7 @@ jobs:
         if: inputs.release_record_id != ''
         env:
           RECORD_ID: ${{ inputs.release_record_id }}
-          DEPLOY_RESULT: ${{ needs.deploy-eks.result == 'success' && 'Deployed' || 'Failed' }}
+          DEPLOY_RESULT: ${{ (needs.deploy-eks.result == 'success' && needs.deploy-eks.outputs.skipped != 'true') && 'Deployed' || 'Failed' }}
         run: |
           echo "Updating record $RECORD_ID Staging Status to $DEPLOY_RESULT"
           update_payload=$(jq -n \
@@ -449,7 +474,7 @@ jobs:
           AUTHOR: ${{ inputs.release_author || inputs.trigger || 'unknown' }}
           PR: ${{ inputs.release_pr || '无' }}
           ISSUES: ${{ inputs.release_issues || '无关联 Issue' }}
-          DEPLOY_SUCCESS: ${{ needs.deploy-eks.result == 'success' && 'true' || 'false' }}
+          DEPLOY_SUCCESS: ${{ (needs.deploy-eks.result == 'success' && needs.deploy-eks.outputs.skipped != 'true') && 'true' || 'false' }}
           EKS_SUPERSEDED: ${{ needs.deploy-eks.outputs.skipped == 'true' && 'true' || 'false' }}
         run: |
           RELEASE_TAG="${IMAGE_TAG}"

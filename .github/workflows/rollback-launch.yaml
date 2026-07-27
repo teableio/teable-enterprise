@@ -81,7 +81,7 @@ jobs:
       always() &&
       needs.validate-lock.result == 'success' &&
       needs.promote-ee.result == 'success' &&
-      ((inputs.region == 'teable.ai' && needs.deploy-ai.result == 'success') ||
+      ((inputs.region == 'teable.ai' && needs.deploy-ai.result == 'success' && needs.deploy-ai.outputs.deploy_skipped != 'true') ||
        (inputs.region == 'teable.cn' && needs.deploy-cn.result == 'success'))
     runs-on: ubuntu-latest
     steps:
