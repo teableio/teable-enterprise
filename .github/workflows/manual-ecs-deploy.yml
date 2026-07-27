@@ -643,9 +643,10 @@ jobs:
         env:
           RELEASE_ID: ${{ inputs.image_tag }}
         run: |
-          PAYLOAD=$(jq -n --arg t "⚠️ 生产 EKS 双跑腿失败（不阻塞发布链）: ${RELEASE_ID}
-run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            '{msg_type:"text",content:{text:$t}}')
+          PAYLOAD=$(jq -n \
+            --arg l1 "⚠️ 生产 EKS 双跑腿失败（不阻塞发布链）: ${RELEASE_ID}" \
+            --arg l2 "run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{msg_type:"text",content:{text:($l1 + "\n" + $l2)}}')
           HTTP=$(curl -s -o /tmp/feishu.out -w "%{http_code}" -X POST \
             'https://open.feishu.cn/open-apis/bot/v2/hook/66b6ebf2-9bbd-4e41-b629-4062a6be4a42' \
             -H 'Content-Type: application/json' -d "$PAYLOAD")
