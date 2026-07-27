@@ -115,6 +115,12 @@ on:
       INFRA_TEABLE_CN_PREHEAT_TOKEN:
         required: false
 
+# Serialize production deploys (same rationale as staging, Codex P1 on #82):
+# an older run finishing late must not roll the shared EKS deployments back.
+concurrency:
+  group: prod-deploy
+  cancel-in-progress: false
+
 jobs:
   prepare:
     name: Prepare Deployment
@@ -510,6 +516,81 @@ jobs:
           WORKER_SERVICE: teable-byodb-migration-worker
           WORKER_OTEL_SERVICE_NAME: teable-ai-byodb-migration-worker
         run: .github/scripts/ensure-byodb-migration-worker-ecs.sh
+
+  # Dual-run phase (since 2026-07-27): production deploys land BOTH on ECS
+  # (live traffic) and on teable-infra EKS (attached to teable-alb at weight
+  # 0). A failure here marks the run red so drift is visible, but does NOT
+  # gate promote-latest / sync-aliyun — the EKS side serves no traffic yet.
+  # At formal cutover, fold this job into the notify/promote gating.
+  #
+  # Deploys by DIGEST: patch-cdn rewrites the release tag in place, so a tag
+  # reference neither triggers rollouts on redeploys nor survives node image
+  # caches.
+  deploy-eks:
+    name: Deploy to Production EKS (dual-run, weight 0)
+    needs: [prepare, deploy-app, deploy-sandbox]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Configure AWS credentials (OIDC, namespace-scoped role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::649941507946:role/teable-staging-eks-deploy
+          aws-region: us-west-2
+
+      - name: Roll EKS deployments to this release
+        env:
+          RELEASE_ID: ${{ inputs.image_tag }}
+          ECR: 649941507946.dkr.ecr.us-west-2.amazonaws.com
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig --region us-west-2 --name teable-infra
+
+          APP_DIGEST=$(aws ecr describe-images --region us-west-2 \
+            --repository-name teable/teable-cloud \
+            --image-ids imageTag="$RELEASE_ID" \
+            --query 'imageDetails[0].imageDigest' --output text)
+          SANDBOX_DIGEST=$(aws ecr describe-images --region us-west-2 \
+            --repository-name teable/teable-sandbox-cloud \
+            --image-ids imageTag="$RELEASE_ID" \
+            --query 'imageDetails[0].imageDigest' --output text)
+          echo "app:     ${RELEASE_ID} -> ${APP_DIGEST}"
+          echo "sandbox: ${RELEASE_ID} -> ${SANDBOX_DIGEST}"
+
+          kubectl -n teable-prod set image deploy/teable-prod \
+            teable="${ECR}/teable/teable-cloud@${APP_DIGEST}"
+          kubectl -n teable-prod set image deploy/teable-prod-byodb-worker \
+            teable="${ECR}/teable/teable-cloud@${APP_DIGEST}"
+          kubectl -n teable-prod set image deploy/teable-sandbox \
+            sandbox="${ECR}/teable/teable-sandbox-cloud@${SANDBOX_DIGEST}"
+
+      - name: Wait for rollouts
+        run: |
+          set -euo pipefail
+          kubectl -n teable-prod rollout status deploy/teable-prod --timeout=600s
+          kubectl -n teable-prod rollout status deploy/teable-prod-byodb-worker --timeout=300s
+          kubectl -n teable-prod rollout status deploy/teable-sandbox --timeout=300s
+
+      - name: Verify ALB target health (weight-0 passive check)
+        run: |
+          set -euo pipefail
+          for tg_name in teable-eks-app teable-eks-socket; do
+            TG_ARN=$(aws elbv2 describe-target-groups --region us-west-2 \
+              --names "$tg_name" --query 'TargetGroups[0].TargetGroupArn' --output text)
+            for i in $(seq 1 20); do
+              STATES=$(aws elbv2 describe-target-health --region us-west-2 \
+                --target-group-arn "$TG_ARN" \
+                --query 'TargetHealthDescriptions[].TargetHealth.State' --output text)
+              TOTAL=$(echo $STATES | wc -w); HEALTHY=$(echo $STATES | tr ' ' '\n' | grep -c healthy || true)
+              echo "$tg_name: $HEALTHY/$TOTAL healthy"
+              [ "$TOTAL" -gt 0 ] && [ "$HEALTHY" = "$TOTAL" ] && break
+              [ "$i" = "20" ] && echo "::error::$tg_name targets not healthy" && exit 1
+              sleep 10
+            done
+          done
 
   promote-latest:
     name: Promote Release Tag to Latest
