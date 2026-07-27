@@ -328,6 +328,8 @@ jobs:
     name: Deploy to Production EKS
     needs: [prepare, stamp-release, patch-cdn]
     runs-on: ubuntu-latest
+    outputs:
+      skipped: ${{ steps.roll.outputs.skipped }}
     permissions:
       id-token: write
       contents: read
@@ -426,6 +428,17 @@ jobs:
           fi
           echo "migration completed"
 
+          # Re-validate ownership: a newer run may have claimed and deployed
+          # while our migration was running (Codex P1 on #87). Step aside
+          # instead of rolling its images back.
+          CUR2=$(kubectl -n teable-prod get deploy teable-prod \
+            -o jsonpath='{.metadata.annotations.teable\.io/deploy-run-id}')
+          if [ "$CUR2" != "$MY_ID" ]; then
+            echo "::notice::run $CUR2 took over during migration; skipping rollout"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           kubectl -n teable-prod set image deploy/teable-prod \
             teable="${ECR}/teable/teable-cloud@${APP_DIGEST}"
           kubectl -n teable-prod set image deploy/teable-prod-byodb-worker \
@@ -510,6 +523,8 @@ jobs:
   promote-latest:
     name: Promote Release Tag to Latest
     needs: [prepare, deploy-eks]
+    # A superseded run must not rewrite latest tags (Codex P1 on #87).
+    if: needs.deploy-eks.outputs.skipped != 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -584,7 +599,7 @@ jobs:
   cleanup-beta:
     name: Reap cloud staging versions
     needs: [deploy-eks, promote-latest]
-    if: needs.deploy-eks.result == 'success'
+    if: needs.deploy-eks.result == 'success' && needs.deploy-eks.outputs.skipped != 'true'
     # Housekeeping must never mark a successful production deploy as
     # failed — the scheduled ghcr-gc backstop catches misses.
     continue-on-error: true
@@ -609,6 +624,7 @@ jobs:
     if: >-
       inputs.record_launch != false &&
       needs.deploy-eks.result == 'success' &&
+      needs.deploy-eks.outputs.skipped != 'true' &&
       needs.promote-latest.result == 'success' &&
       needs.sync-aliyun.result == 'success'
     runs-on: ubuntu-latest

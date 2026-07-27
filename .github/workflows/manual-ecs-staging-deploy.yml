@@ -362,6 +362,15 @@ jobs:
           fi
           echo "migration completed"
 
+          # Re-validate ownership after the migration window (see prod twin).
+          CUR2=$(kubectl -n teable-staging get deploy teable-staging \
+            -o jsonpath='{.metadata.annotations.teable\.io/deploy-run-id}')
+          if [ "$CUR2" != "$MY_ID" ]; then
+            echo "::notice::run $CUR2 took over during migration; skipping rollout"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           kubectl -n teable-staging set image deploy/teable-staging \
             teable="${ECR}/teable/teable-cloud@${APP_DIGEST}"
           kubectl -n teable-staging set image deploy/teable-staging-byodb-worker \
