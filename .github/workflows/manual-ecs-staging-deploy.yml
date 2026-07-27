@@ -438,6 +438,8 @@ jobs:
     name: Deploy to Staging EKS
     needs: [prepare, deploy-app, deploy-sandbox]
     runs-on: ubuntu-latest
+    outputs:
+      skipped: ${{ steps.roll.outputs.skipped }}
     permissions:
       id-token: write
       contents: read
@@ -465,11 +467,13 @@ jobs:
           for attempt in 1 2 3 4 5; do
             read -r RV CUR <<<"$(kubectl -n teable-staging get deploy teable-staging \
               -o jsonpath='{.metadata.resourceVersion} {.metadata.annotations.teable\.io/deploy-run-id}')"
-            if [ -n "$CUR" ] && [ "$CUR" -ge "$MY_ID" ] 2>/dev/null; then
-              echo "::notice::run $CUR (>= mine $MY_ID) already deployed EKS; skipping"
+            if [ -n "$CUR" ] && [ "$CUR" -gt "$MY_ID" ] 2>/dev/null; then
+              echo "::notice::run $CUR (> mine $MY_ID) already deployed EKS; skipping"
               echo "skipped=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
+            # rerun of the same run keeps its run_id — resume, don't skip
+            [ "$CUR" = "$MY_ID" ] && echo "resuming own run $MY_ID" && break
             kubectl -n teable-staging annotate --overwrite --resource-version="$RV" \
               deploy/teable-staging teable.io/deploy-run-id="$MY_ID" 2>/dev/null && break
             [ "$attempt" = "5" ] && echo "::error::deploy-run-id CAS failed 5x" && exit 1
@@ -501,6 +505,13 @@ jobs:
             teable.io/deploy-run-id="$MY_ID" teable.io/deploy-release="$STAGING_TAG"
           kubectl -n teable-staging annotate --overwrite \
             deploy/teable-staging teable.io/deploy-release="$STAGING_TAG"
+
+          FINAL=$(kubectl -n teable-staging get deploy teable-staging \
+            -o jsonpath='{.metadata.annotations.teable\.io/deploy-run-id}')
+          if [ "$FINAL" != "$MY_ID" ]; then
+            echo "::error::run $FINAL overlapped this deploy — EKS may hold mixed images; redeploy the latest build"
+            exit 1
+          fi
 
       - name: Wait for rollouts
         if: steps.roll.outputs.skipped != 'true'
@@ -560,8 +571,12 @@ jobs:
           PR: ${{ inputs.release_pr || '无' }}
           ISSUES: ${{ inputs.release_issues || '无关联 Issue' }}
           DEPLOY_SUCCESS: ${{ (needs.deploy-app.result == 'success' && needs.deploy-sandbox.result == 'success' && needs.deploy-eks.result == 'success') && 'true' || 'false' }}
+          EKS_SUPERSEDED: ${{ needs.deploy-eks.outputs.skipped == 'true' && 'true' || 'false' }}
         run: |
           RELEASE_TAG="${IMAGE_TAG}"
+          if [ "$EKS_SUPERSEDED" = "true" ]; then
+            RELEASE_TAG="${RELEASE_TAG}（EKS 侧被更新的 run 取代，未安装本版本）"
+          fi
 
           if [ "$DEPLOY_SUCCESS" = "true" ]; then
             HEADER_COLOR="yellow"
