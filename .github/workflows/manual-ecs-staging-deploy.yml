@@ -81,6 +81,14 @@ on:
       TEABLE_API_TOKEN:
         required: false
 
+# Serialize staging deploys (Codex review on #82): without this, an older
+# run finishing late could roll the shared EKS deployments back to an older
+# digest after a newer run already completed. Queue, never cancel: every
+# triggered build still deploys, strictly in order.
+concurrency:
+  group: staging-deploy
+  cancel-in-progress: false
+
 jobs:
   prepare:
     name: Prepare Deployment
