@@ -68,7 +68,15 @@ jobs:
 
   promote-ee:
     name: Roll back EE latest
-    needs: validate-lock
+    # EE latest must not move until the region rollback actually landed —
+    # and never for a superseded Cloud rollback (Codex on #87), or EE and
+    # Cloud latest diverge.
+    needs: [validate-lock, deploy-ai, deploy-cn]
+    if: >-
+      always() &&
+      needs.validate-lock.result == 'success' &&
+      ((inputs.region == 'teable.ai' && needs.deploy-ai.result == 'success' && needs.deploy-ai.outputs.deploy_skipped != 'true') ||
+       (inputs.region == 'teable.cn' && needs.deploy-cn.result == 'success'))
     uses: ./.github/workflows/promote-latest-ee.yaml
     with:
       release_id: ${{ inputs.image_tag }}
