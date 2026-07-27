@@ -567,7 +567,8 @@ jobs:
       - name: Send Feishu staging deploy notification
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
-          AUTHOR: ${{ inputs.release_author || 'unknown' }}
+          # 手动 dispatch 无 release 元数据时,用 trigger 输入标注来源(如运维验证跑),不再显示 unknown
+          AUTHOR: ${{ inputs.release_author || inputs.trigger || 'unknown' }}
           PR: ${{ inputs.release_pr || '无' }}
           ISSUES: ${{ inputs.release_issues || '无关联 Issue' }}
           DEPLOY_SUCCESS: ${{ (needs.deploy-app.result == 'success' && needs.deploy-sandbox.result == 'success' && needs.deploy-eks.result == 'success') && 'true' || 'false' }}
