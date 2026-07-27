@@ -422,9 +422,78 @@ jobs:
           WORKER_OTEL_SERVICE_NAME: teable-ai-staging-byodb-migration-worker
         run: .github/scripts/ensure-byodb-migration-worker-ecs.sh
 
+  # Staging serves from EKS (teable-infra cluster) since 2026-07-26; the ECS
+  # side above stays as a warm standby (services at desired 0) and still owns
+  # the one-off DB migration task. This job rolls the EKS deployments to the
+  # same build AFTER the migration has completed inside deploy-app.
+  #
+  # Deploys by DIGEST, not tag: patch-cdn rewrites the staging tag in place,
+  # so a tag reference would neither trigger a rollout on redeploys nor be
+  # safe against node-level image caches.
+  deploy-eks:
+    name: Deploy to Staging EKS
+    needs: [prepare, deploy-app, deploy-sandbox]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Configure AWS credentials (OIDC, namespace-scoped role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::649941507946:role/teable-staging-eks-deploy
+          aws-region: us-west-2
+
+      - name: Roll EKS deployments to this build
+        env:
+          STAGING_TAG: ${{ needs.prepare.outputs.staging_tag }}
+          ECR: 649941507946.dkr.ecr.us-west-2.amazonaws.com
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig --region us-west-2 --name teable-infra
+
+          # Resolve the digests the staging tags point at RIGHT NOW (after
+          # patch-cdn potentially rewrote them earlier in this run).
+          APP_DIGEST=$(aws ecr describe-images --region us-west-2 \
+            --repository-name teable/teable-cloud \
+            --image-ids imageTag="$STAGING_TAG" \
+            --query 'imageDetails[0].imageDigest' --output text)
+          SANDBOX_DIGEST=$(aws ecr describe-images --region us-west-2 \
+            --repository-name teable/teable-sandbox-cloud \
+            --image-ids imageTag="$STAGING_TAG" \
+            --query 'imageDetails[0].imageDigest' --output text)
+          echo "app:     ${STAGING_TAG} -> ${APP_DIGEST}"
+          echo "sandbox: ${STAGING_TAG} -> ${SANDBOX_DIGEST}"
+
+          kubectl -n teable-staging set image deploy/teable-staging \
+            teable="${ECR}/teable/teable-cloud@${APP_DIGEST}"
+          kubectl -n teable-staging set image deploy/teable-staging-byodb-worker \
+            teable="${ECR}/teable/teable-cloud@${APP_DIGEST}"
+          kubectl -n teable-staging set image deploy/teable-sandbox \
+            sandbox="${ECR}/teable/teable-sandbox-cloud@${SANDBOX_DIGEST}"
+
+      - name: Wait for rollouts
+        run: |
+          set -euo pipefail
+          kubectl -n teable-staging rollout status deploy/teable-staging --timeout=300s
+          kubectl -n teable-staging rollout status deploy/teable-staging-byodb-worker --timeout=300s
+          kubectl -n teable-staging rollout status deploy/teable-sandbox --timeout=300s
+
+      - name: Smoke check through the ALB
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 10); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 https://staging.teable.ai/health || true)
+            [ "$code" = "200" ] && echo "staging /health: 200" && exit 0
+            echo "attempt $i: $code"; sleep 6
+          done
+          echo "::error::staging /health never returned 200 after EKS rollout"
+          exit 1
+
   notify:
     name: Record Deployment in Teable
-    needs: [prepare, deploy-sandbox, deploy-app]
+    needs: [prepare, deploy-sandbox, deploy-app, deploy-eks]
     if: always()
     runs-on: ubuntu-latest
 
@@ -433,7 +502,7 @@ jobs:
         if: inputs.release_record_id != ''
         env:
           RECORD_ID: ${{ inputs.release_record_id }}
-          DEPLOY_RESULT: ${{ (needs.deploy-app.result == 'success' && needs.deploy-sandbox.result == 'success') && 'Deployed' || 'Failed' }}
+          DEPLOY_RESULT: ${{ (needs.deploy-app.result == 'success' && needs.deploy-sandbox.result == 'success' && needs.deploy-eks.result == 'success') && 'Deployed' || 'Failed' }}
         run: |
           echo "Updating record $RECORD_ID Staging Status to $DEPLOY_RESULT"
           update_payload=$(jq -n \
@@ -459,7 +528,7 @@ jobs:
           AUTHOR: ${{ inputs.release_author || 'unknown' }}
           PR: ${{ inputs.release_pr || '无' }}
           ISSUES: ${{ inputs.release_issues || '无关联 Issue' }}
-          DEPLOY_SUCCESS: ${{ (needs.deploy-app.result == 'success' && needs.deploy-sandbox.result == 'success') && 'true' || 'false' }}
+          DEPLOY_SUCCESS: ${{ (needs.deploy-app.result == 'success' && needs.deploy-sandbox.result == 'success' && needs.deploy-eks.result == 'success') && 'true' || 'false' }}
         run: |
           RELEASE_TAG="${IMAGE_TAG}"
 
