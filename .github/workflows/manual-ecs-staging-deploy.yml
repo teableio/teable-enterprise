@@ -81,14 +81,10 @@ on:
       TEABLE_API_TOKEN:
         required: false
 
-# Serialize staging deploys (Codex review on #82): without this, an older
-# run finishing late could roll the shared EKS deployments back to an older
-# digest after a newer run already completed. Queue, never cancel: every
-# triggered build still deploys, strictly in order.
-concurrency:
-  group: staging-deploy
-  cancel-in-progress: false
-
+# NOTE: no workflow-level concurrency — GitHub cancels superseded PENDING
+# runs in a group, which would cancel a whole staging release (incl. its DB
+# migration). Cross-run EKS ordering is guarded inside deploy-eks with a
+# deploy-epoch annotation instead (older attempt refuses to overwrite newer).
 jobs:
   prepare:
     name: Prepare Deployment
@@ -451,6 +447,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::649941507946:role/teable-staging-eks-deploy
+          role-session-name: eks-staging-deploy
           aws-region: us-west-2
 
       - name: Roll EKS deployments to this build
@@ -460,6 +457,16 @@ jobs:
         run: |
           set -euo pipefail
           aws eks update-kubeconfig --region us-west-2 --name teable-infra
+
+          # Ordering guard: a deploy attempt that started later wins; an
+          # older attempt must not roll the deployments back (see prod twin).
+          EPOCH=$(date +%s)
+          CUR=$(kubectl -n teable-staging get deploy teable-staging \
+            -o jsonpath='{.metadata.annotations.teable\.io/deploy-epoch}' 2>/dev/null || echo "")
+          if [ -n "$CUR" ] && [ "$CUR" -gt "$EPOCH" ]; then
+            echo "::notice::newer deploy-epoch $CUR already applied (mine: $EPOCH); skipping EKS roll"
+            exit 0
+          fi
 
           # Resolve the digests the staging tags point at RIGHT NOW (after
           # patch-cdn potentially rewrote them earlier in this run).
@@ -480,6 +487,10 @@ jobs:
             teable="${ECR}/teable/teable-cloud@${APP_DIGEST}"
           kubectl -n teable-staging set image deploy/teable-sandbox \
             sandbox="${ECR}/teable/teable-sandbox-cloud@${SANDBOX_DIGEST}"
+
+          kubectl -n teable-staging annotate --overwrite \
+            deploy/teable-staging deploy/teable-staging-byodb-worker deploy/teable-sandbox \
+            teable.io/deploy-epoch="$EPOCH" teable.io/deploy-release="$STAGING_TAG"
 
       - name: Wait for rollouts
         run: |
