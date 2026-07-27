@@ -101,6 +101,9 @@ on:
       image_tag:
         description: 'Deployed image tag'
         value: ${{ jobs.prepare.outputs.image_tag }}
+      deploy_skipped:
+        description: 'true when a newer run superseded this deploy (nothing was installed)'
+        value: ${{ jobs.deploy-eks.outputs.skipped }}
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
@@ -321,220 +324,15 @@ jobs:
           docker tag app-cdn-variant "${ECR_IMAGE}:${RELEASE_ID}"
           docker push "${ECR_IMAGE}:${RELEASE_ID}"
 
-  deploy-sandbox:
-    name: Deploy Sandbox to ECS
-    needs: [prepare, stamp-release]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-west-2
-
-      - name: Download sandbox task definition
-        run: |
-          aws ecs describe-task-definition \
-            --task-definition teable-sandbox \
-            --query taskDefinition > sandbox-task-definition-raw.json
-
-      - name: Clean sandbox task definition for registration
-        run: |
-          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy, .enableFaultInjection, .faultInjectionPolicy)' \
-            sandbox-task-definition-raw.json > sandbox-task-definition.json
-
-      - name: Render sandbox task definition with new image
-        id: render-sandbox-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: sandbox-task-definition.json
-          container-name: teable-sandbox
-          image: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-sandbox-cloud:${{ inputs.image_tag }}
-
-      - name: Deploy sandbox to ECS service
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-        with:
-          task-definition: ${{ steps.render-sandbox-task-def.outputs.task-definition }}
-          service: teable-sandbox
-          cluster: teable
-          wait-for-service-stability: true
-
-  deploy-app:
-    name: Deploy Main to ECS
-    # patch-cdn must have finalized the release.<id> tag (and its assets)
-    # before the migration one-off task or the service pulls it.
+  # EKS is THE production deploy since 2026-07-27 (100% traffic cutover;
+  # ECS legs removed from this workflow the same day). DB migration runs as
+  # a K8s Job before the deployments roll.
+  deploy-eks:
+    name: Deploy to Production EKS
     needs: [prepare, stamp-release, patch-cdn]
     runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-west-2
-
-      - name: Download current task definition
-        run: |
-          aws ecs describe-task-definition \
-            --task-definition teable \
-            --query taskDefinition > task-definition-raw.json
-
-      - name: Clean task definition for registration
-        run: |
-          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy, .enableFaultInjection, .faultInjectionPolicy)' \
-            task-definition-raw.json > task-definition.json
-
-      - name: Validate computed outbox requirements
-        run: |
-          if ! jq -e '
-            .containerDefinitions[]
-            | select(.name == "teable")
-            | [
-                ((.environment // [])[] | select(.name == "BACKEND_CACHE_REDIS_URI") | .value),
-                ((.secrets // [])[] | select(.name == "BACKEND_CACHE_REDIS_URI") | .valueFrom)
-              ]
-            | first
-            | select(type == "string" and length > 0)
-            | select(test("(^|@|//)(127\\.0\\.0\\.1|localhost|0\\.0\\.0\\.0|\\[?::1\\]?)(:|/)") | not)
-          ' task-definition.json > /dev/null; then
-            echo "::error::BullMQ computed outbox requires a shared, non-loopback BACKEND_CACHE_REDIS_URI"
-            exit 1
-          fi
-
-          if jq -e '
-            .containerDefinitions[]
-            | select(.name == "teable")
-            | (.environment // [])[]
-            | select(.name == "V2_COMPUTED_UPDATE_MODE" and (.value | ascii_downcase) == "sync")
-          ' task-definition.json > /dev/null; then
-            echo "::error::Remove V2_COMPUTED_UPDATE_MODE=sync before enabling BullMQ computed outbox"
-            exit 1
-          fi
-
-      - name: Render task definition with new image
-        id: render-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: task-definition.json
-          container-name: teable
-          image: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-cloud:${{ inputs.image_tag }}
-
-      - name: Run database migration as one-off task
-        run: |
-          # Get network config from the service for RunTask
-          NETWORK_CONFIG=$(aws ecs describe-services \
-            --cluster teable \
-            --services teable-service-1 \
-            --query 'services[0].networkConfiguration' \
-            --output json)
-
-          # Register a temporary task definition with the new image for migration
-          TASK_DEF_ARN=$(aws ecs register-task-definition \
-            --cli-input-json file://${{ steps.render-task-def.outputs.task-definition }} \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
-
-          echo "Running migration with task definition: $TASK_DEF_ARN"
-
-          # Run migration as a one-off task with command override
-          TASK_ARN=$(aws ecs run-task \
-            --cluster teable \
-            --task-definition "$TASK_DEF_ARN" \
-            --launch-type FARGATE \
-            --network-configuration "$NETWORK_CONFIG" \
-            --overrides '{
-              "containerOverrides": [{
-                "name": "teable",
-                "command": ["migrate-only"]
-              }]
-            }' \
-            --query 'tasks[0].taskArn' \
-            --output text)
-
-          echo "Migration task started: $TASK_ARN"
-
-          # Wait for migration task to complete
-          echo "Waiting for migration to complete..."
-          aws ecs wait tasks-stopped --cluster teable --tasks "$TASK_ARN"
-
-          # Check exit code
-          EXIT_CODE=$(aws ecs describe-tasks \
-            --cluster teable \
-            --tasks "$TASK_ARN" \
-            --query 'tasks[0].containers[?name==`teable`].exitCode | [0]' \
-            --output text)
-
-          echo "Migration exit code: $EXIT_CODE"
-          if [ "$EXIT_CODE" != "0" ]; then
-            echo "::error::Database migration failed with exit code $EXIT_CODE"
-            # Print migration task logs for debugging
-            TASK_ID=$(echo "$TASK_ARN" | awk -F'/' '{print $NF}')
-            aws logs get-log-events \
-              --log-group-name /ecs/teable \
-              --log-stream-name "ecs/teable/$TASK_ID" \
-              --limit 50 \
-              --query 'events[*].message' \
-              --output text 2>/dev/null || true
-            exit 1
-          fi
-
-          echo "Database migration completed successfully"
-
-      - name: Update task definition with skip-migrate command
-        run: |
-          # Add skip-migrate command to the main container and remove the db-migrate init container if present
-          jq '(.containerDefinitions[] | select(.name == "teable")).command = ["skip-migrate"]
-              | .containerDefinitions = [.containerDefinitions[] | select(.name != "db-migrate")]
-              | (.containerDefinitions[] | select(.name == "teable")) |= del(.dependsOn)' \
-            "${{ steps.render-task-def.outputs.task-definition }}" > task-definition-skip-migrate.json
-
-      - name: Deploy to ECS service
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-        with:
-          task-definition: task-definition-skip-migrate.json
-          service: teable-service-1
-          cluster: teable
-          wait-for-service-stability: true
-
-      - name: Ensure BYODB migration worker ECS service
-        env:
-          AWS_REGION: us-west-2
-          ECS_CLUSTER: teable
-          APP_SERVICE: teable-service-1
-          APP_CONTAINER: teable
-          APP_TASK_DEFINITION_FILE: task-definition-skip-migrate.json
-          WORKER_TASK_FAMILY: teable-byodb-migration-worker
-          WORKER_SERVICE: teable-byodb-migration-worker
-          WORKER_OTEL_SERVICE_NAME: teable-ai-byodb-migration-worker
-        run: .github/scripts/ensure-byodb-migration-worker-ecs.sh
-
-  # Dual-run phase (since 2026-07-27): production deploys land BOTH on ECS
-  # (live traffic) and on teable-infra EKS (attached to teable-alb at weight
-  # 0). A failure here marks the run red so drift is visible, but does NOT
-  # gate promote-latest / sync-aliyun — the EKS side serves no traffic yet.
-  # At formal cutover, fold this job into the notify/promote gating.
-  #
-  # Deploys by DIGEST: patch-cdn rewrites the release tag in place, so a tag
-  # reference neither triggers rollouts on redeploys nor survives node image
-  # caches.
-  deploy-eks:
-    name: Deploy to Production EKS (dual-run, weight 0)
-    needs: [prepare, deploy-app, deploy-sandbox]
-    runs-on: ubuntu-latest
-    # Passive side must not fail the run: rollback-launch and any caller
-    # keying off this workflow's conclusion would otherwise skip their own
-    # bookkeeping when only the weight-0 EKS side hiccups. Visibility comes
-    # from the Feishu alert step below, not from a red run.
-    continue-on-error: true
+    outputs:
+      skipped: ${{ (steps.roll.outputs.skipped == 'true' || steps.final.outputs.skipped == 'true') && 'true' || 'false' }}
     permissions:
       id-token: write
       contents: read
@@ -544,7 +342,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::649941507946:role/teable-staging-eks-deploy
-          role-session-name: eks-prod-dual-run
+          role-session-name: eks-prod-deploy
           aws-region: us-west-2
 
       - name: Roll EKS deployments to this release
@@ -555,6 +353,26 @@ jobs:
         run: |
           set -euo pipefail
           aws eks update-kubeconfig --region us-west-2 --name teable-infra
+
+          # ── Computed-outbox config gate (ported from the removed ECS leg:
+          # reject loopback/missing BACKEND_CACHE_REDIS_URI and
+          # V2_COMPUTED_UPDATE_MODE=sync before anything mutates) ──
+          REDIS_URI=$(kubectl -n teable-prod get secret teable-prod-env \
+            -o jsonpath='{.data.BACKEND_CACHE_REDIS_URI}' | base64 -d 2>/dev/null || echo "")
+          if [ -z "$REDIS_URI" ]; then
+            echo "::error::BullMQ computed outbox requires a shared, non-loopback BACKEND_CACHE_REDIS_URI"
+            exit 1
+          fi
+          if echo "$REDIS_URI" | grep -qE '(^|@|//)(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)(:|/)'; then
+            echo "::error::BullMQ computed outbox requires a shared, non-loopback BACKEND_CACHE_REDIS_URI"
+            exit 1
+          fi
+          VMODE=$(kubectl -n teable-prod get secret teable-prod-env \
+            -o jsonpath='{.data.V2_COMPUTED_UPDATE_MODE}' | base64 -d 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo "")
+          if [ "$VMODE" = "sync" ]; then
+            echo "::error::Remove V2_COMPUTED_UPDATE_MODE=sync before enabling BullMQ computed outbox"
+            exit 1
+          fi
 
           # Ordering guard (Codex on #85): token is the RUN id — assigned at
           # run creation, so a run delayed in patch-cdn/migration still keeps
@@ -588,6 +406,61 @@ jobs:
             --query 'imageDetails[0].imageDigest' --output text)
           echo "app:     ${RELEASE_ID} -> ${APP_DIGEST}"
           echo "sandbox: ${RELEASE_ID} -> ${SANDBOX_DIGEST}"
+
+          # ── DB migration as a K8s Job (was an ECS one-off RunTask) ──
+          JOB="migrate-${{ github.run_id }}-${{ github.run_attempt }}"
+          kubectl -n teable-prod delete job "$JOB" --ignore-not-found >/dev/null 2>&1
+          cat <<MIGEOF | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${JOB}
+            namespace: teable-prod
+          spec:
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 7200
+            activeDeadlineSeconds: 900
+            template:
+              spec:
+                restartPolicy: Never
+                nodeSelector: { teable.io/node-pool: general }
+                containers:
+                  - name: migrate
+                    image: ${ECR}/teable/teable-cloud@${APP_DIGEST}
+                    args: ["migrate-only"]
+                    envFrom: [{ secretRef: { name: teable-prod-env } }]
+                    resources:
+                      requests: { cpu: 250m, memory: 1Gi }
+                      limits: { cpu: "2", memory: 3Gi }
+          MIGEOF
+          echo "waiting for migration job ${JOB}..."
+          MIG_OK=""
+          for i in $(seq 1 180); do
+            ST=$(kubectl -n teable-prod get job "${JOB}" \
+              -o jsonpath='{range .status.conditions[*]}{.type}={.status} {end}' 2>/dev/null || echo "")
+            case "$ST" in
+              *Complete=True*) MIG_OK=1; break ;;
+              *Failed=True*)   break ;;
+            esac
+            sleep 5
+          done
+          if [ -z "$MIG_OK" ]; then
+            echo "::error::DB migration failed or timed out"
+            kubectl -n teable-prod logs "job/${JOB}" --tail=100 || true
+            exit 1
+          fi
+          echo "migration completed"
+
+          # Re-validate ownership: a newer run may have claimed and deployed
+          # while our migration was running (Codex P1 on #87). Step aside
+          # instead of rolling its images back.
+          CUR2=$(kubectl -n teable-prod get deploy teable-prod \
+            -o jsonpath='{.metadata.annotations.teable\.io/deploy-run-id}')
+          if [ "$CUR2" != "$MY_ID" ]; then
+            echo "::notice::run $CUR2 took over during migration; skipping rollout"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           kubectl -n teable-prod set image deploy/teable-prod \
             teable="${ECR}/teable/teable-cloud@${APP_DIGEST}"
@@ -642,13 +515,36 @@ jobs:
             done
           done
 
-      - name: Alert Feishu on EKS leg failure (run stays green)
+      - name: Smoke check through the live domain
+        if: steps.roll.outputs.skipped != 'true'
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 10); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 https://app.teable.ai/health || true)
+            [ "$code" = "200" ] && echo "app.teable.ai /health: 200" && exit 0
+            echo "attempt $i: $code"; sleep 6
+          done
+          echo "::error::app.teable.ai /health never returned 200 after rollout"
+          exit 1
+
+      - name: Final ownership check (post-verification)
+        if: steps.roll.outputs.skipped != 'true'
+        id: final
+        run: |
+          FINAL=$(kubectl -n teable-prod get deploy teable-prod \
+            -o jsonpath='{.metadata.annotations.teable\.io/deploy-run-id}')
+          if [ "$FINAL" != "${{ github.run_id }}" ]; then
+            echo "::notice::run $FINAL took over during verification; downstream promotion suppressed"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Alert Feishu on deploy failure
         if: failure()
         env:
           RELEASE_ID: ${{ inputs.image_tag }}
         run: |
           PAYLOAD=$(jq -n \
-            --arg l1 "⚠️ 生产 EKS 双跑腿失败（不阻塞发布链）: ${RELEASE_ID}" \
+            --arg l1 "🚨 生产 EKS 发布失败: ${RELEASE_ID}" \
             --arg l2 "run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             '{msg_type:"text",content:{text:($l1 + "\n" + $l2)}}')
           HTTP=$(curl -s -o /tmp/feishu.out -w "%{http_code}" -X POST \
@@ -660,7 +556,9 @@ jobs:
 
   promote-latest:
     name: Promote Release Tag to Latest
-    needs: [prepare, deploy-sandbox, deploy-app]
+    needs: [prepare, deploy-eks]
+    # A superseded run must not rewrite latest tags (Codex P1 on #87).
+    if: needs.deploy-eks.outputs.skipped != 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -734,8 +632,8 @@ jobs:
   # must never run twice against the same package.
   cleanup-beta:
     name: Reap cloud staging versions
-    needs: [deploy-sandbox, deploy-app, promote-latest]
-    if: needs.deploy-sandbox.result == 'success' && needs.deploy-app.result == 'success'
+    needs: [deploy-eks, promote-latest]
+    if: needs.deploy-eks.result == 'success' && needs.deploy-eks.outputs.skipped != 'true'
     # Housekeeping must never mark a successful production deploy as
     # failed — the scheduled ghcr-gc backstop catches misses.
     continue-on-error: true
@@ -756,11 +654,11 @@ jobs:
 
   notify:
     name: Record Deployment in Teable
-    needs: [prepare, deploy-sandbox, deploy-app, promote-latest, sync-aliyun]
+    needs: [prepare, deploy-eks, promote-latest, sync-aliyun]
     if: >-
       inputs.record_launch != false &&
-      needs.deploy-sandbox.result == 'success' &&
-      needs.deploy-app.result == 'success' &&
+      needs.deploy-eks.result == 'success' &&
+      needs.deploy-eks.outputs.skipped != 'true' &&
       needs.promote-latest.result == 'success' &&
       needs.sync-aliyun.result == 'success'
     runs-on: ubuntu-latest

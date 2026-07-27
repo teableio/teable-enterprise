@@ -68,11 +68,36 @@ jobs:
 
   promote-ee:
     name: Roll back EE latest
-    needs: validate-lock
+    # EE latest must not move until the region rollback actually landed —
+    # and never for a superseded Cloud rollback (Codex on #87), or EE and
+    # Cloud latest diverge.
+    needs: [validate-lock, deploy-ai, deploy-cn]
+    if: >-
+      always() &&
+      needs.validate-lock.result == 'success' &&
+      ((inputs.region == 'teable.ai' && needs.deploy-ai.result == 'success' && needs.deploy-ai.outputs.deploy_skipped != 'true') ||
+       (inputs.region == 'teable.cn' && needs.deploy-cn.result == 'success'))
     uses: ./.github/workflows/promote-latest-ee.yaml
     with:
       release_id: ${{ inputs.image_tag }}
     secrets: inherit
+
+  # A superseded rollback (a newer production run took over mid-flight) must
+  # fail this run loudly: nothing was installed, the rollback lock is NOT
+  # released, and an operator has to re-decide (Codex round-4 on #87).
+  fail-superseded:
+    name: Fail loudly when the rollback was superseded
+    needs: [deploy-ai]
+    if: >-
+      always() && inputs.region == 'teable.ai' &&
+      needs.deploy-ai.result == 'success' &&
+      needs.deploy-ai.outputs.deploy_skipped == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report superseded rollback
+        run: |
+          echo "::error::rollback of ${{ inputs.image_tag }} was superseded by a newer production run — nothing was installed, the rollback lock is still held; re-evaluate and retry or release the lock manually"
+          exit 1
 
   record-rollback:
     name: Record successful rollback Launch
@@ -81,7 +106,7 @@ jobs:
       always() &&
       needs.validate-lock.result == 'success' &&
       needs.promote-ee.result == 'success' &&
-      ((inputs.region == 'teable.ai' && needs.deploy-ai.result == 'success') ||
+      ((inputs.region == 'teable.ai' && needs.deploy-ai.result == 'success' && needs.deploy-ai.outputs.deploy_skipped != 'true') ||
        (inputs.region == 'teable.cn' && needs.deploy-cn.result == 'success'))
     runs-on: ubuntu-latest
     steps:
