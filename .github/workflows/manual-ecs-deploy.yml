@@ -556,19 +556,25 @@ jobs:
           set -euo pipefail
           aws eks update-kubeconfig --region us-west-2 --name teable-infra
 
-          # Ordering guard (replaces workflow-level concurrency): a deploy
-          # attempt that STARTED later wins. If the deployments already carry
-          # a newer deploy-epoch, this older attempt steps aside instead of
-          # rolling them back. Rollbacks still work: a rollback run starts
-          # later, so its epoch is higher.
-          EPOCH=$(date +%s)
-          CUR=$(kubectl -n teable-prod get deploy teable-prod \
-            -o jsonpath='{.metadata.annotations.teable\.io/deploy-epoch}' 2>/dev/null || echo "")
-          if [ -n "$CUR" ] && [ "$CUR" -gt "$EPOCH" ]; then
-            echo "::notice::newer deploy-epoch $CUR already applied (mine: $EPOCH); skipping EKS roll"
-            echo "skipped=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          # Ordering guard (Codex on #85): token is the RUN id — assigned at
+          # run creation, so a run delayed in patch-cdn/migration still keeps
+          # its original order (run ids increase monotonically per repo, and
+          # workflow_call shares the caller's run id). Annotation write is a
+          # CAS via resourceVersion; the primary deploy acts as the lock.
+          MY_ID=${{ github.run_id }}
+          for attempt in 1 2 3 4 5; do
+            read -r RV CUR <<<"$(kubectl -n teable-prod get deploy teable-prod \
+              -o jsonpath='{.metadata.resourceVersion} {.metadata.annotations.teable\.io/deploy-run-id}')"
+            if [ -n "$CUR" ] && [ "$CUR" -ge "$MY_ID" ] 2>/dev/null; then
+              echo "::notice::run $CUR (>= mine $MY_ID) already deployed EKS; skipping"
+              echo "skipped=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            kubectl -n teable-prod annotate --overwrite --resource-version="$RV" \
+              deploy/teable-prod teable.io/deploy-run-id="$MY_ID" 2>/dev/null && break
+            [ "$attempt" = "5" ] && echo "::error::deploy-run-id CAS failed 5x" && exit 1
+            sleep 2
+          done
 
           APP_DIGEST=$(aws ecr describe-images --region us-west-2 \
             --repository-name teable/teable-cloud \
@@ -589,8 +595,17 @@ jobs:
             sandbox="${ECR}/teable/teable-sandbox-cloud@${SANDBOX_DIGEST}"
 
           kubectl -n teable-prod annotate --overwrite \
-            deploy/teable-prod deploy/teable-prod-byodb-worker deploy/teable-sandbox \
-            teable.io/deploy-epoch="$EPOCH" teable.io/deploy-release="$RELEASE_ID"
+            deploy/teable-prod-byodb-worker deploy/teable-sandbox \
+            teable.io/deploy-run-id="$MY_ID" teable.io/deploy-release="$RELEASE_ID"
+          kubectl -n teable-prod annotate --overwrite \
+            deploy/teable-prod teable.io/deploy-release="$RELEASE_ID"
+
+          # Post-mutation check: if a newer run took the lock mid-flight the
+          # images may interleave — surface it instead of pretending order.
+          FINAL=$(kubectl -n teable-prod get deploy teable-prod \
+            -o jsonpath='{.metadata.annotations.teable\.io/deploy-run-id}')
+          [ "$FINAL" != "$MY_ID" ] && echo "::warning::run $FINAL overlapped this deploy; verify EKS image versions"
+          true
 
       - name: Wait for rollouts
         if: steps.roll.outputs.skipped != 'true'
@@ -614,11 +629,10 @@ jobs:
               STATES=$(aws elbv2 describe-target-health --region us-west-2 \
                 --target-group-arn "$TG_ARN" \
                 --query 'TargetHealthDescriptions[].TargetHealth.State' --output text | tr '\t' '\n')
-              HEALTHY=$(echo "$STATES" | grep -c '^healthy' || true)
-              INITIAL=$(echo "$STATES" | grep -c '^initial' || true)
-              UNHEALTHY=$(echo "$STATES" | grep -c '^unhealthy' || true)
-              echo "$tg_name: healthy=$HEALTHY initial=$INITIAL unhealthy=$UNHEALTHY (draining ignored)"
-              [ "$HEALTHY" -ge 1 ] && [ "$INITIAL" = "0" ] && [ "$UNHEALTHY" = "0" ] && break
+              HEALTHY=$(echo "$STATES" | awk '/^healthy/{c++} END{print c+0}')
+              NOTOK=$(echo "$STATES" | awk 'NF && $0 !~ /^healthy/ && $0 !~ /^draining/ {c++} END{print c+0}')
+              echo "$tg_name: healthy=$HEALTHY not-ok=$NOTOK (draining ignored)"
+              [ "$HEALTHY" -ge 1 ] && [ "$NOTOK" = "0" ] && break
               [ "$i" = "30" ] && echo "::error::$tg_name targets not settled healthy" && exit 1
               sleep 10
             done
@@ -629,11 +643,15 @@ jobs:
         env:
           RELEASE_ID: ${{ inputs.image_tag }}
         run: |
-          curl -s -X POST \
+          PAYLOAD=$(jq -n --arg t "⚠️ 生产 EKS 双跑腿失败（不阻塞发布链）: ${RELEASE_ID}
+run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{msg_type:"text",content:{text:$t}}')
+          HTTP=$(curl -s -o /tmp/feishu.out -w "%{http_code}" -X POST \
             'https://open.feishu.cn/open-apis/bot/v2/hook/66b6ebf2-9bbd-4e41-b629-4062a6be4a42' \
-            -H 'Content-Type: application/json' \
-            -d "$(printf '{"msg_type":"text","content":{"text":"⚠️ 生产 EKS 双跑腿失败（不阻塞发布链）: %s\nrun: %s"}}' \
-              "$RELEASE_ID" "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}")" || true
+            -H 'Content-Type: application/json' -d "$PAYLOAD")
+          if [ "$HTTP" -lt 200 ] || [ "$HTTP" -ge 300 ]; then
+            echo "::warning::Feishu alert failed HTTP $HTTP: $(cat /tmp/feishu.out)"
+          fi
 
   promote-latest:
     name: Promote Release Tag to Latest
