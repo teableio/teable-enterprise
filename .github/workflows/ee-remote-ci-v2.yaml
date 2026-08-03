@@ -130,7 +130,7 @@ jobs:
     if: >-
       !cancelled() && needs.unit-deps.result == 'success'
     runs-on: ubuntu-latest
-    name: V2 Unit Tests (${{ matrix.pkg.name }})
+    name: V2 Unit Tests (${{ matrix.pkg.label }})
     timeout-minutes: 20
     env:
       CI: 1
@@ -141,21 +141,38 @@ jobs:
       fail-fast: false
       matrix:
         pkg:
-          - name: '@teable/v2-adapter-db-postgres-pg'
+          - label: '@teable/v2-adapter-db-postgres-pg'
+            name: '@teable/v2-adapter-db-postgres-pg'
             gate: v2_adapter_db_postgres_pg
-          - name: '@teable/v2-adapter-repository-postgres'
+          - label: '@teable/v2-adapter-repository-postgres'
+            name: '@teable/v2-adapter-repository-postgres'
             gate: v2_adapter_repository_postgres
-          - name: '@teable/v2-adapter-table-repository-postgres'
+          - label: '@teable/v2-adapter-table-repository-postgres Shard 1/2'
+            name: '@teable/v2-adapter-table-repository-postgres'
             gate: v2_adapter_table_repository_postgres
-          - name: '@teable/v2-adapter-table-query-ops-postgres'
+            shard: 1/2
+          - label: '@teable/v2-adapter-table-repository-postgres Shard 2/2'
+            name: '@teable/v2-adapter-table-repository-postgres'
+            gate: v2_adapter_table_repository_postgres
+            shard: 2/2
+          - label: '@teable/v2-adapter-table-query-ops-postgres'
+            name: '@teable/v2-adapter-table-query-ops-postgres'
             gate: v2_adapter_table_query_ops_postgres
             postgres: true
             dburl: 'postgresql://postgres:postgres@localhost:5432/teable_test'
-          - name: '@teable/v2-core'
+          - label: '@teable/v2-core Shard 1/2'
+            name: '@teable/v2-core'
             gate: v2_core
-          - name: '@teable/v2-formula-sql-pg'
+            shard: 1/2
+          - label: '@teable/v2-core Shard 2/2'
+            name: '@teable/v2-core'
+            gate: v2_core
+            shard: 2/2
+          - label: '@teable/v2-formula-sql-pg'
+            name: '@teable/v2-formula-sql-pg'
             gate: v2_formula_sql_pg
-          - name: '@teable/v2-table-query-ops'
+          - label: '@teable/v2-table-query-ops'
+            name: '@teable/v2-table-query-ops'
             gate: v2_table_query_ops
 
     # Empty image skips the service container for matrix entries without
@@ -219,12 +236,16 @@ jobs:
             export PRISMA_DATABASE_URL="${{ matrix.pkg.dburl }}"
           fi
           mkdir -p "$LOG_DIR"
-          SLUG=$(echo "${{ matrix.pkg.name }}" | tr '@/' '--')
+          SLUG=$(echo "${{ matrix.pkg.label }}" | tr '@/' '--' | tr ' ' '-')
           echo "SLUG=$SLUG" >> "$GITHUB_ENV"
           status=0
           {
-            echo "=== ${{ matrix.pkg.name }} test-unit-cover ==="
-            pnpm -F "${{ matrix.pkg.name }}" --if-present test-unit-cover
+            echo "=== ${{ matrix.pkg.label }} test-unit-cover ==="
+            if [ -n "${{ matrix.pkg.shard }}" ]; then
+              pnpm -F "${{ matrix.pkg.name }}" test-unit-cover --shard=${{ matrix.pkg.shard }}
+            else
+              pnpm -F "${{ matrix.pkg.name }}" --if-present test-unit-cover
+            fi
           } >> "$LOG_DIR/v2-unit-$SLUG.log" 2>&1 || status=$?
           echo "v2 unit exit=$status ($(wc -l < "$LOG_DIR/v2-unit-$SLUG.log") log lines)"
           exit $status
@@ -236,7 +257,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           mkdir -p "$LOG_DIR"
-          SLUG="${SLUG:-$(echo "${{ matrix.pkg.name }}" | tr '@/' '--')}"
+          SLUG="${SLUG:-$(echo "${{ matrix.pkg.label }}" | tr '@/' '--' | tr ' ' '-')}"
           [ -f "$LOG_DIR/v2-unit-$SLUG.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-unit-$SLUG.log"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
           gh release upload "$LOG_TAG" "$LOG_DIR/v2-unit-$SLUG.log" -R "$LOGS_REPO" --clobber
@@ -258,10 +279,14 @@ jobs:
       fail-fast: true
       matrix:
         shard:
-          - 1/4
-          - 2/4
-          - 3/4
-          - 4/4
+          - 1/8
+          - 2/8
+          - 3/8
+          - 4/8
+          - 5/8
+          - 6/8
+          - 7/8
+          - 8/8
     env:
       CI: 1
       TESTCONTAINERS_REUSE_ENABLE: 'false'
@@ -294,7 +319,7 @@ jobs:
           status=0
           {
             echo "=== v2 e2e shard ${{ matrix.shard }} ==="
-            pnpm -C community/packages/v2/e2e exec vitest run --silent --bail 1 --exclude src/field-conversion-deadlock.e2e.spec.ts --shard=${{ matrix.shard }}
+            pnpm -C community/packages/v2/e2e exec vitest run --silent --bail 1 --exclude src/field-conversion-deadlock.e2e.spec.ts --exclude src/computed-json-formula-cascade.e2e.spec.ts --shard=${{ matrix.shard }}
           } >> "$LOG_DIR/v2-e2e-$SLUG.log" 2>&1 || status=$?
           echo "v2 e2e exit=$status ($(wc -l < "$LOG_DIR/v2-e2e-$SLUG.log") log lines)"
           exit $status
@@ -315,6 +340,63 @@ jobs:
           if [ "$JOB_STATUS" != "success" ]; then
             echo failed > "$LOG_DIR/v2-e2e-$SLUG.failed"
             gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-$SLUG.failed" -R "$LOGS_REPO" --clobber
+          fi
+
+  e2e-json-formula-cascade:
+    needs: [e2e-deps]
+    if: >-
+      !cancelled() && needs.e2e-deps.result == 'success'
+    runs-on: ubuntu-latest
+    name: V2 E2E Tests (JSON Formula Cascade)
+    timeout-minutes: 15
+    env:
+      CI: 1
+      TESTCONTAINERS_REUSE_ENABLE: 'false'
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
+
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: 📥 Restore workspace dependencies
+        uses: ./.github/actions/workspace-deps-download
+        with:
+          name: v2-e2e-deps-${{ github.run_id }}
+
+      - name: 🧪 Run JSON formula cascade regression
+        run: |
+          mkdir -p "$LOG_DIR"
+          status=0
+          {
+            echo "=== v2 e2e JSON formula cascade regression ==="
+            pnpm -C community/packages/v2/e2e exec vitest run --silent=true --bail 1 src/computed-json-formula-cascade.e2e.spec.ts
+          } >> "$LOG_DIR/v2-e2e-json-formula-cascade.log" 2>&1 || status=$?
+          echo "v2 e2e JSON formula cascade exit=$status ($(wc -l < "$LOG_DIR/v2-e2e-json-formula-cascade.log") log lines)"
+          exit $status
+
+      - name: 📤 Ship log
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          [ -f "$LOG_DIR/v2-e2e-json-formula-cascade.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-e2e-json-formula-cascade.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-json-formula-cascade.log" -R "$LOGS_REPO" --clobber
+          if [ "$JOB_STATUS" != "success" ]; then
+            echo failed > "$LOG_DIR/v2-e2e-json-formula-cascade.failed"
+            gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-json-formula-cascade.failed" -R "$LOGS_REPO" --clobber
           fi
 
   e2e-postgres-only:
@@ -377,7 +459,7 @@ jobs:
           fi
 
   verdict:
-    needs: [unit-deps, e2e-deps, unit, e2e, e2e-postgres-only]
+    needs: [unit-deps, e2e-deps, unit, e2e, e2e-json-formula-cascade, e2e-postgres-only]
     if: always()
     runs-on: ubuntu-latest
     name: V2 verdict
@@ -406,7 +488,7 @@ jobs:
         uses: ./.github/actions/remote-ci-conclude
         with:
           suite: v2
-          results: 'unit-deps=${{ needs.unit-deps.result }} e2e-deps=${{ needs.e2e-deps.result }} unit=${{ needs.unit.result }} e2e=${{ needs.e2e.result }} postgres-only=${{ needs.e2e-postgres-only.result }}'
+          results: 'unit-deps=${{ needs.unit-deps.result }} e2e-deps=${{ needs.e2e-deps.result }} unit=${{ needs.unit.result }} e2e=${{ needs.e2e.result }} json-formula-cascade=${{ needs.e2e-json-formula-cascade.result }} postgres-only=${{ needs.e2e-postgres-only.result }}'
           app-token: ${{ steps.app.outputs.token }}
           logs-token: ${{ secrets.PACKAGES_KEY }}
 
@@ -423,4 +505,4 @@ jobs:
             -f "client_payload[log_tag]=${LOG_TAG}" \
             -f "client_payload[remote_run_url]=${RUN_URL}" \
             -f "client_payload[check_run_id]=${{ github.event.client_payload.check_run_id }}" \
-            -f "client_payload[results]=unit-deps=${{ needs.unit-deps.result }} e2e-deps=${{ needs.e2e-deps.result }} unit=${{ needs.unit.result }} e2e=${{ needs.e2e.result }} postgres-only=${{ needs.e2e-postgres-only.result }}"
+            -f "client_payload[results]=unit-deps=${{ needs.unit-deps.result }} e2e-deps=${{ needs.e2e-deps.result }} unit=${{ needs.unit.result }} e2e=${{ needs.e2e.result }} json-formula-cascade=${{ needs.e2e-json-formula-cascade.result }} postgres-only=${{ needs.e2e-postgres-only.result }}"
