@@ -261,6 +261,13 @@ jobs:
   # is already cached and this re-exports in ~1 min; when the lockfile
   # changes, the release builds cold exactly as before while this job seeds
   # the cache for the next one.
+  #
+  # mode=min, not mode=max: mode=max exported every intermediate layer of
+  # every deps stage on both arches, several times the blob traffic of the
+  # release images themselves. That volume is what tipped the org into GHCR's
+  # secondary rate limit on 2026-08-04 (403 on blob HEAD/GET, org-wide, read
+  # and write alike). The targets here ARE the deps stages, so mode=min still
+  # exports exactly what the app builds import via cache-from.
   populate-deps-cache:
     needs: [prepare-release]
     runs-on: ${{ matrix.runner }}
@@ -312,7 +319,7 @@ jobs:
               --build-arg ENABLE_CSP=false \
               --build-arg NEXT_BUILD_ENV_EDITION=EE \
               --cache-from "type=registry,ref=${ref}" \
-              --cache-to "type=registry,ref=${ref},mode=max,compression=zstd,force-compression=true,oci-mediatypes=true,image-manifest=true" \
+              --cache-to "type=registry,ref=${ref},mode=min,compression=zstd,force-compression=true,oci-mediatypes=true,image-manifest=true" \
               .
             echo "::endgroup::"
           done
