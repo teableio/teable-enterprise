@@ -112,8 +112,23 @@ jobs:
               --platform="linux/amd64" \
               --push
 
+  notify-skip-deploy:
+    needs: [build-push]
+    if: github.event.client_payload.skip_deploy == true || github.event.client_payload.skip_deploy == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment images pushed on PR
+        run: |
+          BODY="📦 Images built and pushed, deploy skipped. Image tags: alpha-pr-${{ github.event.client_payload.pr_number }}, ${{ needs.build-push.outputs.main_commit_sha }}"
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.PACKAGES_KEY }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/teableio/teable-ee/issues/${{ github.event.client_payload.pr_number }}/comments" \
+            -d "{\"body\":\"${BODY}\"}"
+
   deploy:
     needs: [build-push]
+    if: github.event.client_payload.skip_deploy != true && github.event.client_payload.skip_deploy != 'true'
     runs-on: ubuntu-latest
     env:
       NAMESPACE: 38puz7wo
