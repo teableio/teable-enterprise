@@ -104,6 +104,8 @@ jobs:
         uses: crazy-max/ghaction-github-runtime@v3
 
       - name: 📦 Build and push
+        env:
+          PREVIEW_PUSH_REGISTRIES: ${{ (github.event.client_payload.skip_deploy == true || github.event.client_payload.skip_deploy == 'true') && 'registry.cn-shenzhen.aliyuncs.com,ghcr.io' || '' }}
         run: |
           zx scripts/build-image.mjs --file=dockers/teable/${{ matrix.file }} \
               --build-arg="ENABLE_CSP=false" \
