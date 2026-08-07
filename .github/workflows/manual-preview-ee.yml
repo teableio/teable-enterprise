@@ -179,6 +179,7 @@ jobs:
           # non-sensitive entries and stays editable in the UI, the secret holds
 
           # credentials and wins on duplicate keys. See render-preview-env-secret.sh.
+          PREVIEW_PRESET_ENV_DEFAULTS: SANDBOX_OPENSANDBOX_IMAGE=registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-agent-ee-preview
           PREVIEW_PRESET_ENV_VARS: ${{ vars.PREVIEW_PRESET_ENV_VARS }}
           PREVIEW_PRESET_ENV: ${{ secrets.PREVIEW_PRESET_ENV }}
         run: |
