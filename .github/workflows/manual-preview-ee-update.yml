@@ -188,6 +188,9 @@ jobs:
           ENABLE_TRACING: ${{ steps.labels.outputs.enable_tracing }}
           PREVIEW_EE_ENTERPRISE_LICENSE_KEY: ${{ secrets.PREVIEW_EE_ENTERPRISE_LICENSE_KEY }}
           PREVIEW_CONFIG_SOURCE: ${{ secrets.PREVIEW_CONFIG_SOURCE }}
+          # Optional dotenv blob of preset env for previews; see
+          # render-preview-env-secret.sh. Unset just means no preset env.
+          PREVIEW_PRESET_ENV: ${{ secrets.PREVIEW_PRESET_ENV }}
         run: |
           if [ -z "${PREVIEW_EE_ENTERPRISE_LICENSE_KEY}" ]; then
             echo "::error::Missing PREVIEW_EE_ENTERPRISE_LICENSE_KEY secret"
@@ -272,7 +275,8 @@ jobs:
                             key: PREVIEW_CONFIG_SOURCE
           EOF
           )
-          PREVIEW_EXTRA_RESOURCES="${LICENSE_SECRET}"$'\n'"${PREVIEW_CONFIG_SECRET}"
+          PREVIEW_ENV_SECRET=$(INSTANCE_NAME="${{ env.INSTANCE_NAME }}" bash .github/scripts/render-preview-env-secret.sh)
+          PREVIEW_EXTRA_RESOURCES="${LICENSE_SECRET}"$'\n'"${PREVIEW_CONFIG_SECRET}"$'\n'"${PREVIEW_ENV_SECRET}"
           PREVIEW_EXTRA_ENV="${LICENSE_ENV}
           ${PREVIEW_CONFIG_ENV}"
           PREVIEW_EXTRA_RESOURCES="${PREVIEW_EXTRA_RESOURCES}" PREVIEW_EXTRA_ENV="${PREVIEW_EXTRA_ENV}" perl -0pi -e 's/# __PREVIEW_EXTRA_RESOURCES__/$ENV{PREVIEW_EXTRA_RESOURCES}/g; s/            #__PREVIEW_EXTRA_ENV__/$ENV{PREVIEW_EXTRA_ENV}/g' deploy.yaml
@@ -340,6 +344,42 @@ jobs:
 
           kubectl -n ns-${{ env.NAMESPACE }} set env deployment/teable-${{ env.INSTANCE_NAME }} \
             --from=secret/teable-${{ env.INSTANCE_NAME }}-preview-config
+
+          rm -f ~/.kube/config
+
+      # The normal update path never re-renders the template, so teable-ee is
+      # not at the workspace root here. Checking it out under its own path
+      # leaves the root and deployment-tooling untouched.
+      - name: Checkout preview tooling
+        if: steps.check_deploy.outcome == 'success'
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ github.event.client_payload.ref }}
+          path: preview-tooling
+
+      # Previews created before envFrom existed have no reference to the preset
+      # Secret, and the update path does not re-apply the template — so the
+      # Deployment is patched too, not just the Secret refreshed. Both are
+      # idempotent. New Secret contents reach the container on the image
+      # rollout that follows, since envFrom is read at pod start.
+      - name: Ensure preview preset env
+        if: steps.check_deploy.outcome == 'success'
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          PREVIEW_PRESET_ENV: ${{ secrets.PREVIEW_PRESET_ENV }}
+        run: |
+          mkdir -p ~/.kube
+          echo "${KUBE_CONFIG}" | base64 -d > ~/.kube/config
+
+          INSTANCE_NAME="${{ env.INSTANCE_NAME }}" \
+            bash preview-tooling/.github/scripts/render-preview-env-secret.sh \
+            | kubectl -n ns-${{ env.NAMESPACE }} apply -f -
+
+          kubectl -n ns-${{ env.NAMESPACE }} patch deployment teable-${{ env.INSTANCE_NAME }} \
+            --type=strategic \
+            -p '{"spec":{"template":{"spec":{"containers":[{"name":"teable-${{ env.INSTANCE_NAME }}","envFrom":[{"secretRef":{"name":"teable-${{ env.INSTANCE_NAME }}-preview-env","optional":true}}]}]}}}}'
 
           rm -f ~/.kube/config
 
