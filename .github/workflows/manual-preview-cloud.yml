@@ -32,6 +32,11 @@ jobs:
             file: Dockerfile
           - image: teable-sandbox-cloud-preview
             file: Dockerfile.sandbox
+          # The app pulls its sandbox agent as <prefix>:<own BUILD_VERSION>, and
+          # preview builds stamp BUILD_VERSION with the PR tag — so the agent has
+          # to be built here for that tag to exist. Mirrors the EE preview lane.
+          - image: teable-sandbox-agent-cloud-preview
+            file: Dockerfile.sandbox-agent
     steps:
       - name: Record start time
         id: start_time
