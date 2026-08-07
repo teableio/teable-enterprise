@@ -174,6 +174,14 @@ jobs:
           ENABLE_TRACING: ${{ steps.labels.outputs.enable_tracing }}
           PREVIEW_EE_ENTERPRISE_LICENSE_KEY: ${{ secrets.PREVIEW_EE_ENTERPRISE_LICENSE_KEY }}
           PREVIEW_CONFIG_SOURCE: ${{ secrets.PREVIEW_CONFIG_SOURCE }}
+          # Preset env for previews, both halves optional: the variable holds
+
+          # non-sensitive entries and stays editable in the UI, the secret holds
+
+          # credentials and wins on duplicate keys. See render-preview-env-secret.sh.
+          PREVIEW_PRESET_ENV_DEFAULTS: SANDBOX_OPENSANDBOX_IMAGE=registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-agent-ee-preview
+          PREVIEW_PRESET_ENV_VARS: ${{ vars.PREVIEW_PRESET_ENV_VARS }}
+          PREVIEW_PRESET_ENV: ${{ secrets.PREVIEW_PRESET_ENV }}
         run: |
           if [ -z "${PREVIEW_EE_ENTERPRISE_LICENSE_KEY}" ]; then
             echo "::error::Missing PREVIEW_EE_ENTERPRISE_LICENSE_KEY secret"
@@ -258,7 +266,8 @@ jobs:
                             key: PREVIEW_CONFIG_SOURCE
           EOF
           )
-          PREVIEW_EXTRA_RESOURCES="${LICENSE_SECRET}"$'\n'"${PREVIEW_CONFIG_SECRET}"
+          PREVIEW_ENV_SECRET=$(INSTANCE_NAME="${{ env.INSTANCE_NAME }}" bash .github/scripts/render-preview-env-secret.sh)
+          PREVIEW_EXTRA_RESOURCES="${LICENSE_SECRET}"$'\n'"${PREVIEW_CONFIG_SECRET}"$'\n'"${PREVIEW_ENV_SECRET}"
           PREVIEW_EXTRA_ENV="${LICENSE_ENV}
           ${PREVIEW_CONFIG_ENV}"
           PREVIEW_EXTRA_RESOURCES="${PREVIEW_EXTRA_RESOURCES}" PREVIEW_EXTRA_ENV="${PREVIEW_EXTRA_ENV}" perl -0pi -e 's/# __PREVIEW_EXTRA_RESOURCES__/$ENV{PREVIEW_EXTRA_RESOURCES}/g; s/            #__PREVIEW_EXTRA_ENV__/$ENV{PREVIEW_EXTRA_ENV}/g' deploy.yaml

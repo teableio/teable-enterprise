@@ -32,6 +32,11 @@ jobs:
             file: Dockerfile
           - image: teable-sandbox-cloud-preview
             file: Dockerfile.sandbox
+          # The app pulls its sandbox agent as <prefix>:<own BUILD_VERSION>, and
+          # preview builds stamp BUILD_VERSION with the PR tag — so the agent has
+          # to be built here for that tag to exist. Mirrors the EE preview lane.
+          - image: teable-sandbox-agent-cloud-preview
+            file: Dockerfile.sandbox-agent
     steps:
       - name: Record start time
         id: start_time
@@ -171,6 +176,14 @@ jobs:
           IMAGE_TAG: ${{ steps.get_sha.outputs.sha }}
           ENABLE_TRACING: ${{ steps.labels.outputs.enable_tracing }}
           PREVIEW_CONFIG_SOURCE: ${{ secrets.PREVIEW_CONFIG_SOURCE }}
+          # Preset env for previews, both halves optional: the variable holds
+
+          # non-sensitive entries and stays editable in the UI, the secret holds
+
+          # credentials and wins on duplicate keys. See render-preview-env-secret.sh.
+          PREVIEW_PRESET_ENV_DEFAULTS: SANDBOX_OPENSANDBOX_IMAGE=registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-agent-cloud-preview
+          PREVIEW_PRESET_ENV_VARS: ${{ vars.PREVIEW_PRESET_ENV_VARS }}
+          PREVIEW_PRESET_ENV: ${{ secrets.PREVIEW_PRESET_ENV }}
         run: |
           if [ -z "${PREVIEW_CONFIG_SOURCE}" ]; then
             echo "::error::Missing PREVIEW_CONFIG_SOURCE secret"
@@ -226,7 +239,9 @@ jobs:
                             key: PREVIEW_CONFIG_SOURCE
           EOF
           )
-          PREVIEW_CONFIG_SECRET="${PREVIEW_CONFIG_SECRET}" PREVIEW_CONFIG_ENV="${PREVIEW_CONFIG_ENV}" perl -0pi -e 's/# __PREVIEW_EXTRA_RESOURCES__/$ENV{PREVIEW_CONFIG_SECRET}/g; s/            #__PREVIEW_EXTRA_ENV__/$ENV{PREVIEW_CONFIG_ENV}/g' deploy.yaml
+          PREVIEW_ENV_SECRET=$(INSTANCE_NAME="${{ env.INSTANCE_NAME }}" bash .github/scripts/render-preview-env-secret.sh)
+          PREVIEW_EXTRA_RESOURCES="${PREVIEW_CONFIG_SECRET}"$'\n'"${PREVIEW_ENV_SECRET}"
+          PREVIEW_EXTRA_RESOURCES="${PREVIEW_EXTRA_RESOURCES}" PREVIEW_CONFIG_ENV="${PREVIEW_CONFIG_ENV}" perl -0pi -e 's/# __PREVIEW_EXTRA_RESOURCES__/$ENV{PREVIEW_EXTRA_RESOURCES}/g; s/            #__PREVIEW_EXTRA_ENV__/$ENV{PREVIEW_CONFIG_ENV}/g' deploy.yaml
 
       - name: Apply deploy job
         uses: actions-hub/kubectl@master
