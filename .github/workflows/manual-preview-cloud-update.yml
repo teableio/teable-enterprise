@@ -186,8 +186,12 @@ jobs:
           IMAGE_TAG: ${{ needs.build-push.outputs.main_commit_sha }}
           ENABLE_TRACING: ${{ steps.labels.outputs.enable_tracing }}
           PREVIEW_CONFIG_SOURCE: ${{ secrets.PREVIEW_CONFIG_SOURCE }}
-          # Optional dotenv blob of preset env for previews; see
-          # render-preview-env-secret.sh. Unset just means no preset env.
+          # Preset env for previews, both halves optional: the variable holds
+
+          # non-sensitive entries and stays editable in the UI, the secret holds
+
+          # credentials and wins on duplicate keys. See render-preview-env-secret.sh.
+          PREVIEW_PRESET_ENV_VARS: ${{ vars.PREVIEW_PRESET_ENV_VARS }}
           PREVIEW_PRESET_ENV: ${{ secrets.PREVIEW_PRESET_ENV }}
         run: |
           if [ -z "${PREVIEW_CONFIG_SOURCE}" ]; then
@@ -301,6 +305,7 @@ jobs:
         if: steps.check_deploy.outcome == 'success'
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          PREVIEW_PRESET_ENV_VARS: ${{ vars.PREVIEW_PRESET_ENV_VARS }}
           PREVIEW_PRESET_ENV: ${{ secrets.PREVIEW_PRESET_ENV }}
         run: |
           mkdir -p ~/.kube
