@@ -155,6 +155,55 @@ jobs:
             -d "{\"event_type\":\"teable-stable-promoted\",\"client_payload\":{\"release_id\":\"${RELEASE_ID}\"}}"
           echo "dispatched teable-stable-promoted release_id=${RELEASE_ID}"
 
+  # Acceptance for the tag this promotion publishes. Gated like notify-infra:
+  # both lanes green means the tag is actually pullable.
+  #
+  # Kept as its own job so a failed dispatch does not read as a failed platform
+  # notification.
+  #
+  # Uses the app already configured here rather than a personal token, so the
+  # credential is not tied to one account and does not expire. Needs the
+  # installation extended to teableio/teable-api-lab with Actions write.
+  trigger-api-lab:
+    name: Trigger teable-api-lab acceptance
+    needs: [promote-latest, sync-aliyun]
+    if: needs.promote-latest.result == 'success' && needs.sync-aliyun.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Mint an installation token
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-api-lab
+          # Narrowed to the one thing this job does. The token is revoked when
+          # the job ends.
+          permission-actions: write
+
+      - name: Dispatch acceptance run to teable-api-lab
+        env:
+          DISPATCH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          # Only ever with an exact id: the lab's default tag moves.
+          if [ -z "${RELEASE_ID}" ]; then
+            echo "::error::No release id to test."
+            exit 1
+          fi
+
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/teableio/teable-api-lab/actions/workflows/acceptance.yml/dispatches \
+            -d "{\"ref\":\"main\",\"inputs\":{\"teable_image_tag\":\"${RELEASE_ID}\",\"case_filter\":\"all\"}}"
+
+          echo "dispatched teable-api-lab acceptance teable_image_tag=${RELEASE_ID}"
+
   # With the stable release out, reap old EE staging versions (the
   # teable-staging twin and the in-place sandbox beta-* tags), keeping a
   # small cushion. PACKAGES_KEY has the needed scopes (delete:packages +
