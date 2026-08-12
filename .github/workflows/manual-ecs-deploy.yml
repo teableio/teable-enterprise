@@ -464,13 +464,11 @@ jobs:
 
           kubectl -n teable-prod set image deploy/teable-prod \
             teable="${ECR}/teable/teable-cloud@${APP_DIGEST}"
-          kubectl -n teable-prod set image deploy/teable-prod-byodb-worker \
-            teable="${ECR}/teable/teable-cloud@${APP_DIGEST}"
           kubectl -n teable-prod set image deploy/teable-sandbox \
             sandbox="${ECR}/teable/teable-sandbox-cloud@${SANDBOX_DIGEST}"
 
           kubectl -n teable-prod annotate --overwrite \
-            deploy/teable-prod-byodb-worker deploy/teable-sandbox \
+            deploy/teable-sandbox \
             teable.io/deploy-run-id="$MY_ID" teable.io/deploy-release="$RELEASE_ID"
           kubectl -n teable-prod annotate --overwrite \
             deploy/teable-prod teable.io/deploy-release="$RELEASE_ID"
@@ -489,7 +487,6 @@ jobs:
         run: |
           set -euo pipefail
           kubectl -n teable-prod rollout status deploy/teable-prod --timeout=600s
-          kubectl -n teable-prod rollout status deploy/teable-prod-byodb-worker --timeout=300s
           kubectl -n teable-prod rollout status deploy/teable-sandbox --timeout=300s
 
       - name: Verify ALB target health (weight-0 passive check)

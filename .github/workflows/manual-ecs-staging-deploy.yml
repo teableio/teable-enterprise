@@ -387,13 +387,11 @@ jobs:
 
           kubectl -n teable-staging set image deploy/teable-staging \
             teable="${ECR}/teable/teable-cloud@${APP_DIGEST}"
-          kubectl -n teable-staging set image deploy/teable-staging-byodb-worker \
-            teable="${ECR}/teable/teable-cloud@${APP_DIGEST}"
           kubectl -n teable-staging set image deploy/teable-sandbox \
             sandbox="${ECR}/teable/teable-sandbox-cloud@${SANDBOX_DIGEST}"
 
           kubectl -n teable-staging annotate --overwrite \
-            deploy/teable-staging-byodb-worker deploy/teable-sandbox \
+            deploy/teable-sandbox \
             teable.io/deploy-run-id="$MY_ID" teable.io/deploy-release="$STAGING_TAG"
           kubectl -n teable-staging annotate --overwrite \
             deploy/teable-staging teable.io/deploy-release="$STAGING_TAG"
@@ -410,7 +408,6 @@ jobs:
         run: |
           set -euo pipefail
           kubectl -n teable-staging rollout status deploy/teable-staging --timeout=300s
-          kubectl -n teable-staging rollout status deploy/teable-staging-byodb-worker --timeout=300s
           kubectl -n teable-staging rollout status deploy/teable-sandbox --timeout=300s
 
       - name: Smoke check through the ALB
