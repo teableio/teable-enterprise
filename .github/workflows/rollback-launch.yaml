@@ -44,6 +44,10 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
         run: bash .github/scripts/validate-teable-rollback.sh
 
+  # Tags before release 2026-08-03 (teable-ee#2823) have no in-process BYODB
+  # migration worker, and the standalone worker deployments no longer exist —
+  # rolling back past that point leaves BYODB migration jobs queued with no
+  # consumer (harmless, resumes on roll-forward).
   deploy-ai:
     name: Roll back teable.ai Cloud
     needs: validate-lock

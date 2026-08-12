@@ -334,9 +334,6 @@ jobs:
         id: start_time
         run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
 
-      - name: Checkout code
-        uses: actions/checkout@v4
-
       - name: Update sandbox deployment
         uses: actions-hub/kubectl@master
         env:
