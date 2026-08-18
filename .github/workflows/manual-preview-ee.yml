@@ -308,6 +308,27 @@ jobs:
         with:
           args: exec deployment/teable-${{ env.INSTANCE_NAME }} -- curl -f --retry 30 --retry-delay 5 --retry-connrefused http://localhost:3000/health
 
+      # Fixed preview admin (dev+pr@teable.io) + full-scope instance API
+      # token, surfaced on the PR by the status comment below. Logic lives in
+      # teable-ee: .github/scripts/preview-bootstrap-admin.sh. Kubeconfig
+      # decoding mirrors actions-hub/kubectl (base64 secret). Never fails the
+      # deploy: continue-on-error, plus a file-exists guard so PR refs that
+      # predate the script still deploy cleanly.
+      - name: Bootstrap preview admin
+        id: preview_admin
+        continue-on-error: true
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ ! -f .github/scripts/preview-bootstrap-admin.sh ]; then
+            echo "preview-bootstrap-admin.sh not on this ref, skipping"
+            exit 0
+          fi
+          printf '%s' "${KUBE_CONFIG}" | base64 -d > "${RUNNER_TEMP}/kubeconfig"
+          chmod 600 "${RUNNER_TEMP}/kubeconfig"
+          export KUBECONFIG="${RUNNER_TEMP}/kubeconfig"
+          INSTANCE_NAME="${{ env.INSTANCE_NAME }}" bash .github/scripts/preview-bootstrap-admin.sh
+
       - name: Create deployment status comment
         if: always()
         run: |
@@ -322,6 +343,12 @@ jobs:
             BODY="**Deployment Status: ${STATUS}** 🔗 Preview URL: ${URL}"
             if [ "$TRACING_ENABLED" = "true" ]; then
               BODY="${BODY} 🔎 Jaeger URL: ${JAEGER_URL}"
+            fi
+            ADMIN_STATUS="${{ steps.preview_admin.outputs.status }}"
+            if [ "$ADMIN_STATUS" = "created" ]; then
+              BODY="${BODY}\n🔐 Admin: \`${{ steps.preview_admin.outputs.admin_email }}\` / \`${{ steps.preview_admin.outputs.admin_password }}\`\n🔑 Instance API token: \`${{ steps.preview_admin.outputs.admin_token }}\`"
+            elif [ "$ADMIN_STATUS" = "exists" ]; then
+              BODY="${BODY}\n🔐 Admin: \`${{ steps.preview_admin.outputs.admin_email }}\` / \`${{ steps.preview_admin.outputs.admin_password }}\` (API token unchanged - see the first deployment comment)"
             fi
           else
             STATUS="❌ Failed"
