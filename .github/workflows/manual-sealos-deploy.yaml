@@ -235,6 +235,7 @@ jobs:
     name: Patch image for CN CDN
     needs: ensure-aliyun
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       IMAGE_TAG: ${{ inputs.image_tag }}
       CDN_ORIGIN: https://sss.teable.cn
@@ -342,6 +343,7 @@ jobs:
     name: Deploy to Sealos
     needs: [ensure-aliyun, patch-cdn]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     outputs:
       start_time: ${{ steps.start_time.outputs.start }}
       image_tag: ${{ inputs.image_tag }}
@@ -370,7 +372,7 @@ jobs:
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         with:
-          args: rollout status deployment/teable-sandbox-cloud
+          args: rollout status deployment/teable-sandbox-cloud --timeout=10m
 
       - name: Create Job YAML
         run: |
@@ -428,7 +430,7 @@ jobs:
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         with:
-          args: wait --for=condition=complete job/teable-migration-${{ github.run_number }} --timeout=3600s
+          args: wait --for=condition=complete job/teable-migration-${{ github.run_number }} --timeout=20m
 
       - name: Update application deployment
         uses: actions-hub/kubectl@master
@@ -449,7 +451,7 @@ jobs:
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         with:
-          args: rollout status deployment/teable-cloud
+          args: rollout status deployment/teable-cloud --timeout=10m
 
 
   notify:
@@ -457,6 +459,7 @@ jobs:
     needs: deploy
     if: inputs.record_launch != false
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Checkout code
@@ -485,6 +488,7 @@ jobs:
       inputs.release_record_id != '' &&
       inputs.publish_lock_id != ''
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     concurrency:
       group: finalize-teable-release-${{ inputs.release_record_id }}
 
@@ -517,6 +521,7 @@ jobs:
        needs.finalize-release.result == 'failure' ||
        needs.finalize-release.result == 'cancelled')
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Send Feishu failure notification
         env:
