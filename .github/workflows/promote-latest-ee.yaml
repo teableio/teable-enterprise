@@ -41,6 +41,7 @@ env:
 jobs:
   promote-latest:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Login to GitHub container registry
         uses: docker/login-action@v3
@@ -54,8 +55,22 @@ jobs:
 
       - name: Install skopeo
         run: |
-          sudo apt-get update
-          sudo apt-get install -y skopeo
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if sudo timeout 180s apt-get update \
+                -o Acquire::Retries=3 \
+                -o Acquire::http::Timeout=30 \
+                -o Acquire::https::Timeout=30 && \
+               sudo env DEBIAN_FRONTEND=noninteractive \
+                timeout 180s apt-get install -y skopeo; then
+              exit 0
+            fi
+            echo "::warning::skopeo install attempt ${attempt} failed"
+            sudo dpkg --configure -a || true
+            sleep 10
+          done
+          echo "::error::skopeo installation failed after 3 attempts"
+          exit 1
 
       - name: Stamp release on ghcr and copy to Docker Hub
         env:
@@ -64,6 +79,19 @@ jobs:
         run: |
           set -euo pipefail
           BETA_TAG="beta-${RELEASE_ID#release.}"
+
+          retry_registry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+              echo "::warning::registry operation attempt ${attempt} failed; retrying in 15s"
+              sleep 15
+            done
+            echo "::error::registry operation failed after 3 attempts"
+            return 1
+          }
 
           # target -> "staging-source release-image alias-image"
           SPECS=(
@@ -78,7 +106,7 @@ jobs:
             # promote already did (the beta twin may be reaped by then).
             if ! docker buildx imagetools inspect \
                 "${REGISTRY_GITHUB}/${RELEASE}:${RELEASE_ID}" >/dev/null 2>&1; then
-              docker buildx imagetools create \
+              retry_registry docker buildx imagetools create \
                 --tag "${REGISTRY_GITHUB}/${RELEASE}:${RELEASE_ID}" \
                 "${REGISTRY_GITHUB}/${STAGING}:${BETA_TAG}"
             fi
@@ -95,13 +123,13 @@ jobs:
             # the GitHub Release (and never does for a bare promote-ee),
             # which matches how the old post-hoc stamp behaved.
             if [ "$RELEASE" = "teable" ]; then
-              docker buildx imagetools create \
+              retry_registry docker buildx imagetools create \
                 --annotation "index:org.opencontainers.image.description=Release note: https://github.com/${OSS_REPO}/releases/tag/${RELEASE_ID}" \
                 --tag "${REGISTRY_GITHUB}/${RELEASE}:${RELEASE_ID}" \
                 "${REGISTRY_GITHUB}/${RELEASE}:${RELEASE_ID}"
             fi
 
-            docker buildx imagetools create \
+            retry_registry docker buildx imagetools create \
               --tag "${REGISTRY_GITHUB}/${RELEASE}:latest" \
               --tag "${REGISTRY_GITHUB}/${ALIAS}:${RELEASE_ID}" \
               --tag "${REGISTRY_GITHUB}/${ALIAS}:latest" \
@@ -109,7 +137,7 @@ jobs:
 
             for image in "$RELEASE" "$ALIAS"; do
               for tag in "${RELEASE_ID}" latest; do
-                skopeo copy --all \
+                retry_registry skopeo copy --all \
                   --src-creds="$SRC_CREDS" \
                   --dest-creds="$DST_CREDS" \
                   "docker://${REGISTRY_GITHUB}/${image}:${RELEASE_ID}" \
@@ -123,7 +151,7 @@ jobs:
           # puts the promoted id's agent there: self-hosted apps pull
           # <prefix>:<their BUILD_VERSION> at sandbox spawn. Aliyun gets
           # the agent release tag via sync-aliyun below.
-          skopeo copy --all \
+          retry_registry skopeo copy --all \
             --src-creds="$SRC_CREDS" \
             --dest-creds="$DST_CREDS" \
             "docker://${REGISTRY_GITHUB}/teable-sandbox-agent:${RELEASE_ID}" \
