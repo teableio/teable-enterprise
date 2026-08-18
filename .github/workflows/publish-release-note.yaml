@@ -240,7 +240,12 @@ jobs:
       - name: Send Feishu failure notification
         env:
           STAGE: ${{ needs.promote-ee.result == 'failure' && 'promote-ee(EE 镜像盖章/分发)' || 'publish(渠道发布)' }}
+          FEISHU_WEBHOOK_URL: ${{ secrets.LARK_BOT_URL }}
         run: |
+          if [ -z "$FEISHU_WEBHOOK_URL" ]; then
+            echo "::error::LARK_BOT_URL is not configured"
+            exit 1
+          fi
           card_payload=$(jq -n \
             --arg title "❌ Release note 发布失败 ${RELEASE_ID}" \
             --arg stage "$STAGE" \
@@ -258,7 +263,7 @@ jobs:
               }
             }')
           curl -fsS -X POST \
-            'https://open.feishu.cn/open-apis/bot/v2/hook/66b6ebf2-9bbd-4e41-b629-4062a6be4a42' \
+            "$FEISHU_WEBHOOK_URL" \
             -H 'Content-Type: application/json' \
             -d "$card_payload" >/dev/null
           echo "Feishu failure notification sent"
