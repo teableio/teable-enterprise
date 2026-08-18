@@ -31,18 +31,33 @@ on:
 env:
   SRC_REGISTRY: ghcr.io/teableio
   DST_REGISTRY: registry.cn-shenzhen.aliyuncs.com/teable
-  MAX_RETRIES: 5
-  RETRY_DELAY: 30
+  MAX_RETRIES: 3
+  RETRY_DELAY: 15
 
 jobs:
   sync:
     name: Sync ${{ inputs.edition }} images
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Install skopeo
         run: |
-          sudo apt-get update
-          sudo apt-get install -y skopeo
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if sudo timeout 180s apt-get update \
+                -o Acquire::Retries=3 \
+                -o Acquire::http::Timeout=30 \
+                -o Acquire::https::Timeout=30 && \
+               sudo env DEBIAN_FRONTEND=noninteractive \
+                timeout 180s apt-get install -y skopeo; then
+              exit 0
+            fi
+            echo "::warning::skopeo install attempt ${attempt} failed"
+            sudo dpkg --configure -a || true
+            sleep 10
+          done
+          echo "::error::skopeo installation failed after 3 attempts"
+          exit 1
 
       - name: Sync images to Aliyun
         env:
@@ -55,7 +70,7 @@ jobs:
             local src="$1" dst="$2" all_flag="$3"
             for attempt in $(seq 1 $MAX_RETRIES); do
               echo "[$attempt/$MAX_RETRIES] Copying ${src} -> ${dst}"
-              if skopeo copy ${all_flag} \
+              if timeout --signal=TERM 15m skopeo copy ${all_flag} \
                   "docker://${src}" "docker://${dst}" \
                   --src-creds="${SRC_CREDS}" \
                   --dest-creds="${DST_CREDS}"; then
