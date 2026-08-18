@@ -117,6 +117,8 @@ on:
         required: false
       INFRA_TEABLE_CN_PREHEAT_TOKEN:
         required: false
+      LARK_BOT_URL:
+        required: false
 
 # NOTE on ordering: no workflow-level concurrency here on purpose — GitHub
 # keeps only ONE pending run per group and CANCELS earlier pending ones,
@@ -497,8 +499,14 @@ jobs:
           # them up to 300s) — they must not fail the check. Settled means:
           # at least one healthy, nothing still initializing or unhealthy.
           for tg_name in teable-eks-app teable-eks-socket; do
-            TG_ARN=$(aws elbv2 describe-target-groups --region us-west-2 \
-              --names "$tg_name" --query 'TargetGroups[0].TargetGroupArn' --output text)
+            TG_JSON=$(aws elbv2 describe-target-groups --region us-west-2 \
+              --names "$tg_name" --output json)
+            TG_ARN=$(jq -r '.TargetGroups[0].TargetGroupArn' <<<"$TG_JSON")
+            LB_COUNT=$(jq '.TargetGroups[0].LoadBalancerArns | length' <<<"$TG_JSON")
+            if [ "$LB_COUNT" = "0" ]; then
+              echo "::notice::$tg_name is detached from all load balancers; skipping stale target health gate"
+              continue
+            fi
             for i in $(seq 1 30); do
               STATES=$(aws elbv2 describe-target-health --region us-west-2 \
                 --target-group-arn "$TG_ARN" \
@@ -539,13 +547,18 @@ jobs:
         if: failure()
         env:
           RELEASE_ID: ${{ inputs.image_tag }}
+          FEISHU_WEBHOOK_URL: ${{ secrets.LARK_BOT_URL }}
         run: |
+          if [ -z "$FEISHU_WEBHOOK_URL" ]; then
+            echo "::error::LARK_BOT_URL is not configured"
+            exit 1
+          fi
           PAYLOAD=$(jq -n \
             --arg l1 "🚨 生产 EKS 发布失败: ${RELEASE_ID}" \
             --arg l2 "run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             '{msg_type:"text",content:{text:($l1 + "\n" + $l2)}}')
           HTTP=$(curl -s -o /tmp/feishu.out -w "%{http_code}" -X POST \
-            'https://open.feishu.cn/open-apis/bot/v2/hook/66b6ebf2-9bbd-4e41-b629-4062a6be4a42' \
+            "$FEISHU_WEBHOOK_URL" \
             -H 'Content-Type: application/json' -d "$PAYLOAD")
           if [ "$HTTP" -lt 200 ] || [ "$HTTP" -ge 300 ]; then
             echo "::warning::Feishu alert failed HTTP $HTTP: $(cat /tmp/feishu.out)"

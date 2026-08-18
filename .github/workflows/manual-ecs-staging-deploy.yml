@@ -80,6 +80,8 @@ on:
         required: true
       TEABLE_API_TOKEN:
         required: false
+      LARK_BOT_URL:
+        required: false
 
 # NOTE: no workflow-level concurrency — GitHub cancels superseded PENDING
 # runs in a group, which would cancel a whole staging release (incl. its DB
@@ -473,7 +475,13 @@ jobs:
           ISSUES: ${{ inputs.release_issues || '无关联 Issue' }}
           DEPLOY_SUCCESS: ${{ (needs.deploy-eks.result == 'success' && needs.deploy-eks.outputs.skipped != 'true') && 'true' || 'false' }}
           EKS_SUPERSEDED: ${{ needs.deploy-eks.outputs.skipped == 'true' && 'true' || 'false' }}
+          FEISHU_WEBHOOK_URL: ${{ secrets.LARK_BOT_URL }}
         run: |
+          if [ -z "$FEISHU_WEBHOOK_URL" ]; then
+            echo "::error::LARK_BOT_URL is not configured"
+            exit 1
+          fi
+
           RELEASE_TAG="${IMAGE_TAG}"
           if [ "$EKS_SUPERSEDED" = "true" ]; then
             RELEASE_TAG="${RELEASE_TAG}（EKS 侧被更新的 run 取代，未安装本版本）"
@@ -526,7 +534,7 @@ jobs:
             }')
 
           http_code=$(curl -s -w "%{http_code}" -o /tmp/feishu.json -X POST \
-            'https://open.feishu.cn/open-apis/bot/v2/hook/66b6ebf2-9bbd-4e41-b629-4062a6be4a42' \
+            "$FEISHU_WEBHOOK_URL" \
             -H 'Content-Type: application/json' \
             -d "$card_payload")
 
