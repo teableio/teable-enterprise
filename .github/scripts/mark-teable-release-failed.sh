@@ -26,8 +26,8 @@ fi
 
 release_metadata=$(jq -cer '.fields.Publishing_Metadata | fromjson' /tmp/release-lock.json) || {
   current_status=$(jq -r '.fields.status // empty' /tmp/release-lock.json)
-  if [ "$current_status" = "Launched" ]; then
-    echo "Release is already fully launched"
+  if [ "$current_status" = "Released" ] || [ "$current_status" = "Launched" ]; then
+    echo "Release is already settled as ${current_status}"
     exit 0
   fi
   echo "Release publishing metadata is missing or invalid"
@@ -37,41 +37,60 @@ release_metadata=$(jq -cer '.fields.Publishing_Metadata | fromjson' /tmp/release
 current_lock_id=$(jq -r '.lockId // empty' <<<"$release_metadata")
 current_state=$(jq -r '.state // empty' <<<"$release_metadata")
 if [ "$current_state" != "launching" ] || [ "$current_lock_id" != "$PUBLISH_LOCK_ID" ]; then
-  echo "Publishing lock changed before ${TARGET} completion was recorded"
-  exit 1
+  echo "Publishing lock changed before ${TARGET} failure was recorded; leaving the newer lock untouched"
+  exit 0
+fi
+
+target_is_locked=$(jq -r --arg target "$TARGET" \
+  '(.targets // []) | index($target) != null' <<<"$release_metadata")
+if [ "$target_is_locked" != "true" ]; then
+  echo "Publishing lock does not include ${TARGET}; leaving it untouched"
+  exit 0
 fi
 
 current_time=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-completed_metadata=$(jq -c --arg target "$TARGET" \
-  '.completedTargets = (((.completedTargets // []) + [$target]) | unique)
-   | .failedTargets = ((.failedTargets // []) | map(select(. != $target)))
-   | if .lastFailure.target == $target then del(.lastFailure) else . end' \
-  <<<"$release_metadata")
+failure_message="${FAILURE_MESSAGE:-Release workflow failed}"
+run_url="${RUN_URL:-}"
+failed_metadata=$(jq -c \
+  --arg target "$TARGET" \
+  --arg message "$failure_message" \
+  --arg runUrl "$run_url" \
+  --arg failedAt "$current_time" \
+  '.failedTargets = (((.failedTargets // []) + [$target]) | unique)
+   | .completedTargets = ((.completedTargets // []) | map(select(. != $target)))
+   | .lastFailure = {
+       target: $target,
+       message: $message,
+       runUrl: $runUrl,
+       failedAt: $failedAt
+     }' <<<"$release_metadata")
+
 launched_targets=$(jq -c \
   '((.launchedTargets // []) + (.completedTargets // [])) | unique' \
-  <<<"$completed_metadata")
+  <<<"$failed_metadata")
 terminal_targets=$(jq -c \
   '((.launchedTargets // []) + (.completedTargets // []) + (.failedTargets // [])) | unique' \
-  <<<"$completed_metadata")
-all_launched=$(jq -r 'index("ai") != null and index("cn") != null' <<<"$launched_targets")
+  <<<"$failed_metadata")
 has_pending_lock_target=$(jq -r --argjson terminal "$terminal_targets" \
   'any((.targets // [])[]; . as $target | ($terminal | index($target)) == null)' \
-  <<<"$completed_metadata")
+  <<<"$failed_metadata")
 
-if [ "$all_launched" = "true" ]; then
-  release_status="Launched"
-  publishing_metadata="null"
-elif [ "$has_pending_lock_target" = "true" ]; then
+if [ "$has_pending_lock_target" = "true" ]; then
   release_status="Launching"
-  publishing_metadata=$(jq -Rn --arg value "$completed_metadata" '$value')
+  publishing_metadata=$(jq -Rn --arg value "$failed_metadata" '$value')
 else
   release_status="Released"
   idle_metadata=$(jq -cn \
     --argjson launchedTargets "$launched_targets" \
-    --argjson lastFailure "$(jq -c '.lastFailure // null' <<<"$completed_metadata")" \
+    --argjson lastFailure "$(jq -c '.lastFailure' <<<"$failed_metadata")" \
     --arg updatedAt "$current_time" \
-    '{version: 1, state: "idle", launchedTargets: $launchedTargets, updatedAt: $updatedAt}
-     + if $lastFailure == null then {} else {lastFailure: $lastFailure} end')
+    '{
+      version: 1,
+      state: "idle",
+      launchedTargets: $launchedTargets,
+      lastFailure: $lastFailure,
+      updatedAt: $updatedAt
+    }')
   publishing_metadata=$(jq -Rn --arg value "$idle_metadata" '$value')
 fi
 
@@ -96,9 +115,13 @@ update_http_code=$(curl -sS -w "%{http_code}" -o /tmp/release-update.json -X PAT
   -d "$update_payload")
 
 if [ "$update_http_code" -lt 200 ] || [ "$update_http_code" -ge 300 ]; then
-  echo "Failed to update Release progress: HTTP ${update_http_code}"
+  echo "Failed to record ${TARGET} publishing failure: HTTP ${update_http_code}"
   cat /tmp/release-update.json
   exit 1
 fi
 
-echo "Updated Release ${RELEASE_RECORD_ID} to ${release_status}; launched targets: ${launched_targets}"
+if [ "$has_pending_lock_target" = "true" ]; then
+  echo "Recorded ${TARGET} failure; waiting for the remaining lock targets"
+else
+  echo "Recorded ${TARGET} failure and released the publishing lock; launched targets: ${launched_targets}"
+fi
