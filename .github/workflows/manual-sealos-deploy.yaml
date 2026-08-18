@@ -108,6 +108,8 @@ on:
         required: true
       TEABLE_API_TOKEN:
         required: false
+      LARK_BOT_URL:
+        required: false
       # Used by the ensure-aliyun job (ghcr pull / Aliyun push) — callers
       # not using `secrets: inherit` must pass these for the self-heal
       # copy to work.
@@ -136,11 +138,26 @@ jobs:
   ensure-aliyun:
     name: Ensure release images on Aliyun
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Install skopeo
         run: |
-          sudo apt-get update
-          sudo apt-get install -y skopeo
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if sudo timeout 180s apt-get update \
+                -o Acquire::Retries=3 \
+                -o Acquire::http::Timeout=30 \
+                -o Acquire::https::Timeout=30 && \
+               sudo env DEBIAN_FRONTEND=noninteractive \
+                timeout 180s apt-get install -y skopeo; then
+              exit 0
+            fi
+            echo "::warning::skopeo install attempt ${attempt} failed"
+            sudo dpkg --configure -a || true
+            sleep 10
+          done
+          echo "::error::skopeo installation failed after 3 attempts"
+          exit 1
 
       - name: Stamp and copy any missing images
         env:
@@ -482,3 +499,61 @@ jobs:
           PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
           TARGET: cn
         run: bash .github/scripts/finalize-teable-release.sh
+
+  notify-failure:
+    name: Report teable.cn deploy failure
+    needs: [ensure-aliyun, patch-cdn, deploy, notify, finalize-release]
+    if: >-
+      always() &&
+      inputs.record_launch != false &&
+      (needs.ensure-aliyun.result == 'failure' ||
+       needs.ensure-aliyun.result == 'cancelled' ||
+       needs.patch-cdn.result == 'failure' ||
+       needs.patch-cdn.result == 'cancelled' ||
+       needs.deploy.result == 'failure' ||
+       needs.deploy.result == 'cancelled' ||
+       needs.notify.result == 'failure' ||
+       needs.notify.result == 'cancelled' ||
+       needs.finalize-release.result == 'failure' ||
+       needs.finalize-release.result == 'cancelled')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Feishu failure notification
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.LARK_BOT_URL }}
+          ENSURE_RESULT: ${{ needs.ensure-aliyun.result }}
+          PATCH_RESULT: ${{ needs.patch-cdn.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          LAUNCH_RESULT: ${{ needs.notify.result }}
+          FINALIZE_RESULT: ${{ needs.finalize-release.result }}
+        run: |
+          set -euo pipefail
+          if [ -z "$FEISHU_WEBHOOK_URL" ]; then
+            echo "::error::LARK_BOT_URL is not configured"
+            exit 1
+          fi
+
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          card_payload=$(jq -n \
+            --arg title "teable.cn 发布失败 ${{ inputs.image_tag }}" \
+            --arg ensure "$ENSURE_RESULT" \
+            --arg patch "$PATCH_RESULT" \
+            --arg deploy "$DEPLOY_RESULT" \
+            --arg launch "$LAUNCH_RESULT" \
+            --arg finalize "$FINALIZE_RESULT" \
+            --arg url "$run_url" \
+            '{
+              "msg_type": "interactive",
+              "card": {
+                "header": {
+                  "title": {"tag": "plain_text", "content": $title},
+                  "template": "red"
+                },
+                "elements": [
+                  {"tag": "div", "text": {"tag": "lark_md", "content": ("**Aliyun 镜像准备**: " + $ensure + "\n**CDN patch**: " + $patch + "\n**Sealos 部署**: " + $deploy + "\n**Launch 记录**: " + $launch + "\n**Release 收敛**: " + $finalize + "\n发布锁会保留至过期，请先核对 teable.cn 线上状态。\n[查看 Actions](" + $url + ")")}}
+                ]
+              }
+            }')
+          curl -fsS -X POST "$FEISHU_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "$card_payload" >/dev/null
