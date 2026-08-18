@@ -522,8 +522,32 @@ jobs:
        needs.finalize-release.result == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    concurrency:
+      group: finalize-teable-release-${{ inputs.release_record_id || github.run_id }}
     steps:
+      - name: Checkout code
+        if: inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        uses: actions/checkout@v4
+
+      - name: Settle teable.cn publishing target
+        if: inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: cn
+          TARGET_RESULT: ${{ needs.notify.result == 'success' && 'success' || 'failure' }}
+          FAILURE_MESSAGE: teable.cn publishing workflow failed
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$TARGET_RESULT" = "success" ]; then
+            bash .github/scripts/finalize-teable-release.sh
+          else
+            bash .github/scripts/mark-teable-release-failed.sh
+          fi
+
       - name: Send Feishu failure notification
+        if: always()
         env:
           FEISHU_WEBHOOK_URL: ${{ secrets.LARK_BOT_URL }}
           ENSURE_RESULT: ${{ needs.ensure-aliyun.result }}
@@ -555,7 +579,7 @@ jobs:
                   "template": "red"
                 },
                 "elements": [
-                  {"tag": "div", "text": {"tag": "lark_md", "content": ("**Aliyun 镜像准备**: " + $ensure + "\n**CDN patch**: " + $patch + "\n**Sealos 部署**: " + $deploy + "\n**Launch 记录**: " + $launch + "\n**Release 收敛**: " + $finalize + "\n发布锁会保留至过期，请先核对 teable.cn 线上状态。\n[查看 Actions](" + $url + ")")}}
+                  {"tag": "div", "text": {"tag": "lark_md", "content": ("**Aliyun 镜像准备**: " + $ensure + "\n**CDN patch**: " + $patch + "\n**Sealos 部署**: " + $deploy + "\n**Launch 记录**: " + $launch + "\n**Release 收敛**: " + $finalize + "\n已回写失败目标；其余目标终结后会自动释放发布锁。\n[查看 Actions](" + $url + ")")}}
                 ]
               }
             }')

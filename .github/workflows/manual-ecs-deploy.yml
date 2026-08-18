@@ -543,27 +543,6 @@ jobs:
             echo "skipped=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Alert Feishu on deploy failure
-        if: failure()
-        env:
-          RELEASE_ID: ${{ inputs.image_tag }}
-          FEISHU_WEBHOOK_URL: ${{ secrets.LARK_BOT_URL }}
-        run: |
-          if [ -z "$FEISHU_WEBHOOK_URL" ]; then
-            echo "::error::LARK_BOT_URL is not configured"
-            exit 1
-          fi
-          PAYLOAD=$(jq -n \
-            --arg l1 "🚨 生产 EKS 发布失败: ${RELEASE_ID}" \
-            --arg l2 "run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            '{msg_type:"text",content:{text:($l1 + "\n" + $l2)}}')
-          HTTP=$(curl -s -o /tmp/feishu.out -w "%{http_code}" -X POST \
-            "$FEISHU_WEBHOOK_URL" \
-            -H 'Content-Type: application/json' -d "$PAYLOAD")
-          if [ "$HTTP" -lt 200 ] || [ "$HTTP" -ge 300 ]; then
-            echo "::warning::Feishu alert failed HTTP $HTTP: $(cat /tmp/feishu.out)"
-          fi
-
   promote-latest:
     name: Promote Release Tag to Latest
     needs: [prepare, deploy-eks]
@@ -714,3 +693,95 @@ jobs:
           PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
           TARGET: ai
         run: bash .github/scripts/finalize-teable-release.sh
+
+  notify-failure:
+    name: Settle and report teable.ai failure
+    needs: [stamp-release, patch-cdn, deploy-eks, promote-latest, sync-aliyun, notify, finalize-release]
+    if: >-
+      always() &&
+      inputs.record_launch != false &&
+      (needs.deploy-eks.outputs.skipped == 'true' ||
+       needs.stamp-release.result == 'failure' ||
+       needs.stamp-release.result == 'cancelled' ||
+       needs.patch-cdn.result == 'failure' ||
+       needs.patch-cdn.result == 'cancelled' ||
+       needs.deploy-eks.result == 'failure' ||
+       needs.deploy-eks.result == 'cancelled' ||
+       needs.promote-latest.result == 'failure' ||
+       needs.promote-latest.result == 'cancelled' ||
+       needs.sync-aliyun.result == 'failure' ||
+       needs.sync-aliyun.result == 'cancelled' ||
+       needs.notify.result == 'failure' ||
+       needs.notify.result == 'cancelled' ||
+       needs.finalize-release.result == 'failure' ||
+       needs.finalize-release.result == 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: finalize-teable-release-${{ inputs.release_record_id || github.run_id }}
+    steps:
+      - name: Checkout code
+        if: inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        uses: actions/checkout@v4
+
+      - name: Settle teable.ai publishing target
+        if: inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: ai
+          TARGET_RESULT: ${{ needs.notify.result == 'success' && 'success' || 'failure' }}
+          FAILURE_MESSAGE: teable.ai publishing workflow failed
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$TARGET_RESULT" = "success" ]; then
+            bash .github/scripts/finalize-teable-release.sh
+          else
+            bash .github/scripts/mark-teable-release-failed.sh
+          fi
+
+      - name: Send Feishu failure notification
+        if: always()
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.LARK_BOT_URL }}
+          STAMP_RESULT: ${{ needs.stamp-release.result }}
+          PATCH_RESULT: ${{ needs.patch-cdn.result }}
+          DEPLOY_RESULT: ${{ needs.deploy-eks.result }}
+          PROMOTE_RESULT: ${{ needs.promote-latest.result }}
+          ALIYUN_RESULT: ${{ needs.sync-aliyun.result }}
+          LAUNCH_RESULT: ${{ needs.notify.result }}
+          FINALIZE_RESULT: ${{ needs.finalize-release.result }}
+        run: |
+          set -euo pipefail
+          if [ -z "$FEISHU_WEBHOOK_URL" ]; then
+            echo "::error::LARK_BOT_URL is not configured"
+            exit 1
+          fi
+
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          card_payload=$(jq -n \
+            --arg title "teable.ai 发布失败 ${{ inputs.image_tag }}" \
+            --arg stamp "$STAMP_RESULT" \
+            --arg patch "$PATCH_RESULT" \
+            --arg deploy "$DEPLOY_RESULT" \
+            --arg promote "$PROMOTE_RESULT" \
+            --arg aliyun "$ALIYUN_RESULT" \
+            --arg launch "$LAUNCH_RESULT" \
+            --arg finalize "$FINALIZE_RESULT" \
+            --arg url "$run_url" \
+            '{
+              "msg_type": "interactive",
+              "card": {
+                "header": {
+                  "title": {"tag": "plain_text", "content": $title},
+                  "template": "red"
+                },
+                "elements": [
+                  {"tag": "div", "text": {"tag": "lark_md", "content": ("**Release tag**: " + $stamp + "\n**CDN patch**: " + $patch + "\n**EKS 部署**: " + $deploy + "\n**latest 提升**: " + $promote + "\n**Aliyun 同步**: " + $aliyun + "\n**Launch 记录**: " + $launch + "\n**Release 收敛**: " + $finalize + "\n已回写失败目标；其余目标终结后会自动释放发布锁。\n[查看 Actions](" + $url + ")")}}
+                ]
+              }
+            }')
+          curl -fsS -X POST "$FEISHU_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "$card_payload" >/dev/null
