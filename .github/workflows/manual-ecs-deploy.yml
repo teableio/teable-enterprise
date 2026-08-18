@@ -135,6 +135,19 @@ jobs:
       image_tag: ${{ inputs.image_tag }}
 
     steps:
+      - name: Checkout lock validation script
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        uses: actions/checkout@v4
+
+      - name: Validate teable.ai publishing lock
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: ai
+        run: bash .github/scripts/validate-teable-publish-lock.sh
+
       - name: Record start time
         id: start_time
         run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
@@ -696,11 +709,13 @@ jobs:
 
   notify-failure:
     name: Settle and report teable.ai failure
-    needs: [stamp-release, patch-cdn, deploy-eks, promote-latest, sync-aliyun, notify, finalize-release]
+    needs: [prepare, stamp-release, patch-cdn, deploy-eks, promote-latest, sync-aliyun, notify, finalize-release]
     if: >-
       always() &&
       inputs.record_launch != false &&
-      (needs.deploy-eks.outputs.skipped == 'true' ||
+      (needs.prepare.result == 'failure' ||
+       needs.prepare.result == 'cancelled' ||
+       needs.deploy-eks.outputs.skipped == 'true' ||
        needs.stamp-release.result == 'failure' ||
        needs.stamp-release.result == 'cancelled' ||
        needs.patch-cdn.result == 'failure' ||
@@ -745,6 +760,7 @@ jobs:
         if: always()
         env:
           FEISHU_WEBHOOK_URL: ${{ secrets.LARK_BOT_URL }}
+          PREFLIGHT_RESULT: ${{ needs.prepare.result }}
           STAMP_RESULT: ${{ needs.stamp-release.result }}
           PATCH_RESULT: ${{ needs.patch-cdn.result }}
           DEPLOY_RESULT: ${{ needs.deploy-eks.result }}
@@ -762,6 +778,7 @@ jobs:
           run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           card_payload=$(jq -n \
             --arg title "teable.ai 发布失败 ${{ inputs.image_tag }}" \
+            --arg preflight "$PREFLIGHT_RESULT" \
             --arg stamp "$STAMP_RESULT" \
             --arg patch "$PATCH_RESULT" \
             --arg deploy "$DEPLOY_RESULT" \
@@ -778,7 +795,7 @@ jobs:
                   "template": "red"
                 },
                 "elements": [
-                  {"tag": "div", "text": {"tag": "lark_md", "content": ("**Release tag**: " + $stamp + "\n**CDN patch**: " + $patch + "\n**EKS 部署**: " + $deploy + "\n**latest 提升**: " + $promote + "\n**Aliyun 同步**: " + $aliyun + "\n**Launch 记录**: " + $launch + "\n**Release 收敛**: " + $finalize + "\n已回写失败目标；其余目标终结后会自动释放发布锁。\n[查看 Actions](" + $url + ")")}}
+                  {"tag": "div", "text": {"tag": "lark_md", "content": ("**发布锁预检**: " + $preflight + "\n**Release tag**: " + $stamp + "\n**CDN patch**: " + $patch + "\n**EKS 部署**: " + $deploy + "\n**latest 提升**: " + $promote + "\n**Aliyun 同步**: " + $aliyun + "\n**Launch 记录**: " + $launch + "\n**Release 收敛**: " + $finalize + "\n已回写失败目标；重试必须从 Release Publisher 重新获取全局锁。\n[查看 Actions](" + $url + ")")}}
                 ]
               }
             }')
