@@ -126,6 +126,10 @@ on:
 # The only shared mutable state this workflow touches cross-run is the EKS
 # deployments; deploy-eks guards those with a deploy-epoch annotation CAS
 # instead (older attempt refuses to overwrite a newer one).
+#
+# GitHub's "re-run failed jobs" reuses successful upstream jobs from the
+# previous attempt. Every job that can mutate images or production therefore
+# revalidates the Release lock in its own steps; prepare alone is not enough.
 jobs:
   prepare:
     name: Prepare Deployment
@@ -165,6 +169,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout lock validation script
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        uses: actions/checkout@v4
+
+      - name: Revalidate teable.ai publishing lock
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: ai
+        run: bash .github/scripts/validate-teable-publish-lock.sh
+
       - name: Login to GitHub container registry
         uses: docker/login-action@v3
         with:
@@ -230,6 +247,18 @@ jobs:
       ECR_IMAGE: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-cloud
 
     steps:
+      - name: Checkout deploy and lock validation scripts
+        uses: actions/checkout@v4
+
+      - name: Revalidate teable.ai publishing lock
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: ai
+        run: bash .github/scripts/validate-teable-publish-lock.sh
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -272,10 +301,6 @@ jobs:
             fi
           fi
           echo "promoted=false" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout deploy scripts
-        if: steps.existing.outputs.exists == 'false' && steps.promote.outputs.promoted == 'false'
-        uses: actions/checkout@v4
 
       - name: Build patch layer
         if: steps.existing.outputs.exists == 'false' && steps.promote.outputs.promoted == 'false'
@@ -353,6 +378,19 @@ jobs:
       contents: read
 
     steps:
+      - name: Checkout lock validation script
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        uses: actions/checkout@v4
+
+      - name: Revalidate teable.ai publishing lock
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: ai
+        run: bash .github/scripts/validate-teable-publish-lock.sh
+
       - name: Configure AWS credentials (OIDC, namespace-scoped role)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -564,6 +602,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout lock validation script
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        uses: actions/checkout@v4
+
+      - name: Revalidate teable.ai publishing lock
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: ai
+        run: bash .github/scripts/validate-teable-publish-lock.sh
+
       - name: Login to GitHub container registry
         uses: docker/login-action@v3
         with:
@@ -611,6 +662,9 @@ jobs:
     with:
       edition: cloud
       tags: "latest,${{ inputs.image_tag }}"
+      release_record_id: ${{ inputs.release_record_id }}
+      publish_lock_id: ${{ inputs.publish_lock_id }}
+      publish_target: ai
     secrets: inherit
 
   # Preheat CN sandbox-agent nodes as soon as the agent tag lands on Aliyun.

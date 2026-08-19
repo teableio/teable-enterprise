@@ -22,12 +22,26 @@ on:
       tags:
         required: true
         type: string
+      release_record_id:
+        required: false
+        type: string
+        default: ''
+      publish_lock_id:
+        required: false
+        type: string
+        default: ''
+      publish_target:
+        required: false
+        type: string
+        default: ''
     secrets:
       PACKAGES_KEY:
         required: true
       ALI_DOCKER_PASSWORD:
         required: true
       DOCKER_HUB_AK:
+        required: false
+      TEABLE_API_TOKEN:
         required: false
 
 env:
@@ -43,6 +57,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      - name: Checkout lock validation script
+        if: inputs.release_record_id != '' && inputs.publish_lock_id != '' && inputs.publish_target != ''
+        uses: actions/checkout@v4
+
+      - name: Revalidate publishing lock
+        if: inputs.release_record_id != '' && inputs.publish_lock_id != '' && inputs.publish_target != ''
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: ${{ inputs.publish_target }}
+        run: bash .github/scripts/validate-teable-publish-lock.sh
+
       - name: Install skopeo
         run: |
           set -euo pipefail
