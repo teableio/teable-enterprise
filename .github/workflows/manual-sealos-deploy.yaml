@@ -127,6 +127,9 @@ on:
       SEALOS_OBJECTSTORAGE_SECRET_KEY:
         required: false
 
+# GitHub's "re-run failed jobs" reuses successful upstream jobs from the
+# previous attempt. Keep the initial fast-fail job, but every job that can
+# mutate images or production must also revalidate the lock in its own steps.
 jobs:
   validate-publish-lock:
     name: Validate teable.cn publishing lock
@@ -158,6 +161,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      - name: Checkout lock validation script
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        uses: actions/checkout@v4
+
+      - name: Revalidate teable.cn publishing lock
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: cn
+        run: bash .github/scripts/validate-teable-publish-lock.sh
+
       - name: Install skopeo
         run: |
           set -euo pipefail
@@ -262,6 +278,18 @@ jobs:
       ALIYUN_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud
 
     steps:
+      - name: Checkout deploy and lock validation scripts
+        uses: actions/checkout@v4
+
+      - name: Revalidate teable.cn publishing lock
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: cn
+        run: bash .github/scripts/validate-teable-publish-lock.sh
+
       - name: Login to Aliyun container registry
         uses: docker/login-action@v3
         with:
@@ -282,10 +310,6 @@ jobs:
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Checkout deploy scripts
-        if: steps.existing.outputs.exists == 'false'
-        uses: actions/checkout@v4
 
       - name: Build patch layer
         if: steps.existing.outputs.exists == 'false'
@@ -367,6 +391,19 @@ jobs:
       image_tag: ${{ inputs.image_tag }}
 
     steps:
+      - name: Checkout lock validation script
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        uses: actions/checkout@v4
+
+      - name: Revalidate teable.cn publishing lock
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: cn
+        run: bash .github/scripts/validate-teable-publish-lock.sh
+
       - name: Record start time
         id: start_time
         run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
