@@ -14,6 +14,43 @@ fi
 TEABLE_API_BASE="https://app.teable.ai/api"
 RELEASES_TABLE_ID="tblAhVLOxNtvkaF1ii5"
 
+mark_covered_releases_launched() {
+  local covered_release_ids update_payload update_http_code
+  covered_release_ids=$(printf '%s' "${RELATED_RELEASE_RECORD_IDS:-}" | jq -Rc \
+    --arg target "$RELEASE_RECORD_ID" \
+    'split(",")
+     | map(gsub("^\\s+|\\s+$"; ""))
+     | . + [$target]
+     | map(select(test("^rec[A-Za-z0-9]+$")))
+     | unique')
+  update_payload=$(jq -n \
+    --argjson recordIds "$covered_release_ids" \
+    '{
+      "fieldKeyType": "dbFieldName",
+      "typecast": true,
+      "records": ($recordIds | map({
+        "id": .,
+        "fields": {
+          "status": "Launched",
+          "Publishing_Metadata": null
+        }
+      }))
+    }')
+  update_http_code=$(curl -sS -w "%{http_code}" -o /tmp/release-update.json -X PATCH \
+    "${TEABLE_API_BASE}/table/${RELEASES_TABLE_ID}/record" \
+    -H "Authorization: Bearer ${TEABLE_API_TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d "$update_payload")
+
+  if [ "$update_http_code" -lt 200 ] || [ "$update_http_code" -ge 300 ]; then
+    echo "Failed to mark covered Releases as Launched: HTTP ${update_http_code}"
+    cat /tmp/release-update.json
+    exit 1
+  fi
+
+  echo "Marked covered Releases ${covered_release_ids} as Launched"
+}
+
 read_http_code=$(curl -sS -w "%{http_code}" -o /tmp/release-lock.json \
   "${TEABLE_API_BASE}/table/${RELEASES_TABLE_ID}/record/${RELEASE_RECORD_ID}?fieldKeyType=dbFieldName" \
   -H "Authorization: Bearer ${TEABLE_API_TOKEN}")
@@ -24,10 +61,11 @@ if [ "$read_http_code" -lt 200 ] || [ "$read_http_code" -ge 300 ]; then
   exit 1
 fi
 
-release_metadata=$(jq -cer '.fields.Publishing_Metadata | fromjson' /tmp/release-lock.json) || {
+release_metadata=$(jq -cer '.fields.Publishing_Metadata | strings | try fromjson' /tmp/release-lock.json) || {
   current_status=$(jq -r '.fields.status // empty' /tmp/release-lock.json)
   if [ "$current_status" = "Launched" ]; then
-    echo "Release is already fully launched"
+    mark_covered_releases_launched
+    echo "Release was already fully launched; coverage reconciled"
     exit 0
   fi
   echo "Release publishing metadata is missing or invalid"
@@ -59,8 +97,9 @@ has_pending_lock_target=$(jq -r --argjson terminal "$terminal_targets" \
   <<<"$completed_metadata")
 
 if [ "$all_launched" = "true" ]; then
-  release_status="Launched"
-  publishing_metadata="null"
+  mark_covered_releases_launched
+  echo "Launched targets: ${launched_targets}"
+  exit 0
 elif [ "$has_pending_lock_target" = "true" ]; then
   release_status="Launching"
   publishing_metadata=$(jq -Rn --arg value "$completed_metadata" '$value')

@@ -555,6 +555,7 @@ jobs:
         env:
           TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
           RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          RELATED_RELEASE_RECORD_IDS: ${{ inputs.related_release_record_ids }}
           PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
           TARGET: cn
         run: bash .github/scripts/finalize-teable-release.sh
@@ -591,6 +592,7 @@ jobs:
         env:
           TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
           RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          RELATED_RELEASE_RECORD_IDS: ${{ inputs.related_release_record_ids }}
           PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
           TARGET: cn
           TARGET_RESULT: ${{ needs.notify.result == 'success' && 'success' || 'failure' }}
