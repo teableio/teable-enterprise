@@ -79,4 +79,3 @@ jobs:
             done
           done
           echo "sweep done"
-# sync-scope probe: this drift line exists only so the next sync run exercises the PACKAGES_KEY workflow-file push; the sync will remove it.
