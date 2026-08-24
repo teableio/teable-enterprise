@@ -1,8 +1,14 @@
-# Liveness watchdog for the Remote CI check runs on teable-ee. If an
+# Liveness watchdog for this App's check runs on teable-ee. If an
 # EE Remote CI run here dies without concluding its check runs (runner lost,
 # workflow broken, dispatch dropped), the checks would spin forever — this
-# sweep fails any of our App's check runs still in_progress past the longest
-# suite ceiling. Runs on this repo because minutes here are free.
+# sweep fails any of our App's check runs still in_progress past their
+# ceiling. Runs on this repo because minutes here are free.
+#
+# Two ceilings: the remote-ci suites get the longest suite ceiling, and the
+# "E2E Lab Regression" check (opened by teable-ee's teable-e2e-lab-trigger.yml,
+# concluded by teable-e2e-lab's report job) gets the lab's own — resolve 10 +
+# a 120-minute execute column + report 15, plus queue slack. The lab name here
+# and in the trigger must stay in sync.
 #
 # SOURCE OF TRUTH lives in teable-ee at .github/enterprise-ci/ — synced by
 # sync-ci-to-enterprise.yml.
@@ -40,19 +46,36 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           APP_ID: ${{ secrets.RCI_APP_ID }}
           STALE_MINUTES: 75
+          LAB_STALE_MINUTES: 165
+          LAB_CHECK_NAME: E2E Lab Regression
         run: |
           CUTOFF=$(date -u -d "$STALE_MINUTES minutes ago" +%Y-%m-%dT%H:%M:%SZ)
+          LAB_CUTOFF=$(date -u -d "$LAB_STALE_MINUTES minutes ago" +%Y-%m-%dT%H:%M:%SZ)
+          # Recent develop commits, not just the tip: push-triggered check runs
+          # (remote-ci on develop pushes, the e2e lab) sit on commits that stop
+          # being the tip as soon as the next push lands, and a check run that
+          # hung there would otherwise never be swept.
           SHAS=$( { gh api "repos/teableio/teable-ee/pulls?state=open&per_page=50" --jq '.[].head.sha'; \
-                    gh api "repos/teableio/teable-ee/commits/develop" --jq '.sha'; } | sort -u )
+                    gh api "repos/teableio/teable-ee/commits?sha=develop&per_page=30" --jq '.[].sha'; } | sort -u )
           for sha in $SHAS; do
-            gh api "repos/teableio/teable-ee/commits/$sha/check-runs?app_id=${APP_ID}&status=in_progress&per_page=50" \
-              --jq ".check_runs[] | select(.started_at < \"$CUTOFF\") | .id" 2>/dev/null | \
-            while read -r id; do
-              echo "failing stale check run $id on $sha"
+            gh api "repos/teableio/teable-ee/commits/$sha/check-runs?app_id=${APP_ID}&status=in_progress&per_page=50" 2>/dev/null | \
+            jq -r --arg lab "$LAB_CHECK_NAME" --arg cutoff "$CUTOFF" --arg labcutoff "$LAB_CUTOFF" \
+              '.check_runs[]
+               | select(.started_at < (if .name == $lab then $labcutoff else $cutoff end))
+               | "\(.id)\t\(.name)"' | \
+            while IFS=$'\t' read -r id name; do
+              if [ "$name" = "$LAB_CHECK_NAME" ]; then
+                mins=$LAB_STALE_MINUTES
+                summary="No verdict arrived from teable-e2e-lab within ${mins} minutes — the lab run was lost, hung, or never started. Re-dispatch it from teable-ee's \"Trigger Teable E2E Lab\" workflow (the native Re-run button does nothing for this check)."
+              else
+                mins=$STALE_MINUTES
+                summary="No verdict arrived from teable-enterprise within ${mins} minutes — the remote run was lost, hung, or never started. Re-run the check to dispatch it again."
+              fi
+              echo "failing stale check run $id ($name) on $sha"
               gh api -X PATCH "repos/teableio/teable-ee/check-runs/$id" \
                 -f status=completed -f conclusion=failure \
                 -f "output[title]=watchdog: remote run lost" \
-                -f "output[summary]=No verdict arrived from teable-enterprise within ${STALE_MINUTES} minutes — the remote run was lost, hung, or never started. Re-run the check to dispatch it again." > /dev/null
+                -f "output[summary]=${summary}" > /dev/null
             done
           done
           echo "sweep done"

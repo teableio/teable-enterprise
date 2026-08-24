@@ -83,6 +83,9 @@ jobs:
         run: |
           # The three scopes are independent tsc invocations — run them in
           # parallel (16GB comfortably fits them; heap cap is per-process).
+          # Do not prisma-generate here: it rewrites shared @prisma/client
+          # while community backend tsc is reading it, which fails as
+          # thousands of missing Prisma / PrismaService exports.
           pnpm g:typecheck > "$LOG_DIR/tc-root.log" 2>&1 & p1=$!
           pnpm g:typecheck:community > "$LOG_DIR/tc-community.log" 2>&1 & p2=$!
           pnpm g:typecheck:community:backend > "$LOG_DIR/tc-backend.log" 2>&1 & p3=$!
