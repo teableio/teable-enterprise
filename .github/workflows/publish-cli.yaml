@@ -175,6 +175,25 @@ jobs:
             npm publish --tag "$NPM_TAG" --provenance
           fi
 
+      # Tell agent-skills a new CLI version is live so its sync workflow can
+      # diff the command manifest and open a docs PR when the surface changed.
+      # Reruns are safe: publish is guarded by the already-published check, and
+      # a duplicate notification just re-triggers an idempotent diff.
+      - name: Notify agent-skills
+        if: steps.guard.outputs.skip != 'true' && steps.inputs.outputs.dry_run != 'true' && steps.version.outputs.npm_tag == 'latest'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SOURCE_REF: ${{ steps.inputs.outputs.source_ref }}
+        run: |
+          set -euo pipefail
+
+          curl --fail-with-body -X POST \
+            -H "Authorization: token ${{ secrets.PACKAGES_KEY }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/teableio/agent-skills/dispatches \
+            -d "$(jq -n --arg version "$VERSION" --arg source_ref "$SOURCE_REF" \
+              '{event_type: "cli-published", client_payload: {version: $version, source_ref: $source_ref}}')"
+
       - name: Summary
         env:
           VERSION: ${{ steps.version.outputs.version }}
