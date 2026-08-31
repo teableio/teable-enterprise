@@ -809,17 +809,20 @@ jobs:
     needs: [prepare-release, merge-manifests-cloud]
     if: needs.prepare-release.outputs.mode == 'release' && needs.merge-manifests-cloud.result == 'success'
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - name: Install skopeo
         run: |
           sudo apt-get update
           sudo apt-get install -y skopeo
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::649941507946:role/teable-ci-publish
+          role-session-name: build-sync-ecr
           aws-region: us-west-2
 
       # arm64 ships from ghcr ONLY. ECR deliberately receives just the amd64
