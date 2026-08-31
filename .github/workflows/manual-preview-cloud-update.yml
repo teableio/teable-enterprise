@@ -19,6 +19,9 @@ jobs:
 
   build-push:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     outputs:
       start_time: ${{ steps.start_time.outputs.start }}
       pr_number: ${{ github.event.client_payload.pr_number }}
@@ -73,11 +76,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.PACKAGES_KEY }}
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::649941507946:role/teable-ci-publish
+          role-session-name: preview-cloud-update
           aws-region: us-west-2
 
       - name: Login to AWS ECR

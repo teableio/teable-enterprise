@@ -105,10 +105,6 @@ on:
         description: 'true when a newer run superseded this deploy (nothing was installed)'
         value: ${{ jobs.deploy-eks.outputs.skipped }}
     secrets:
-      AWS_ACCESS_KEY_ID:
-        required: true
-      AWS_SECRET_ACCESS_KEY:
-        required: true
       PACKAGES_KEY:
         required: true
       TEABLE_API_TOKEN:
@@ -167,6 +163,9 @@ jobs:
     name: Stamp official release tags
     needs: prepare
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - name: Checkout lock validation script
@@ -189,11 +188,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.PACKAGES_KEY }}
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::649941507946:role/teable-ci-publish
+          role-session-name: prod-stamp-release
           aws-region: us-west-2
 
       - name: Login to AWS ECR
@@ -240,6 +239,9 @@ jobs:
     name: Patch app image for CDN
     needs: [prepare, stamp-release]
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     env:
       RELEASE_ID: ${{ inputs.image_tag }}
       CDN_ORIGIN: https://sss.teable.ai
@@ -259,11 +261,11 @@ jobs:
           TARGET: ai
         run: bash .github/scripts/validate-teable-publish-lock.sh
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::649941507946:role/teable-ci-publish
+          role-session-name: prod-patch-cdn
           aws-region: us-west-2
 
       - name: Login to AWS ECR
@@ -600,6 +602,9 @@ jobs:
     # A superseded run must not rewrite latest tags (Codex P1 on #87).
     if: needs.deploy-eks.outputs.skipped != 'true'
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - name: Checkout lock validation script
@@ -622,11 +627,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.PACKAGES_KEY }}
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::649941507946:role/teable-ci-publish
+          role-session-name: prod-promote-latest
           aws-region: us-west-2
 
       - name: Login to AWS ECR

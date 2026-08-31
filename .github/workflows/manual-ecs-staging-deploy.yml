@@ -74,10 +74,6 @@ on:
         description: 'Deployed image tag'
         value: ${{ jobs.prepare.outputs.image_tag }}
     secrets:
-      AWS_ACCESS_KEY_ID:
-        required: true
-      AWS_SECRET_ACCESS_KEY:
-        required: true
       TEABLE_API_TOKEN:
         required: false
       LARK_BOT_URL:
@@ -91,6 +87,9 @@ jobs:
   prepare:
     name: Prepare Deployment
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     outputs:
       start_time: ${{ steps.start_time.outputs.start }}
       image_tag: ${{ inputs.image_tag }}
@@ -101,11 +100,11 @@ jobs:
         id: start_time
         run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::649941507946:role/teable-ci-publish
+          role-session-name: staging-resolve-tag
           aws-region: us-west-2
 
       - name: Resolve staging registry tag
@@ -153,6 +152,9 @@ jobs:
     name: Patch staging image for CDN
     needs: prepare
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     env:
       STAGING_TAG: ${{ needs.prepare.outputs.staging_tag }}
       CDN_ORIGIN: https://sss.teable.ai
@@ -160,11 +162,11 @@ jobs:
       ECR_IMAGE: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable/teable-cloud
 
     steps:
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::649941507946:role/teable-ci-publish
+          role-session-name: staging-patch-cdn
           aws-region: us-west-2
 
       - name: Login to AWS ECR
