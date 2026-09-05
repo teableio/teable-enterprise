@@ -57,6 +57,8 @@ jobs:
           install-args: |
             --filter
             @teable/v2-formula-sql-pg...
+            --filter
+            @teable/v2-adapter-table-repository-postgres...
 
       - name: ☁️ Upload workspace dependencies
         uses: ./.github/actions/workspace-deps-upload
@@ -161,7 +163,8 @@ jobs:
           status=0
           {
             echo "=== formula SQL postgres PG${{ matrix.pgMajor }} ==="
-            pnpm --filter @teable/v2-formula-sql-pg exec vitest run src/PgTypeValidation.pg-integration.spec.ts --silent
+            pnpm --filter @teable/v2-formula-sql-pg exec vitest run src/PgTypeValidation.pg-integration.spec.ts --silent &&
+            pnpm --filter @teable/v2-adapter-table-repository-postgres exec vitest run src/record/computed/activity/PostgresComputedActivityReader.budget.pg.integration.spec.ts --silent
           } >> "$LOG_DIR/formula-sql-pg-$SLUG.log" 2>&1 || status=$?
           echo "formula-sql-pg $SLUG exit=$status ($(wc -l < "$LOG_DIR/formula-sql-pg-$SLUG.log") log lines)"
           exit $status
