@@ -1,0 +1,328 @@
+name: Testing CN Build and Deploy
+
+on:
+  repository_dispatch:
+    types: [testing-cn-deploy]
+
+permissions: {}
+
+env:
+  TESTING_CN_APP_ID: ${{ vars.TESTING_CN_APP_ID }}
+  TESTING_CN_REGISTRY_PREFIX: ${{ vars.TESTING_CN_REGISTRY_PREFIX }}
+  TESTING_CN_REGISTRY_IMMUTABILITY_APPROVED: ${{ vars.TESTING_CN_REGISTRY_IMMUTABILITY_APPROVED }}
+
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      control_sha: ${{ steps.control.outputs.sha }}
+      source_sha: ${{ steps.verify.outputs.source_sha }}
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ vars.TESTING_CN_APP_ID }}
+          private-key: ${{ secrets.TESTING_CN_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+          permission-contents: read
+          permission-actions: read
+      - name: Pin protected controller before reading candidate data
+        id: control
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const {data: branch} = await github.rest.repos.getBranch({owner:'teableio', repo:'teable-ee', branch:'develop'});
+            if (!branch.protected || !/^[a-f0-9]{40}$/.test(branch.commit.sha)) throw new Error('Protected controller unavailable');
+            core.setOutput('sha', branch.commit.sha);
+      - uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ steps.control.outputs.sha }}
+          token: ${{ steps.app.outputs.token }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Authenticate sender and exact source workflow attempt
+        id: verify
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TESTING_CN_APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          CONTROL_SHA: ${{ steps.control.outputs.sha }}
+        run: node control/.github/scripts/testing-cn-deployment.mjs verify-dispatch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: testing-cn-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: request.json
+          if-no-files-found: error
+
+  preflight:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: testing-cn-build
+    outputs:
+      reuse: ${{ steps.preflight.outputs.reuse }}
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ vars.TESTING_CN_APP_ID }}
+          private-key: ${{ secrets.TESTING_CN_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: |
+            teable-ee
+            teable-enterprise
+          permission-contents: read
+          permission-actions: read
+          permission-deployments: read
+      - uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ needs.verify.outputs.control_sha }}
+          token: ${{ steps.app.outputs.token }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/download-artifact@v4
+        with:
+          name: testing-cn-request-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Validate approved registry
+        id: registry
+        run: node --input-type=module -e 'import {registryConfig} from "./control/.github/scripts/testing-cn-deployment.mjs"; import {appendFileSync} from "node:fs"; appendFileSync(process.env.GITHUB_OUTPUT, "host="+registryConfig(process.env.TESTING_CN_REGISTRY_PREFIX).host+"\n")'
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.registry.outputs.host }}
+          username: ${{ secrets.TESTING_CN_REGISTRY_USERNAME }}
+          password: ${{ secrets.TESTING_CN_REGISTRY_PASSWORD }}
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+      - name: Check immutable aliases and private receipt
+        id: preflight
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TESTING_CN_APP_SLUG: ${{ steps.app.outputs.app-slug }}
+        run: node control/.github/scripts/testing-cn-build.mjs preflight request.json
+
+  build:
+    needs: [verify, preflight]
+    if: needs.preflight.outputs.reuse == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: testing-cn-build
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [app, sandbox, agent]
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ vars.TESTING_CN_APP_ID }}
+          private-key: ${{ secrets.TESTING_CN_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+          permission-contents: read
+      - uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ needs.verify.outputs.control_sha }}
+          token: ${{ steps.app.outputs.token }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ needs.verify.outputs.source_sha }}
+          token: ${{ steps.app.outputs.token }}
+          path: source
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: testing-cn-request-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --global zx
+      - name: Validate registry configuration
+        id: registry
+        run: node --input-type=module -e 'import {registryConfig} from "./control/.github/scripts/testing-cn-deployment.mjs"; import {appendFileSync} from "node:fs"; appendFileSync(process.env.GITHUB_OUTPUT, "host="+registryConfig(process.env.TESTING_CN_REGISTRY_PREFIX).host+"\n")'
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.registry.outputs.host }}
+          username: ${{ secrets.TESTING_CN_REGISTRY_USERNAME }}
+          password: ${{ secrets.TESTING_CN_REGISTRY_PASSWORD }}
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+      - uses: crazy-max/ghaction-github-runtime@v3
+      - name: Build exact candidate attempt image
+        env:
+          SOURCE_DIR: ${{ github.workspace }}/source
+          BUILD_TARGET: ${{ matrix.target }}
+        run: node control/.github/scripts/testing-cn-build.mjs build request.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: testing-cn-leg-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}
+          path: ${{ matrix.target }}.json
+          if-no-files-found: error
+
+  publish:
+    needs: [verify, preflight, build]
+    if: always() && needs.verify.result == 'success' && needs.preflight.result == 'success' && (needs.build.result == 'success' || needs.preflight.outputs.reuse == 'true')
+    runs-on: ubuntu-latest
+    environment: testing-cn-build
+    concurrency:
+      group: testing-cn-bundle
+      cancel-in-progress: false
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ vars.TESTING_CN_APP_ID }}
+          private-key: ${{ secrets.TESTING_CN_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: |
+            teable-ee
+            teable-enterprise
+          permission-contents: read
+          permission-actions: read
+          permission-deployments: write
+      - uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ needs.verify.outputs.control_sha }}
+          token: ${{ steps.app.outputs.token }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/download-artifact@v4
+        with:
+          name: testing-cn-request-${{ github.run_id }}-${{ github.run_attempt }}
+      - if: needs.preflight.outputs.reuse != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: testing-cn-leg-${{ github.run_id }}-${{ github.run_attempt }}-*
+          merge-multiple: true
+          path: legs
+      - name: Validate registry configuration
+        id: registry
+        run: node --input-type=module -e 'import {registryConfig} from "./control/.github/scripts/testing-cn-deployment.mjs"; import {appendFileSync} from "node:fs"; appendFileSync(process.env.GITHUB_OUTPUT, "host="+registryConfig(process.env.TESTING_CN_REGISTRY_PREFIX).host+"\n")'
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.registry.outputs.host }}
+          username: ${{ secrets.TESTING_CN_REGISTRY_USERNAME }}
+          password: ${{ secrets.TESTING_CN_REGISTRY_PASSWORD }}
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+      - name: Publish or verify complete immutable SHA bundle
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TESTING_CN_APP_SLUG: ${{ steps.app.outputs.app-slug }}
+        run: node control/.github/scripts/testing-cn-build.mjs publish request.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: testing-cn-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: bundle.json
+          if-no-files-found: error
+
+  disabled:
+    needs: [verify, publish]
+    if: always() && needs.publish.result == 'success' && vars.TESTING_CN_DEPLOY_ENABLED != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: await core.summary.addRaw('Testing CN deployment DISABLED. Images were published; no runtime Deployment receipt, migration Job or application rollout was created. This is not QA-ready.').write();
+
+  deploy:
+    needs: [verify, publish]
+    if: always() && needs.verify.result == 'success' && needs.publish.result == 'success' && vars.TESTING_CN_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: testing-cn-deploy
+    concurrency:
+      group: testing-cn-runtime
+      cancel-in-progress: false
+    env:
+      TESTING_CN_DEPLOY_ENABLED: ${{ vars.TESTING_CN_DEPLOY_ENABLED }}
+      TESTING_CN_NAMESPACE: ${{ vars.TESTING_CN_NAMESPACE }}
+      TESTING_CN_PUBLIC_ORIGIN: ${{ vars.TESTING_CN_PUBLIC_ORIGIN }}
+      TESTING_CN_TLS_SECRET_NAME: ${{ vars.TESTING_CN_TLS_SECRET_NAME }}
+      TESTING_CN_CONFIG_REVISION: ${{ vars.TESTING_CN_CONFIG_REVISION }}
+      TESTING_CN_DATASET_REVISION: ${{ vars.TESTING_CN_DATASET_REVISION }}
+      TESTING_CN_QA_SOURCE_CIDRS: ${{ vars.TESTING_CN_QA_SOURCE_CIDRS }}
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ vars.TESTING_CN_APP_ID }}
+          private-key: ${{ secrets.TESTING_CN_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+          permission-contents: read
+          permission-actions: read
+          permission-deployments: write
+      - uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ needs.verify.outputs.control_sha }}
+          token: ${{ steps.app.outputs.token }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ needs.verify.outputs.source_sha }}
+          token: ${{ steps.app.outputs.token }}
+          path: source
+          persist-credentials: false
+          sparse-checkout: .github/workflows/templates/testing-cn-template.yaml
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: testing-cn-request-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: testing-cn-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: azure/setup-kubectl@v4
+      - name: Revalidate freshness before exposing kube credentials
+        id: freshness
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TESTING_CN_APP_SLUG: ${{ steps.app.outputs.app-slug }}
+        run: |
+          node --input-type=module -e 'import {readFileSync,appendFileSync} from "node:fs"; import {freshRequest,runtimeConfig} from "./control/.github/scripts/testing-cn-deployment.mjs"; const input=JSON.parse(readFileSync("request.json")); runtimeConfig(); let current=true; try { await freshRequest(input.request,input.sender); } catch(error) { if(error.code!=="SUPERSEDED") throw error; current=false; appendFileSync(process.env.GITHUB_STEP_SUMMARY,"Superseded testing request; no runtime mutation.\n"); } appendFileSync(process.env.GITHUB_OUTPUT,"current="+current+"\n")'
+      - name: Materialize namespace-scoped kubeconfig
+        if: steps.freshness.outputs.current == 'true'
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.TESTING_CN_KUBE_CONFIG }}
+        run: node --input-type=module -e 'import {writeFileSync,appendFileSync} from "node:fs"; if (!process.env.KUBE_CONFIG_B64) throw new Error("Missing testing kubeconfig"); const path=process.env.RUNNER_TEMP+"/testing-cn-kubeconfig"; writeFileSync(path,Buffer.from(process.env.KUBE_CONFIG_B64,"base64"),{mode:0o600}); appendFileSync(process.env.GITHUB_ENV,"KUBECONFIG="+path+"\n")'
+      - name: Migrate and observe exact digest rollout
+        if: steps.freshness.outputs.current == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TESTING_CN_APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          SOURCE_DIR: ${{ github.workspace }}/source
+        run: |
+          node --input-type=module -e 'import {readFileSync,writeFileSync,appendFileSync} from "node:fs"; import {deployRuntime} from "./control/.github/scripts/testing-cn-deployment.mjs"; const input={...JSON.parse(readFileSync("request.json")),bundle:JSON.parse(readFileSync("bundle.json")),workflow_sha:process.env.GITHUB_SHA}; const result=await deployRuntime(input); writeFileSync("deployment-result.json",JSON.stringify(result)); appendFileSync(process.env.GITHUB_STEP_SUMMARY,"Testing CN result: `"+JSON.stringify(result)+"`\n"); console.log(JSON.stringify(result))'
+      - name: Record interrupted runtime without stopping migration Job
+        if: failure() || cancelled()
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TESTING_CN_APP_SLUG: ${{ steps.app.outputs.app-slug }}
+        run: node control/.github/scripts/testing-cn-deployment.mjs interrupt-runtime request.json
+      - name: Remove local kubeconfig
+        if: always()
+        run: node --input-type=module -e 'import {rmSync} from "node:fs"; rmSync(process.env.RUNNER_TEMP+"/testing-cn-kubeconfig",{force:true})'
