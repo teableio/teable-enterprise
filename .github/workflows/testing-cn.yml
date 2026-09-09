@@ -7,7 +7,6 @@ on:
 permissions: {}
 
 env:
-  TESTING_CN_APP_ID: ${{ vars.TESTING_CN_APP_ID }}
   TESTING_CN_REGISTRY_PREFIX: ${{ vars.TESTING_CN_REGISTRY_PREFIX }}
   TESTING_CN_REGISTRY_IMMUTABILITY_APPROVED: ${{ vars.TESTING_CN_REGISTRY_IMMUTABILITY_APPROVED }}
 
@@ -19,20 +18,11 @@ jobs:
       control_sha: ${{ steps.control.outputs.sha }}
       source_sha: ${{ steps.verify.outputs.source_sha }}
     steps:
-      - uses: actions/create-github-app-token@v2
-        id: app
-        with:
-          app-id: ${{ vars.TESTING_CN_APP_ID }}
-          private-key: ${{ secrets.TESTING_CN_APP_PRIVATE_KEY }}
-          owner: teableio
-          repositories: teable-ee
-          permission-contents: read
-          permission-actions: read
       - name: Pin protected controller before reading candidate data
         id: control
         uses: actions/github-script@v7
         with:
-          github-token: ${{ steps.app.outputs.token }}
+          github-token: ${{ secrets.PACKAGES_KEY }}
           script: |
             const {data: branch} = await github.rest.repos.getBranch({owner:'teableio', repo:'teable-ee', branch:'develop'});
             if (!branch.protected || !/^[a-f0-9]{40}$/.test(branch.commit.sha)) throw new Error('Protected controller unavailable');
@@ -41,7 +31,7 @@ jobs:
         with:
           repository: teableio/teable-ee
           ref: ${{ steps.control.outputs.sha }}
-          token: ${{ steps.app.outputs.token }}
+          token: ${{ secrets.PACKAGES_KEY }}
           path: control
           persist-credentials: false
           sparse-checkout: .github/scripts
@@ -51,8 +41,7 @@ jobs:
       - name: Authenticate sender and exact source workflow attempt
         id: verify
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-          TESTING_CN_APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
           CONTROL_SHA: ${{ steps.control.outputs.sha }}
         run: node control/.github/scripts/testing-cn-deployment.mjs verify-dispatch
       - uses: actions/upload-artifact@v4
@@ -68,23 +57,11 @@ jobs:
     outputs:
       reuse: ${{ steps.preflight.outputs.reuse }}
     steps:
-      - uses: actions/create-github-app-token@v2
-        id: app
-        with:
-          app-id: ${{ vars.TESTING_CN_APP_ID }}
-          private-key: ${{ secrets.TESTING_CN_APP_PRIVATE_KEY }}
-          owner: teableio
-          repositories: |
-            teable-ee
-            teable-enterprise
-          permission-contents: read
-          permission-actions: read
-          permission-deployments: read
       - uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
           ref: ${{ needs.verify.outputs.control_sha }}
-          token: ${{ steps.app.outputs.token }}
+          token: ${{ secrets.PACKAGES_KEY }}
           path: control
           persist-credentials: false
           sparse-checkout: .github/scripts
@@ -105,8 +82,7 @@ jobs:
       - name: Check immutable aliases and private receipt
         id: preflight
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-          TESTING_CN_APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
         run: node control/.github/scripts/testing-cn-build.mjs preflight request.json
 
   build:
@@ -120,19 +96,11 @@ jobs:
       matrix:
         target: [app, sandbox, agent]
     steps:
-      - uses: actions/create-github-app-token@v2
-        id: app
-        with:
-          app-id: ${{ vars.TESTING_CN_APP_ID }}
-          private-key: ${{ secrets.TESTING_CN_APP_PRIVATE_KEY }}
-          owner: teableio
-          repositories: teable-ee
-          permission-contents: read
       - uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
           ref: ${{ needs.verify.outputs.control_sha }}
-          token: ${{ steps.app.outputs.token }}
+          token: ${{ secrets.PACKAGES_KEY }}
           path: control
           persist-credentials: false
           sparse-checkout: .github/scripts
@@ -140,7 +108,7 @@ jobs:
         with:
           repository: teableio/teable-ee
           ref: ${{ needs.verify.outputs.source_sha }}
-          token: ${{ steps.app.outputs.token }}
+          token: ${{ secrets.PACKAGES_KEY }}
           path: source
           persist-credentials: false
       - uses: actions/download-artifact@v4
@@ -182,23 +150,11 @@ jobs:
       group: testing-cn-bundle
       cancel-in-progress: false
     steps:
-      - uses: actions/create-github-app-token@v2
-        id: app
-        with:
-          app-id: ${{ vars.TESTING_CN_APP_ID }}
-          private-key: ${{ secrets.TESTING_CN_APP_PRIVATE_KEY }}
-          owner: teableio
-          repositories: |
-            teable-ee
-            teable-enterprise
-          permission-contents: read
-          permission-actions: read
-          permission-deployments: write
       - uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
           ref: ${{ needs.verify.outputs.control_sha }}
-          token: ${{ steps.app.outputs.token }}
+          token: ${{ secrets.PACKAGES_KEY }}
           path: control
           persist-credentials: false
           sparse-checkout: .github/scripts
@@ -224,8 +180,7 @@ jobs:
           driver: docker-container
       - name: Publish or verify complete immutable SHA bundle
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-          TESTING_CN_APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
         run: node control/.github/scripts/testing-cn-build.mjs publish request.json
       - uses: actions/upload-artifact@v4
         with:
@@ -248,6 +203,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     environment: testing-cn-deploy
+    outputs:
+      state: ${{ steps.freshness.outputs.current == 'false' && 'superseded' || steps.rollout.outputs.state }}
+      deployment_id: ${{ steps.rollout.outputs.deployment_id }}
+      environment_url: ${{ steps.rollout.outputs.environment_url }}
     concurrency:
       group: testing-cn-runtime
       cancel-in-progress: false
@@ -260,32 +219,11 @@ jobs:
       TESTING_CN_DATASET_REVISION: ${{ vars.TESTING_CN_DATASET_REVISION }}
       TESTING_CN_QA_SOURCE_CIDRS: ${{ vars.TESTING_CN_QA_SOURCE_CIDRS }}
     steps:
-      - uses: actions/create-github-app-token@v2
-        id: app
-        with:
-          app-id: ${{ vars.TESTING_CN_APP_ID }}
-          private-key: ${{ secrets.TESTING_CN_APP_PRIVATE_KEY }}
-          owner: teableio
-          repositories: teable-ee
-          permission-contents: read
-          permission-actions: read
-          permission-deployments: write
-      - uses: actions/create-github-app-token@v2
-        id: baseline
-        # v2 parses this API permission, but its generated input metadata omits it.
-        env:
-          INPUT_PERMISSION-VARIABLES: read
-        with:
-          app-id: ${{ vars.TESTING_CN_APP_ID }}
-          private-key: ${{ secrets.TESTING_CN_APP_PRIVATE_KEY }}
-          owner: teableio
-          repositories: teable-enterprise
-          permission-environments: read
       - uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
           ref: ${{ needs.verify.outputs.control_sha }}
-          token: ${{ steps.app.outputs.token }}
+          token: ${{ secrets.PACKAGES_KEY }}
           path: control
           persist-credentials: false
           sparse-checkout: .github/scripts
@@ -293,7 +231,7 @@ jobs:
         with:
           repository: teableio/teable-ee
           ref: ${{ needs.verify.outputs.source_sha }}
-          token: ${{ steps.app.outputs.token }}
+          token: ${{ secrets.PACKAGES_KEY }}
           path: source
           persist-credentials: false
           sparse-checkout: .github/workflows/templates/testing-cn-template.yaml
@@ -311,8 +249,7 @@ jobs:
       - name: Revalidate freshness before exposing kube credentials
         id: freshness
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-          TESTING_CN_APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
         run: |
           node --input-type=module -e 'import {readFileSync,appendFileSync} from "node:fs"; import {freshRequest,runtimeConfig} from "./control/.github/scripts/testing-cn-deployment.mjs"; const input=JSON.parse(readFileSync("request.json")); runtimeConfig(); let current=true; try { await freshRequest(input.request,input.sender); } catch(error) { if(error.code!=="SUPERSEDED") throw error; current=false; appendFileSync(process.env.GITHUB_STEP_SUMMARY,"Superseded testing request; no runtime mutation.\n"); } appendFileSync(process.env.GITHUB_OUTPUT,"current="+current+"\n")'
       - name: Materialize namespace-scoped kubeconfig
@@ -321,20 +258,67 @@ jobs:
           KUBE_CONFIG_B64: ${{ secrets.TESTING_CN_KUBE_CONFIG }}
         run: node --input-type=module -e 'import {writeFileSync,appendFileSync} from "node:fs"; if (!process.env.KUBE_CONFIG_B64) throw new Error("Missing testing kubeconfig"); const path=process.env.RUNNER_TEMP+"/testing-cn-kubeconfig"; writeFileSync(path,Buffer.from(process.env.KUBE_CONFIG_B64,"base64"),{mode:0o600}); appendFileSync(process.env.GITHUB_ENV,"KUBECONFIG="+path+"\n")'
       - name: Migrate and observe exact digest rollout
+        id: rollout
         if: steps.freshness.outputs.current == 'true'
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-          BASELINE_TOKEN: ${{ steps.baseline.outputs.token }}
-          TESTING_CN_APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          BASELINE_TOKEN: ${{ secrets.PACKAGES_KEY }}
           SOURCE_DIR: ${{ github.workspace }}/source
         run: |
-          node --input-type=module -e 'import {readFileSync,writeFileSync,appendFileSync} from "node:fs"; import {deployRuntime} from "./control/.github/scripts/testing-cn-deployment.mjs"; const input={...JSON.parse(readFileSync("request.json")),bundle:JSON.parse(readFileSync("bundle.json")),workflow_sha:process.env.GITHUB_SHA}; const result=await deployRuntime(input); writeFileSync("deployment-result.json",JSON.stringify(result)); appendFileSync(process.env.GITHUB_STEP_SUMMARY,"Testing CN result: `"+JSON.stringify(result)+"`\n"); console.log(JSON.stringify(result))'
+          node --input-type=module -e 'import {readFileSync,writeFileSync,appendFileSync} from "node:fs"; import {deployRuntime} from "./control/.github/scripts/testing-cn-deployment.mjs"; const input={...JSON.parse(readFileSync("request.json")),bundle:JSON.parse(readFileSync("bundle.json")),workflow_sha:process.env.GITHUB_SHA}; const result=await deployRuntime(input); writeFileSync("deployment-result.json",JSON.stringify(result)); for (const key of ["state","deployment_id","environment_url"]) if(result[key]!=null) appendFileSync(process.env.GITHUB_OUTPUT,key+"="+result[key]+"\n"); appendFileSync(process.env.GITHUB_STEP_SUMMARY,"Testing CN result: `"+JSON.stringify(result)+"`\n"); console.log(JSON.stringify(result))'
       - name: Record interrupted runtime without stopping migration Job
         if: failure() || cancelled()
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-          TESTING_CN_APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
         run: node control/.github/scripts/testing-cn-deployment.mjs interrupt-runtime request.json
       - name: Remove local kubeconfig
         if: always()
         run: node --input-type=module -e 'import {rmSync} from "node:fs"; rmSync(process.env.RUNNER_TEMP+"/testing-cn-kubeconfig",{force:true})'
+
+  notify:
+    needs: [verify, preflight, build, publish, disabled, deploy]
+    if: always() && needs.verify.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ needs.verify.outputs.control_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/download-artifact@v4
+        with:
+          name: testing-cn-request-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Notify Feishu with deployed changes and PR acceptance instructions
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          LARK_BOT_URL: ${{ secrets.LARK_BOT_URL }}
+          JOBS: ${{ toJSON(needs) }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          import { notifyTestingDeployment } from './control/.github/scripts/testing-cn-notify.mjs';
+          const needs = JSON.parse(process.env.JOBS);
+          const jobs = Object.fromEntries(Object.entries(needs).map(([name, job]) => [name, job.result]));
+          const outputs = needs.deploy.outputs;
+          const state = Object.values(jobs).includes('failure') ? 'failure'
+            : Object.values(jobs).includes('cancelled') ? 'cancelled'
+            : needs.disabled.result === 'success' ? 'disabled'
+            : outputs.state || 'failure';
+          const result = { state };
+          if (outputs.deployment_id) result.deployment_id = Number(outputs.deployment_id);
+          if (outputs.environment_url) result.environment_url = outputs.environment_url;
+          const summary = await notifyTestingDeployment({
+            request: JSON.parse(readFileSync('request.json')).request,
+            result, jobs,
+            build_run_id: Number(process.env.GITHUB_RUN_ID),
+            build_run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+          });
+          console.log(JSON.stringify(summary));
+          NODE
