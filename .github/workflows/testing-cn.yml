@@ -226,15 +226,9 @@ jobs:
           token: ${{ secrets.PACKAGES_KEY }}
           path: control
           persist-credentials: false
-          sparse-checkout: .github/scripts
-      - uses: actions/checkout@v4
-        with:
-          repository: teableio/teable-ee
-          ref: ${{ needs.verify.outputs.source_sha }}
-          token: ${{ secrets.PACKAGES_KEY }}
-          path: source
-          persist-credentials: false
-          sparse-checkout: .github/workflows/templates/testing-cn-template.yaml
+          sparse-checkout: |
+            .github/scripts
+            .github/workflows/templates/testing-cn-template.yaml
           sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v4
         with:
@@ -262,10 +256,22 @@ jobs:
         if: steps.freshness.outputs.current == 'true'
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-          BASELINE_TOKEN: ${{ secrets.PACKAGES_KEY }}
-          SOURCE_DIR: ${{ github.workspace }}/source
         run: |
-          node --input-type=module -e 'import {readFileSync,writeFileSync,appendFileSync} from "node:fs"; import {deployRuntime} from "./control/.github/scripts/testing-cn-deployment.mjs"; const input={...JSON.parse(readFileSync("request.json")),bundle:JSON.parse(readFileSync("bundle.json")),workflow_sha:process.env.GITHUB_SHA}; const result=await deployRuntime(input); writeFileSync("deployment-result.json",JSON.stringify(result)); for (const key of ["state","deployment_id","environment_url"]) if(result[key]!=null) appendFileSync(process.env.GITHUB_OUTPUT,key+"="+result[key]+"\n"); appendFileSync(process.env.GITHUB_STEP_SUMMARY,"Testing CN result: `"+JSON.stringify(result)+"`\n"); console.log(JSON.stringify(result))'
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+          import { deployRuntime } from './control/.github/scripts/testing-cn-deployment.mjs';
+          const result = await deployRuntime({
+            ...JSON.parse(readFileSync('request.json')),
+            bundle: JSON.parse(readFileSync('bundle.json')),
+            workflow_sha: process.env.GITHUB_SHA,
+          });
+          writeFileSync('deployment-result.json', JSON.stringify(result));
+          for (const key of ['state', 'deployment_id', 'environment_url']) {
+            if (result[key] != null) appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${result[key]}\n`);
+          }
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY, `Testing CN result: ${JSON.stringify(result)}\n`);
+          console.log(JSON.stringify(result));
+          NODE
       - name: Record interrupted runtime without stopping migration Job
         if: failure() || cancelled()
         env:
