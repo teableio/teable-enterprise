@@ -270,6 +270,17 @@ jobs:
           permission-contents: read
           permission-actions: read
           permission-deployments: write
+      - uses: actions/create-github-app-token@v2
+        id: baseline
+        # v2 parses this API permission, but its generated input metadata omits it.
+        env:
+          INPUT_PERMISSION-VARIABLES: read
+        with:
+          app-id: ${{ vars.TESTING_CN_APP_ID }}
+          private-key: ${{ secrets.TESTING_CN_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-enterprise
+          permission-environments: read
       - uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
@@ -313,6 +324,7 @@ jobs:
         if: steps.freshness.outputs.current == 'true'
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
+          BASELINE_TOKEN: ${{ steps.baseline.outputs.token }}
           TESTING_CN_APP_SLUG: ${{ steps.app.outputs.app-slug }}
           SOURCE_DIR: ${{ github.workspace }}/source
         run: |
