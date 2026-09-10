@@ -1,0 +1,74 @@
+name: Testing CN Database Refresh
+
+on:
+  schedule:
+    - cron: '30 17 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Plan only; do not restore, wire, or delete
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: testing-cn-runtime
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: github.repository == 'teableio/teable-enterprise' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Pin protected controller
+        id: control
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PACKAGES_KEY }}
+          script: |
+            const {data: branch} = await github.rest.repos.getBranch({owner:'teableio', repo:'teable-ee', branch:'develop'});
+            if (!branch.protected || !/^[a-f0-9]{40}$/.test(branch.commit.sha)) throw new Error('Protected controller unavailable');
+            core.setOutput('sha', branch.commit.sha);
+      - uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ steps.control.outputs.sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: azure/setup-kubectl@v4
+      - name: Install sealos-cli
+        run: npm install --global sealos-cli@1.1.6
+      - name: Refresh testing-cn database from the latest teable-db-2 backup
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          TESTING_CN_DATABASE_URL: ${{ secrets.TESTING_CN_DATABASE_URL }}
+          LARK_BOT_URL: ${{ secrets.LARK_BOT_URL }}
+          SEALOS_CLI: sealos-cli
+          SEALOS_DATABASE_HOST: dbprovider.hzh.sealos.run
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+        run: |
+          umask 077
+          if [ -z "$KUBE_CONFIG" ] || [ -z "$TESTING_CN_DATABASE_URL" ]; then
+            echo '::error::Missing KUBE_CONFIG or TESTING_CN_DATABASE_URL'
+            exit 1
+          fi
+          export KUBECONFIG="$RUNNER_TEMP/testing-cn-kubeconfig"
+          printf '%s' "$KUBE_CONFIG" | base64 --decode > "$KUBECONFIG"
+          kubectl config set-context --current --namespace=ns-38puz7wo >/dev/null
+          mkdir -p "$HOME/.sealos"
+          cp "$KUBECONFIG" "$HOME/.sealos/kubeconfig"
+          chmod 600 "$KUBECONFIG" "$HOME/.sealos/kubeconfig"
+          ARGS=(refresh)
+          if [ "$DRY_RUN" = true ]; then
+            ARGS+=(--dry-run)
+          fi
+          node control/.github/scripts/testing-cn-db-refresh.mjs "${ARGS[@]}"
+          rm -f "$KUBECONFIG" "$HOME/.sealos/kubeconfig"
