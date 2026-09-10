@@ -284,7 +284,7 @@ jobs:
 
   notify:
     needs: [verify, build-push, deploy]
-    if: always() && !cancelled() && needs.verify.result == 'success'
+    if: always() && !cancelled() && needs.verify.result == 'success' && needs.deploy.outputs.state != 'superseded'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
