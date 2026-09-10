@@ -256,6 +256,15 @@ jobs:
             });
             core.setOutput('state', state === 'error' ? 'cancelled' : state);
             core.setOutput('environment_url', environment_url);
+      - name: Record product env drift versus cn-prod
+        if: always() && env.KUBECONFIG != ''
+        run: node control/.github/scripts/testing-cn-env-drift.mjs from-cluster "$RUNNER_TEMP/env-drift.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: testing-cn-env-drift-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/env-drift.json
+          if-no-files-found: ignore
       - name: Remove local credentials and rendered secrets
         if: always()
         run: |
@@ -279,6 +288,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: testing-cn-request-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: testing-cn-env-drift-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -302,9 +315,11 @@ jobs:
           const result = { state };
           if (outputs.deployment_id) result.deployment_id = Number(outputs.deployment_id);
           if (outputs.environment_url) result.environment_url = outputs.environment_url;
+          let drift;
+          try { drift = JSON.parse(readFileSync('env-drift.json', 'utf8')); } catch {}
           const summary = await notifyTestingDeployment({
             request: JSON.parse(readFileSync('request.json')).request,
-            result, jobs,
+            result, jobs, drift,
             build_run_id: Number(process.env.GITHUB_RUN_ID),
             build_run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
           });
