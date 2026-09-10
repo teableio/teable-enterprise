@@ -169,7 +169,14 @@ jobs:
           IMAGE_TAG: ${{ needs.verify.outputs.source_sha }}
           ENABLE_TRACING: "true"
           PREVIEW_CONFIG_SOURCE: ${{ secrets.PREVIEW_CONFIG_SOURCE }}
-          PREVIEW_PRESET_ENV_DEFAULTS: SANDBOX_OPENSANDBOX_IMAGE=registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-agent-cloud-preview
+          PREVIEW_PRESET_ENV_DEFAULTS: |
+            SANDBOX_OPENSANDBOX_IMAGE=registry.cn-shenzhen.aliyuncs.com/teable/teable-sandbox-agent-cloud-preview
+            BACKEND_RECORD_HISTORY_COLD_DISABLED=false
+            ENABLE_CANARY_FEATURE=true
+            MAX_SEARCH_FIELD_COUNT=20
+            NEXT_BUILD_ENV_EDITION=CLOUD
+            V2_TABLE_QUERY_OPS_SEARCH_ACCESS_PATH_RUNTIME=auto
+            V2_TABLE_QUERY_OPS_TASK_WORKER_ENABLED=false
           PREVIEW_PRESET_ENV_VARS: ${{ vars.PREVIEW_PRESET_ENV_VARS }}
           PREVIEW_PRESET_ENV: ${{ secrets.PREVIEW_PRESET_ENV }}
           TESTING_CN_DATABASE_URL: ${{ secrets.TESTING_CN_DATABASE_URL }}
