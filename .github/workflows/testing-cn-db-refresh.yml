@@ -43,6 +43,8 @@ jobs:
         with:
           node-version: 22
       - uses: azure/setup-kubectl@v4
+      - name: Install psql
+        run: sudo apt-get update -qq && sudo apt-get install -y postgresql-client
       - name: Install sealos-cli
         run: npm install --global sealos-cli@1.1.6
       - name: Refresh testing-cn database from the latest teable-db-2 backup
