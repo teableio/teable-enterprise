@@ -310,6 +310,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
           LARK_BOT_URL: ${{ secrets.LARK_BOT_URL }}
+          TESTING_CN_DATABASE_URL: ${{ secrets.TESTING_CN_DATABASE_URL }}
           DEPLOY_ENABLED: ${{ vars.TESTING_CN_DEPLOY_ENABLED }}
           JOBS: ${{ toJSON(needs) }}
         run: |
