@@ -52,7 +52,7 @@ jobs:
           TESTING_CN_DATABASE_URL: ${{ secrets.TESTING_CN_DATABASE_URL }}
           LARK_BOT_URL: ${{ secrets.LARK_BOT_URL }}
           SEALOS_CLI: sealos-cli
-          SEALOS_DATABASE_HOST: dbprovider.hzh.sealos.run
+          SEALOS_DATABASE_HOST: https://dbprovider.hzh.sealos.run
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
         run: |
           umask 077
