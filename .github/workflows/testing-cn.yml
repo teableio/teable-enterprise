@@ -45,6 +45,7 @@ jobs:
           CONTROL_SHA: ${{ steps.control.outputs.sha }}
         run: node control/.github/scripts/testing-cn-deployment.mjs verify-dispatch
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: testing-cn-request-${{ github.run_id }}-${{ github.run_attempt }}
           path: request.json
@@ -284,7 +285,7 @@ jobs:
 
   notify:
     needs: [verify, build-push, deploy]
-    if: always() && !cancelled() && needs.verify.result == 'success' && needs.deploy.outputs.state != 'superseded'
+    if: always() && !cancelled() && needs.verify.result != 'skipped' && needs.deploy.outputs.state != 'superseded'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
