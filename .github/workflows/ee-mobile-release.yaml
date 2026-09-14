@@ -60,8 +60,7 @@ jobs:
           repository: teableio/teable-ee
           token: ${{ secrets.PACKAGES_KEY }}
           ref: ${{ env.EE_SHA }}
-          # The build number is the commit count.
-          fetch-depth: 0
+          fetch-depth: 1
 
       - uses: pnpm/action-setup@v4
 
@@ -75,13 +74,20 @@ jobs:
 
       - name: Build number
         env:
-          UPLOAD_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.upload || github.event.client_payload.upload }}
+          # Read as strings: a boolean false would otherwise vanish in an && / || expression.
+          UPLOAD_DISPATCH: ${{ format('{0}', inputs.upload) }}
+          UPLOAD_PAYLOAD: ${{ format('{0}', github.event.client_payload.upload) }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
+          # Only this commit's history is fetched (a branch listing would show the private
+          # repository's branch names in this public log).
+          git fetch --quiet --unshallow --no-tags origin "$EE_SHA" 2>/dev/null || git fetch --quiet --no-tags origin "$EE_SHA"
           N="${BUILD_NUMBER_INPUT:-$(git rev-list --count HEAD)}"
           echo "MOBILE_BUILD_NUMBER=$N" >> "$GITHUB_ENV"
-          # Upload unless told not to (a manual run may only want the archive checked).
-          if [ "$UPLOAD_INPUT" = "false" ]; then echo "UPLOAD=false" >> "$GITHUB_ENV"; else echo "UPLOAD=true" >> "$GITHUB_ENV"; fi
-          echo "build number: $N (teable-ee ${EE_SHA:0:7}), upload: ${UPLOAD_INPUT:-true}"
+          # Upload unless told not to (a manual run may only want the build checked).
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then U="$UPLOAD_DISPATCH"; else U="$UPLOAD_PAYLOAD"; fi
+          if [ "$U" = "false" ]; then echo "UPLOAD=false" >> "$GITHUB_ENV"; else echo "UPLOAD=true" >> "$GITHUB_ENV"; fi
+          echo "build number: $N (teable-ee ${EE_SHA:0:7}), upload: ${U:-true}"
 
       - name: Install monorepo (shared packages + their dependencies)
         run: >-
@@ -192,8 +198,7 @@ jobs:
           repository: teableio/teable-ee
           token: ${{ secrets.PACKAGES_KEY }}
           ref: ${{ env.EE_SHA }}
-          # The build number is the commit count.
-          fetch-depth: 0
+          fetch-depth: 1
 
       - uses: pnpm/action-setup@v4
 
@@ -207,13 +212,20 @@ jobs:
 
       - name: Build number
         env:
-          UPLOAD_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.upload || github.event.client_payload.upload }}
+          # Read as strings: a boolean false would otherwise vanish in an && / || expression.
+          UPLOAD_DISPATCH: ${{ format('{0}', inputs.upload) }}
+          UPLOAD_PAYLOAD: ${{ format('{0}', github.event.client_payload.upload) }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
+          # Only this commit's history is fetched (a branch listing would show the private
+          # repository's branch names in this public log).
+          git fetch --quiet --unshallow --no-tags origin "$EE_SHA" 2>/dev/null || git fetch --quiet --no-tags origin "$EE_SHA"
           N="${BUILD_NUMBER_INPUT:-$(git rev-list --count HEAD)}"
           echo "MOBILE_BUILD_NUMBER=$N" >> "$GITHUB_ENV"
-          # Upload unless told not to (a manual run may only want the archive checked).
-          if [ "$UPLOAD_INPUT" = "false" ]; then echo "UPLOAD=false" >> "$GITHUB_ENV"; else echo "UPLOAD=true" >> "$GITHUB_ENV"; fi
-          echo "build number: $N (teable-ee ${EE_SHA:0:7}), upload: ${UPLOAD_INPUT:-true}"
+          # Upload unless told not to (a manual run may only want the build checked).
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then U="$UPLOAD_DISPATCH"; else U="$UPLOAD_PAYLOAD"; fi
+          if [ "$U" = "false" ]; then echo "UPLOAD=false" >> "$GITHUB_ENV"; else echo "UPLOAD=true" >> "$GITHUB_ENV"; fi
+          echo "build number: $N (teable-ee ${EE_SHA:0:7}), upload: ${U:-true}"
 
       - name: Install monorepo (shared packages + their dependencies)
         run: >-
