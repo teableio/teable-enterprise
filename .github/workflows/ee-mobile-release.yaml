@@ -270,13 +270,6 @@ jobs:
           ls -la app/build/outputs/bundle/release/app-release.aab | awk '{print "bundle: "$5" bytes"}'
           keytool -printcert -jarfile app/build/outputs/bundle/release/app-release.aab | grep -E "^Owner:" | head -1
 
-      - name: Keep the bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: teable-android-${{ env.MOBILE_BUILD_NUMBER }}
-          path: enterprise/mobile/android/app/build/outputs/bundle/release/app-release.aab
-          retention-days: 30
-
       - name: Upload to Google Play (internal testing)
         if: env.UPLOAD == 'true'
         uses: r0adkll/upload-google-play@v1
