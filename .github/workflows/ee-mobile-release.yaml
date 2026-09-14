@@ -266,9 +266,26 @@ jobs:
           MOBILE_UPLOAD_KEY_ALIAS: upload
           MOBILE_UPLOAD_KEY_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
         run: |
-          ./gradlew bundleRelease --no-daemon -q > /tmp/gradle.log 2>&1 || { grep -E "error|FAILED|What went wrong" -A3 /tmp/gradle.log | tail -40; exit 1; }
+          ./gradlew bundleRelease assembleRelease --no-daemon -q > /tmp/gradle.log 2>&1 || { grep -E "error|FAILED|What went wrong" -A3 /tmp/gradle.log | tail -40; exit 1; }
           ls -la app/build/outputs/bundle/release/app-release.aab | awk '{print "bundle: "$5" bytes"}'
+          ls -la app/build/outputs/apk/release/app-release.apk | awk '{print "apk: "$5" bytes"}'
           keytool -printcert -jarfile app/build/outputs/bundle/release/app-release.aab | grep -E "^Owner:" | head -1
+
+      # The APK for hand distribution goes to the private logs repository, never to a public
+      # artifact of this repository.
+      - name: Keep the APK (teable-ci-logs release)
+        working-directory: enterprise/mobile/android/app/build/outputs
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          LOGS_REPO: teableio/teable-ci-logs
+        run: |
+          TAG="mobile-android-${MOBILE_BUILD_NUMBER}"
+          cp apk/release/app-release.apk "Teable-android-${MOBILE_BUILD_NUMBER}.apk"
+          cp bundle/release/app-release.aab "Teable-android-${MOBILE_BUILD_NUMBER}.aab"
+          gh release create "$TAG" -R "$LOGS_REPO" --title "Teable Android ${MOBILE_BUILD_NUMBER}" \
+            --notes "teable-ee ${EE_SHA} · run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" 2>/dev/null || true
+          gh release upload "$TAG" "Teable-android-${MOBILE_BUILD_NUMBER}.apk" "Teable-android-${MOBILE_BUILD_NUMBER}.aab" -R "$LOGS_REPO" --clobber
+          echo "APK: https://github.com/${LOGS_REPO}/releases/tag/${TAG}"
 
       - name: Upload to Google Play (internal testing)
         if: env.UPLOAD == 'true'
