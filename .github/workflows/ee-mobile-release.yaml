@@ -6,8 +6,9 @@
 # key held in secrets.
 #
 # Public logs carry exit codes and error lines only; the private repository's content stays
-# in files on the runner. The last job posts the outcome (success, failure or cancelled) as a
-# card to the R&D Feishu group, the same bot the Web release notifications use.
+# in files on the runner. The last job records the outcome (success, failure or cancelled) as
+# a row in the Mobile Releases table of the Project Management base; a Teable automation there
+# is what posts the R&D Feishu card, the same way Web releases are announced.
 name: EE Mobile Release
 
 on:
@@ -99,7 +100,7 @@ jobs:
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then U="$UPLOAD_DISPATCH"; else U="$UPLOAD_PAYLOAD"; fi
           if [ "$U" = "false" ]; then echo "UPLOAD=false" >> "$GITHUB_ENV"; else echo "UPLOAD=true" >> "$GITHUB_ENV"; fi
           echo "build number: $N (teable-ee ${EE_SHA:0:7}), upload: ${U:-true}"
-          # For the Feishu card (values go to the card, not to this log).
+          # For the Teable row the last job writes (values go to the row, not to this log).
           {
             echo "build_number=$N"
             echo "upload=${U:-true}"
@@ -256,7 +257,7 @@ jobs:
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then U="$UPLOAD_DISPATCH"; else U="$UPLOAD_PAYLOAD"; fi
           if [ "$U" = "false" ]; then echo "UPLOAD=false" >> "$GITHUB_ENV"; else echo "UPLOAD=true" >> "$GITHUB_ENV"; fi
           echo "build number: $N (teable-ee ${EE_SHA:0:7}), upload: ${U:-true}"
-          # For the Feishu card (values go to the card, not to this log).
+          # For the Teable row the last job writes (values go to the row, not to this log).
           {
             echo "build_number=$N"
             echo "upload=${U:-true}"
@@ -366,18 +367,24 @@ jobs:
             echo "- result: ${{ job.status }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # One card per run to the R&D Feishu group: what shipped where (TestFlight / Play / APK), or
-  # which platform failed, with a button to this run. Runs whatever the build jobs did.
-  notify:
-    name: Feishu
+  # One row per run in the Mobile Releases table of the Project Management base. A Teable
+  # automation (移动端构建通知（研发群）) turns that row into the Feishu card — the same place the
+  # Web release notification is built, so the card lives with the people who read it and not
+  # in this file. Nothing here talks to Feishu. Runs whatever the build jobs did.
+  track:
+    name: Teable
     needs: [ios, android]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Card to the R&D group
+      - name: Record the build in Teable
         env:
-          WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          # https://app.teable.ai/base/bserJ2pmgiLHFHfXNwE/table/tblheQqpvzF9MpTSYqO
+          MOBILE_TABLE: tblheQqpvzF9MpTSYqO
+          RELEASES_TABLE: tblAhVLOxNtvkaF1ii5
+          RELEASES_COMMIT_FIELD: fldmRSvaoLTr4uAb6Hh
           IOS: ${{ needs.ios.result }}
           ANDROID: ${{ needs.android.result }}
           BUILD_NUMBER: ${{ needs.ios.outputs.build_number || needs.android.outputs.build_number }}
@@ -389,59 +396,76 @@ jobs:
           ANDROID_STARTED: ${{ needs.android.outputs.started }}
           APK_URL: ${{ needs.android.outputs.apk_url }}
           PLAY: ${{ needs.android.outputs.play }}
-          SOURCE: ${{ github.event_name == 'workflow_dispatch' && format('手动 · {0}', github.actor) || 'develop 合并' }}
+          SOURCE: ${{ github.event_name == 'workflow_dispatch' && '手动' || 'develop 合并' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TESTFLIGHT_URL: https://appstoreconnect.apple.com/apps/6810557646/testflight/ios
         run: |
+          api() { curl -sS -w '\n%{http_code}' -H "Authorization: Bearer $TEABLE_API_TOKEN" "$@"; }
+
           platform() {
-            # $1 result, $2 label when uploaded, $3 label when built only
             case "$1" in
-              success) if [ "$UPLOAD" = "false" ]; then echo "✅ $3"; else echo "✅ $2"; fi ;;
-              failure) echo "❌ 失败" ;;
-              cancelled) echo "⏹ 取消" ;;
-              *) echo "— 未构建" ;;
+              success) echo Success ;;
+              failure) echo Fail ;;
+              cancelled) echo Cancelled ;;
+              *) echo Skipped ;;  # the platform was not asked for, or never started
             esac
           }
-          IOS_LABEL=$(platform "$IOS" "TestFlight" "已构建（未上传）")
-          ANDROID_LABEL=$(platform "$ANDROID" "Play 内测 + APK" "APK（未上传 Play）")
-          # A rejected Play upload does not fail the job; the card has to say it anyway.
-          if [ "$ANDROID" = "success" ] && [ "$UPLOAD" != "false" ] && [ "$PLAY" = "failure" ]; then
-            ANDROID_LABEL="⚠️ 仅 APK（Play 未接受，版本号需高于线上）"
+          case "$PLAY" in
+            success) PLAY_STATUS=Uploaded ;;
+            # Play refuses a versionCode at or below the highest one it already has; the
+            # step carries continue-on-error so TestFlight and the APK still ship.
+            failure) PLAY_STATUS=Rejected ;;
+            *) PLAY_STATUS=Skipped ;;
+          esac
+          if [ "$IOS" = failure ] || [ "$ANDROID" = failure ]; then STATUS=Fail
+          elif [ "$IOS" = cancelled ] || [ "$ANDROID" = cancelled ]; then STATUS=Cancelled
+          elif [ "$IOS" = success ] || [ "$ANDROID" = success ]; then STATUS=Released
+          else STATUS=Unknown  # neither platform ran: the card says so rather than staying silent
           fi
-          if [ -n "$BUILD_NUMBER" ]; then VER="${VERSION:-?} (${BUILD_NUMBER})"; else VER="${EE_SHA:0:7}"; fi
-          if [ "$IOS" = "failure" ] || [ "$ANDROID" = "failure" ]; then
-            TITLE="移动端构建失败! ${VER}"; COLOR="red"
-          elif [ "$IOS" = "cancelled" ] || [ "$ANDROID" = "cancelled" ]; then
-            TITLE="移动端构建取消 ${VER}"; COLOR="grey"
-          elif [ "$IOS" = "success" ] || [ "$ANDROID" = "success" ]; then
-            if [ "$UPLOAD" = "false" ]; then TITLE="移动端构建成功（未上传） ${VER}"; else TITLE="移动端构建成功! ${VER}"; fi
-            COLOR="green"
-          else
-            TITLE="移动端构建状态未知 ${VER}"; COLOR="grey"
-          fi
+
           START="${IOS_STARTED:-$ANDROID_STARTED}"
           if [ -n "$ANDROID_STARTED" ] && [ -n "$IOS_STARTED" ] && [ "$ANDROID_STARTED" -lt "$IOS_STARTED" ]; then START="$ANDROID_STARTED"; fi
-          MINUTES="?"; if [ -n "$START" ]; then MINUTES=$(( ($(date +%s) - START + 59) / 60 )); fi
-          INFO="**iOS**: ${IOS_LABEL} | **Android**: ${ANDROID_LABEL}"
-          META="**build**: ${BUILD_NUMBER:-?} | **提交人**: ${AUTHOR:-?} | **用时**: ${MINUTES}分钟 | **来源**: ${SOURCE} | **提交**: ${EE_SHA:0:7}"
-          button() { jq -n --arg label "$1" --arg url "$2" --arg type "$3" \
-            '{tag:"button",text:{tag:"plain_text",content:$label},type:$type,behaviors:[{type:"open_url",default_url:$url}]}'; }
-          BUTTONS="[$(button "查看CI" "$RUN_URL" primary)"
-          if [ "$IOS" = "success" ] && [ "$UPLOAD" != "false" ]; then BUTTONS="$BUTTONS,$(button "TestFlight" "$TESTFLIGHT_URL" default)"; fi
-          if [ -n "$APK_URL" ]; then BUTTONS="$BUTTONS,$(button "APK 下载" "$APK_URL" default)"; fi
-          BUTTONS="$BUTTONS]"
-          jq -n --arg title "$TITLE" --arg color "$COLOR" --arg info "$INFO" --arg meta "$META" --arg subject "$SUBJECT" \
-            --argjson buttons "$BUTTONS" '
-            def md: {tag:"div", text:{tag:"lark_md", content:.}};
-            {msg_type:"interactive", card:{schema:"2.0",
-              config:{enable_forward:true, update_multi:true, width_mode:"default"},
-              header:{title:{tag:"plain_text", content:$title}, template:$color},
-              body:{direction:"vertical", padding:"12px", vertical_spacing:"8px",
-                elements: ([($info|md), ($meta|md)] + (if $subject == "" then [] else [($subject|md)] end) + [
-                  {tag:"column_set", flex_mode:"none", background_style:"default", horizontal_spacing:"8px",
-                   columns: ($buttons | map({tag:"column", width:"auto", elements:[.]}))}])}}}' > /tmp/card.json
-          echo "card: ${TITLE}"
-          if [ -z "$WEBHOOK_URL" ]; then echo "::warning::FEISHU_WEBHOOK_URL is not set; notification skipped"; exit 0; fi
-          HTTP=$(curl -sS -o /tmp/feishu.json -w '%{http_code}' -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' --data @/tmp/card.json)
-          echo "feishu: HTTP ${HTTP} $(jq -c '{code, msg}' /tmp/feishu.json 2>/dev/null)"
-          [ "$HTTP" = "200" ] && [ "$(jq -r '.code' /tmp/feishu.json 2>/dev/null)" = "0" ]
+          MINUTES=null; if [ -n "$START" ]; then MINUTES=$(( ($(date +%s) - START + 59) / 60 )); fi
+
+          if [ -n "$BUILD_NUMBER" ]; then BUILD="${VERSION:-?} (${BUILD_NUMBER})"; else BUILD="${EE_SHA:0:7}"; fi
+          if [ "$UPLOAD" = "false" ]; then UPLOADED=false; else UPLOADED=true; fi
+
+          # A merge that touched both the app and the server also produced a Web release from
+          # this very commit (one row per edition); hang this build off them. A mobile-only
+          # merge has none — build-trigger.yml ignores those paths — and the link stays empty.
+          FILTER=$(jq -n --arg field "$RELEASES_COMMIT_FIELD" --arg sha "$EE_SHA" \
+            '{conjunction:"and",filterSet:[{fieldId:$field,operator:"is",value:$sha}]}')
+          RELEASES='[]'
+          FOUND=$(api -G "https://app.teable.ai/api/table/${RELEASES_TABLE}/record" \
+            --data-urlencode 'fieldKeyType=dbFieldName' --data-urlencode 'take=10' \
+            --data-urlencode 'projection=tag' --data-urlencode "filter=$FILTER" | sed '$d')
+          if [ -n "$FOUND" ]; then RELEASES=$(printf '%s' "$FOUND" | jq -c '[.records[]? | {id}]' 2>/dev/null || echo '[]'); fi
+          echo "web releases from this commit: $(printf '%s' "$RELEASES" | jq 'length')"
+
+          payload=$(jq -n \
+            --arg build "$BUILD" --arg status "$STATUS" \
+            --arg ios "$(platform "$IOS")" --arg android "$(platform "$ANDROID")" \
+            --arg play "$PLAY_STATUS" --arg version "$VERSION" \
+            --argjson build_number "${BUILD_NUMBER:-null}" \
+            --arg commit "$EE_SHA" --arg subject "$SUBJECT" --arg author "$AUTHOR" \
+            --argjson duration "$MINUTES" --arg source "$SOURCE" \
+            --arg runs "$RUN_URL" --arg apk "$APK_URL" \
+            --argjson uploaded "$UPLOADED" --argjson releases "$RELEASES" \
+            '{fieldKeyType:"dbFieldName", typecast:true, records:[{fields:{
+                Build:$build, Status:$status, iOS:$ios, Android:$android, Play:$play,
+                Version:$version, Build_number:$build_number, Commit:$commit,
+                Commit_message:$subject, Author:$author, Build_duration:$duration,
+                Source:$source, Runs:$runs, APK:$apk, Uploaded:$uploaded,
+                Releases:$releases}}]}')
+
+          RESPONSE=$(api -X POST "https://app.teable.ai/api/table/${MOBILE_TABLE}/record" \
+            -H 'Content-Type: application/json' -d "$payload")
+          HTTP=$(printf '%s' "$RESPONSE" | tail -1)
+          BODY=$(printf '%s' "$RESPONSE" | sed '$d')
+          echo "teable: HTTP ${HTTP} $(printf '%s' "$BODY" | jq -rc '.records[0].id // .message' 2>/dev/null)"
+          # A row that never lands means no Feishu card and no trace of this build — fail loudly.
+          case "$HTTP" in
+            2??) ;;
+            *) echo "::error title=Teable tracking failed::${BUILD} (${STATUS}) was not recorded"
+               printf '%s\n' "$BODY" | head -c 500
+               exit 1 ;;
+          esac
