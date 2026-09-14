@@ -6,7 +6,8 @@
 # key held in secrets.
 #
 # Public logs carry exit codes and error lines only; the private repository's content stays
-# in files on the runner.
+# in files on the runner. The last job posts the outcome (success, failure or cancelled) as a
+# card to the R&D Feishu group, the same bot the Web release notifications use.
 name: EE Mobile Release
 
 on:
@@ -53,6 +54,13 @@ jobs:
     if: ${{ contains(fromJSON('["both","ios"]'), github.event.inputs.platforms || github.event.client_payload.platforms || 'both') }}
     runs-on: macos-26
     timeout-minutes: 90
+    outputs:
+      build_number: ${{ steps.meta.outputs.build_number }}
+      version: ${{ steps.meta.outputs.version }}
+      subject: ${{ steps.meta.outputs.subject }}
+      author: ${{ steps.meta.outputs.author }}
+      upload: ${{ steps.meta.outputs.upload }}
+      started: ${{ steps.meta.outputs.started }}
     steps:
       - name: Checkout teable-ee
         uses: actions/checkout@v4
@@ -73,6 +81,7 @@ jobs:
             enterprise/mobile/pnpm-lock.yaml
 
       - name: Build number
+        id: meta
         env:
           # Read as strings: a boolean false would otherwise vanish in an && / || expression.
           UPLOAD_DISPATCH: ${{ format('{0}', inputs.upload) }}
@@ -88,6 +97,15 @@ jobs:
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then U="$UPLOAD_DISPATCH"; else U="$UPLOAD_PAYLOAD"; fi
           if [ "$U" = "false" ]; then echo "UPLOAD=false" >> "$GITHUB_ENV"; else echo "UPLOAD=true" >> "$GITHUB_ENV"; fi
           echo "build number: $N (teable-ee ${EE_SHA:0:7}), upload: ${U:-true}"
+          # For the Feishu card (values go to the card, not to this log).
+          {
+            echo "build_number=$N"
+            echo "upload=${U:-true}"
+            echo "version=$(sed -n "s/^ *version: '\([^']*\)'.*/\1/p" enterprise/mobile/app.config.ts | head -1)"
+            echo "subject=$(git log -1 --format=%s)"
+            echo "author=$(git log -1 --format=%an)"
+            echo "started=$(date +%s)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Install monorepo (shared packages + their dependencies)
         run: >-
@@ -191,6 +209,14 @@ jobs:
     if: ${{ contains(fromJSON('["both","android"]'), github.event.inputs.platforms || github.event.client_payload.platforms || 'both') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      build_number: ${{ steps.meta.outputs.build_number }}
+      version: ${{ steps.meta.outputs.version }}
+      subject: ${{ steps.meta.outputs.subject }}
+      author: ${{ steps.meta.outputs.author }}
+      upload: ${{ steps.meta.outputs.upload }}
+      started: ${{ steps.meta.outputs.started }}
+      apk_url: ${{ steps.apk.outputs.url }}
     steps:
       - name: Checkout teable-ee
         uses: actions/checkout@v4
@@ -211,6 +237,7 @@ jobs:
             enterprise/mobile/pnpm-lock.yaml
 
       - name: Build number
+        id: meta
         env:
           # Read as strings: a boolean false would otherwise vanish in an && / || expression.
           UPLOAD_DISPATCH: ${{ format('{0}', inputs.upload) }}
@@ -226,6 +253,15 @@ jobs:
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then U="$UPLOAD_DISPATCH"; else U="$UPLOAD_PAYLOAD"; fi
           if [ "$U" = "false" ]; then echo "UPLOAD=false" >> "$GITHUB_ENV"; else echo "UPLOAD=true" >> "$GITHUB_ENV"; fi
           echo "build number: $N (teable-ee ${EE_SHA:0:7}), upload: ${U:-true}"
+          # For the Feishu card (values go to the card, not to this log).
+          {
+            echo "build_number=$N"
+            echo "upload=${U:-true}"
+            echo "version=$(sed -n "s/^ *version: '\([^']*\)'.*/\1/p" enterprise/mobile/app.config.ts | head -1)"
+            echo "subject=$(git log -1 --format=%s)"
+            echo "author=$(git log -1 --format=%an)"
+            echo "started=$(date +%s)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Install monorepo (shared packages + their dependencies)
         run: >-
@@ -286,6 +322,7 @@ jobs:
       # The APK for hand distribution goes to the private logs repository, never to a public
       # artifact of this repository.
       - name: Keep the APK (teable-ci-logs release)
+        id: apk
         working-directory: enterprise/mobile/android/app/build/outputs
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
@@ -298,6 +335,7 @@ jobs:
             --notes "teable-ee ${EE_SHA} · run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" 2>/dev/null || true
           gh release upload "$TAG" "Teable-android-${MOBILE_BUILD_NUMBER}.apk" "Teable-android-${MOBILE_BUILD_NUMBER}.aab" -R "$LOGS_REPO" --clobber
           echo "APK: https://github.com/${LOGS_REPO}/releases/tag/${TAG}"
+          echo "url=https://github.com/${LOGS_REPO}/releases/tag/${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Upload to Google Play (internal testing)
         if: env.UPLOAD == 'true'
@@ -318,3 +356,78 @@ jobs:
             echo "- teable-ee: \`${EE_SHA}\`"
             echo "- result: ${{ job.status }}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # One card per run to the R&D Feishu group: what shipped where (TestFlight / Play / APK), or
+  # which platform failed, with a button to this run. Runs whatever the build jobs did.
+  notify:
+    name: Feishu
+    needs: [ios, android]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Card to the R&D group
+        env:
+          WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          IOS: ${{ needs.ios.result }}
+          ANDROID: ${{ needs.android.result }}
+          BUILD_NUMBER: ${{ needs.ios.outputs.build_number || needs.android.outputs.build_number }}
+          VERSION: ${{ needs.ios.outputs.version || needs.android.outputs.version }}
+          SUBJECT: ${{ needs.ios.outputs.subject || needs.android.outputs.subject }}
+          AUTHOR: ${{ needs.ios.outputs.author || needs.android.outputs.author }}
+          UPLOAD: ${{ needs.ios.outputs.upload || needs.android.outputs.upload }}
+          IOS_STARTED: ${{ needs.ios.outputs.started }}
+          ANDROID_STARTED: ${{ needs.android.outputs.started }}
+          APK_URL: ${{ needs.android.outputs.apk_url }}
+          SOURCE: ${{ github.event_name == 'workflow_dispatch' && format('手动 · {0}', github.actor) || 'develop 合并' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TESTFLIGHT_URL: https://appstoreconnect.apple.com/apps/6810557646/testflight/ios
+        run: |
+          platform() {
+            # $1 result, $2 label when uploaded, $3 label when built only
+            case "$1" in
+              success) if [ "$UPLOAD" = "false" ]; then echo "✅ $3"; else echo "✅ $2"; fi ;;
+              failure) echo "❌ 失败" ;;
+              cancelled) echo "⏹ 取消" ;;
+              *) echo "— 未构建" ;;
+            esac
+          }
+          IOS_LABEL=$(platform "$IOS" "TestFlight" "已构建（未上传）")
+          ANDROID_LABEL=$(platform "$ANDROID" "Play 内测 + APK" "APK（未上传 Play）")
+          if [ -n "$BUILD_NUMBER" ]; then VER="${VERSION:-?} (${BUILD_NUMBER})"; else VER="${EE_SHA:0:7}"; fi
+          if [ "$IOS" = "failure" ] || [ "$ANDROID" = "failure" ]; then
+            TITLE="移动端构建失败! ${VER}"; COLOR="red"
+          elif [ "$IOS" = "cancelled" ] || [ "$ANDROID" = "cancelled" ]; then
+            TITLE="移动端构建取消 ${VER}"; COLOR="grey"
+          elif [ "$IOS" = "success" ] || [ "$ANDROID" = "success" ]; then
+            if [ "$UPLOAD" = "false" ]; then TITLE="移动端构建成功（未上传） ${VER}"; else TITLE="移动端构建成功! ${VER}"; fi
+            COLOR="green"
+          else
+            TITLE="移动端构建状态未知 ${VER}"; COLOR="grey"
+          fi
+          START="${IOS_STARTED:-$ANDROID_STARTED}"
+          if [ -n "$ANDROID_STARTED" ] && [ -n "$IOS_STARTED" ] && [ "$ANDROID_STARTED" -lt "$IOS_STARTED" ]; then START="$ANDROID_STARTED"; fi
+          MINUTES="?"; if [ -n "$START" ]; then MINUTES=$(( ($(date +%s) - START + 59) / 60 )); fi
+          INFO="**iOS**: ${IOS_LABEL} | **Android**: ${ANDROID_LABEL}"
+          META="**build**: ${BUILD_NUMBER:-?} | **触发人**: ${AUTHOR:-?} | **用时**: ${MINUTES}分钟 | **来源**: ${SOURCE} | **提交**: ${EE_SHA:0:7}"
+          button() { jq -n --arg label "$1" --arg url "$2" --arg type "$3" \
+            '{tag:"button",text:{tag:"plain_text",content:$label},type:$type,behaviors:[{type:"open_url",default_url:$url}]}'; }
+          BUTTONS="[$(button "查看CI" "$RUN_URL" primary)"
+          if [ "$IOS" = "success" ] && [ "$UPLOAD" != "false" ]; then BUTTONS="$BUTTONS,$(button "TestFlight" "$TESTFLIGHT_URL" default)"; fi
+          if [ -n "$APK_URL" ]; then BUTTONS="$BUTTONS,$(button "APK 下载" "$APK_URL" default)"; fi
+          BUTTONS="$BUTTONS]"
+          jq -n --arg title "$TITLE" --arg color "$COLOR" --arg info "$INFO" --arg meta "$META" --arg subject "$SUBJECT" \
+            --argjson buttons "$BUTTONS" '
+            def md: {tag:"div", text:{tag:"lark_md", content:.}};
+            {msg_type:"interactive", card:{schema:"2.0",
+              config:{enable_forward:true, update_multi:true, width_mode:"default"},
+              header:{title:{tag:"plain_text", content:$title}, template:$color},
+              body:{direction:"vertical", padding:"12px", vertical_spacing:"8px",
+                elements: ([($info|md), ($meta|md)] + (if $subject == "" then [] else [($subject|md)] end) + [
+                  {tag:"column_set", flex_mode:"none", background_style:"default", horizontal_spacing:"8px",
+                   columns: ($buttons | map({tag:"column", width:"auto", elements:[.]}))}])}}}' > /tmp/card.json
+          echo "card: ${TITLE}"
+          if [ -z "$WEBHOOK_URL" ]; then echo "::warning::FEISHU_WEBHOOK_URL is not set; notification skipped"; exit 0; fi
+          HTTP=$(curl -sS -o /tmp/feishu.json -w '%{http_code}' -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' --data @/tmp/card.json)
+          echo "feishu: HTTP ${HTTP} $(jq -c '{code, msg}' /tmp/feishu.json 2>/dev/null)"
+          [ "$HTTP" = "200" ] && [ "$(jq -r '.code' /tmp/feishu.json 2>/dev/null)" = "0" ]
