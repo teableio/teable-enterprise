@@ -423,7 +423,7 @@ jobs:
           if [ -n "$ANDROID_STARTED" ] && [ -n "$IOS_STARTED" ] && [ "$ANDROID_STARTED" -lt "$IOS_STARTED" ]; then START="$ANDROID_STARTED"; fi
           MINUTES="?"; if [ -n "$START" ]; then MINUTES=$(( ($(date +%s) - START + 59) / 60 )); fi
           INFO="**iOS**: ${IOS_LABEL} | **Android**: ${ANDROID_LABEL}"
-          META="**build**: ${BUILD_NUMBER:-?} | **触发人**: ${AUTHOR:-?} | **用时**: ${MINUTES}分钟 | **来源**: ${SOURCE} | **提交**: ${EE_SHA:0:7}"
+          META="**build**: ${BUILD_NUMBER:-?} | **提交人**: ${AUTHOR:-?} | **用时**: ${MINUTES}分钟 | **来源**: ${SOURCE} | **提交**: ${EE_SHA:0:7}"
           button() { jq -n --arg label "$1" --arg url "$2" --arg type "$3" \
             '{tag:"button",text:{tag:"plain_text",content:$label},type:$type,behaviors:[{type:"open_url",default_url:$url}]}'; }
           BUTTONS="[$(button "查看CI" "$RUN_URL" primary)"
