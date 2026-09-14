@@ -1,0 +1,167 @@
+# Source of truth: teableio/teable-ee .github/enterprise-ci/ee-mobile-ios.yaml (synced to
+# teable-enterprise by sync-ci-to-enterprise.yml). Builds the iOS app from a teable-ee commit
+# on a hosted macOS runner (free on this public repo) and uploads it to TestFlight. Signing is
+# cloud-managed through the App Store Connect API key: no certificate leaves Apple.
+#
+# Public logs carry exit codes and error lines only; the private repository's content stays
+# in files on the runner.
+name: EE Mobile iOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      ee_sha:
+        description: 'teable-ee commit to build'
+        required: true
+        type: string
+      build_number:
+        description: 'CFBundleVersion / versionCode (default: the commit count)'
+        required: false
+        type: string
+      upload:
+        description: 'Upload to TestFlight'
+        required: false
+        type: boolean
+        default: true
+  repository_dispatch:
+    types: [ee-mobile-ios]
+
+concurrency:
+  group: ee-mobile-ios
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  EE_SHA: ${{ github.event.inputs.ee_sha || github.event.client_payload.ee_sha }}
+  BUILD_NUMBER_INPUT: ${{ github.event.inputs.build_number || github.event.client_payload.build_number }}
+  EXPO_PUBLIC_SERVER_URL: https://app.teable.ai
+
+jobs:
+  ios:
+    name: Archive · TestFlight
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - name: Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ env.EE_SHA }}
+          # The build number is the commit count.
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            enterprise/mobile/pnpm-lock.yaml
+
+      - name: Build number
+        run: |
+          N="${BUILD_NUMBER_INPUT:-$(git rev-list --count HEAD)}"
+          echo "MOBILE_BUILD_NUMBER=$N" >> "$GITHUB_ENV"
+          echo "build number: $N (teable-ee ${EE_SHA:0:7})"
+
+      - name: Install monorepo (shared packages + their dependencies)
+        run: >-
+          pnpm install --frozen-lockfile
+          --filter "@teable/core..." --filter "@teable/openapi..." --filter "@teable/openapi-ee..."
+          --filter "@teable/chat-core..." > /tmp/install.log 2>&1 || { tail -30 /tmp/install.log; exit 1; }
+
+      - name: Build shared packages
+        run: >-
+          pnpm -r --filter @teable/formula --filter @teable/core
+          --filter @teable/openapi --filter @teable/openapi-ee --filter @teable/chat-core build
+          > /tmp/build-packages.log 2>&1 || { tail -30 /tmp/build-packages.log; exit 1; }
+
+      - name: Install mobile app
+        run: pnpm -C enterprise/mobile install --frozen-lockfile > /tmp/install-mobile.log 2>&1 || { tail -30 /tmp/install-mobile.log; exit 1; }
+
+      - name: Prebuild the iOS project
+        working-directory: enterprise/mobile
+        env:
+          CI: '1'
+        run: npx expo prebuild --platform ios --no-install > /tmp/prebuild.log 2>&1 || { tail -40 /tmp/prebuild.log; exit 1; }
+
+      - name: Cache Pods
+        uses: actions/cache@v4
+        with:
+          path: |
+            enterprise/mobile/ios/Pods
+            ~/Library/Caches/CocoaPods
+          key: pods-${{ runner.os }}-${{ hashFiles('enterprise/mobile/ios/Podfile', 'enterprise/mobile/pnpm-lock.yaml') }}
+          restore-keys: pods-${{ runner.os }}-
+
+      - name: Pod install
+        working-directory: enterprise/mobile/ios
+        run: pod install > /tmp/pod.log 2>&1 || { tail -40 /tmp/pod.log; exit 1; }
+
+      - name: App Store Connect key
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+        run: |
+          mkdir -p ~/private_keys
+          printf '%s\n' "$ASC_KEY_P8" > ~/private_keys/AuthKey_${ASC_KEY_ID}.p8
+          chmod 600 ~/private_keys/AuthKey_${ASC_KEY_ID}.p8
+
+      - name: Archive (cloud-managed signing)
+        working-directory: enterprise/mobile
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          xcodebuild -workspace ios/Teable.xcworkspace -scheme Teable -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' -archivePath build/Teable.xcarchive \
+            -allowProvisioningUpdates -allowProvisioningDeviceRegistration \
+            -authenticationKeyPath ~/private_keys/AuthKey_${ASC_KEY_ID}.p8 \
+            -authenticationKeyID "${ASC_KEY_ID}" -authenticationKeyIssuerID "${ASC_ISSUER_ID}" \
+            DEVELOPMENT_TEAM=6RGCFV3CTU archive > /tmp/archive.log 2>&1 \
+            || { grep -E "error:|error \(|Provisioning|signing" /tmp/archive.log | tail -30; exit 1; }
+          grep -E "ARCHIVE (SUCCEEDED|FAILED)" /tmp/archive.log
+          echo "CFBundleVersion: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' build/Teable.xcarchive/Products/Applications/Teable.app/Info.plist)"
+
+      - name: Upload to TestFlight
+        if: ${{ github.event.inputs.upload != 'false' && github.event.client_payload.upload != false }}
+        working-directory: enterprise/mobile
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          cat > /tmp/ExportOptions.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>6RGCFV3CTU</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+            <key>testFlightInternalTestingOnly</key><true/>
+            <key>uploadSymbols</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath build/Teable.xcarchive -exportOptionsPlist /tmp/ExportOptions.plist \
+            -exportPath build/export -allowProvisioningUpdates \
+            -authenticationKeyPath ~/private_keys/AuthKey_${ASC_KEY_ID}.p8 \
+            -authenticationKeyID "${ASC_KEY_ID}" -authenticationKeyIssuerID "${ASC_ISSUER_ID}" > /tmp/export.log 2>&1 \
+            || { grep -E "error" /tmp/export.log | tail -20; exit 1; }
+          grep -E "EXPORT (SUCCEEDED|FAILED)|Upload succeeded" /tmp/export.log
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### iOS build ${MOBILE_BUILD_NUMBER}"
+            echo "- teable-ee: \`${EE_SHA}\`"
+            echo "- result: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"
