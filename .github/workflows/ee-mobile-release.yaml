@@ -38,9 +38,12 @@ on:
   repository_dispatch:
     types: [ee-mobile-release]
 
+# A newer app merge supersedes the build it would queue behind: only develop's latest commit
+# is worth 30 minutes of runner and a TestFlight slot, and the superseded run says so on its
+# card. Web releases work the same way (build-trigger.yml).
 concurrency:
   group: ee-mobile-release
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read
