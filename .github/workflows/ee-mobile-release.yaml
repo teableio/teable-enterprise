@@ -24,7 +24,7 @@ on:
         default: both
         options: [both, ios, android]
       build_number:
-        description: 'Build number / versionCode (default: the commit count + 100)'
+        description: 'Build number / versionCode (default: the commit count)'
         required: false
         type: string
       upload:
@@ -93,9 +93,7 @@ jobs:
           # Only this commit's history is fetched (a branch listing would show the private
           # repository's branch names in this public log).
           git fetch --quiet --unshallow --no-tags origin "$EE_SHA" 2>/dev/null || git fetch --quiet --no-tags origin "$EE_SHA"
-          # Commit count + 100: the pipeline spike uploaded 4311 from the (longer) feature branch,
-          # and Play refuses any lower versionCode; the squash-merged develop counts fewer.
-          N="${BUILD_NUMBER_INPUT:-$(( $(git rev-list --count HEAD) + 100 ))}"
+          N="${BUILD_NUMBER_INPUT:-$(git rev-list --count HEAD)}"
           echo "MOBILE_BUILD_NUMBER=$N" >> "$GITHUB_ENV"
           # Upload unless told not to (a manual run may only want the build checked).
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then U="$UPLOAD_DISPATCH"; else U="$UPLOAD_PAYLOAD"; fi
@@ -221,6 +219,7 @@ jobs:
       upload: ${{ steps.meta.outputs.upload }}
       started: ${{ steps.meta.outputs.started }}
       apk_url: ${{ steps.apk.outputs.url }}
+      play: ${{ steps.play.outcome }}
     steps:
       - name: Checkout teable-ee
         uses: actions/checkout@v4
@@ -251,9 +250,7 @@ jobs:
           # Only this commit's history is fetched (a branch listing would show the private
           # repository's branch names in this public log).
           git fetch --quiet --unshallow --no-tags origin "$EE_SHA" 2>/dev/null || git fetch --quiet --no-tags origin "$EE_SHA"
-          # Commit count + 100: the pipeline spike uploaded 4311 from the (longer) feature branch,
-          # and Play refuses any lower versionCode; the squash-merged develop counts fewer.
-          N="${BUILD_NUMBER_INPUT:-$(( $(git rev-list --count HEAD) + 100 ))}"
+          N="${BUILD_NUMBER_INPUT:-$(git rev-list --count HEAD)}"
           echo "MOBILE_BUILD_NUMBER=$N" >> "$GITHUB_ENV"
           # Upload unless told not to (a manual run may only want the build checked).
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then U="$UPLOAD_DISPATCH"; else U="$UPLOAD_PAYLOAD"; fi
@@ -343,8 +340,14 @@ jobs:
           echo "APK: https://github.com/${LOGS_REPO}/releases/tag/${TAG}"
           echo "url=https://github.com/${LOGS_REPO}/releases/tag/${TAG}" >> "$GITHUB_OUTPUT"
 
+      # Play only accepts a versionCode above the highest one it already has. After a squash
+      # merge (or a manual branch build) develop's commit count can sit below that for a few
+      # days, and Play rejects the upload: skip it, keep TestFlight and the APK, and say so
+      # on the card. develop's count passes the mark on its own.
       - name: Upload to Google Play (internal testing)
+        id: play
         if: env.UPLOAD == 'true'
+        continue-on-error: true
         uses: r0adkll/upload-google-play@v1
         with:
           serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
@@ -385,6 +388,7 @@ jobs:
           IOS_STARTED: ${{ needs.ios.outputs.started }}
           ANDROID_STARTED: ${{ needs.android.outputs.started }}
           APK_URL: ${{ needs.android.outputs.apk_url }}
+          PLAY: ${{ needs.android.outputs.play }}
           SOURCE: ${{ github.event_name == 'workflow_dispatch' && format('手动 · {0}', github.actor) || 'develop 合并' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TESTFLIGHT_URL: https://appstoreconnect.apple.com/apps/6810557646/testflight/ios
@@ -400,6 +404,10 @@ jobs:
           }
           IOS_LABEL=$(platform "$IOS" "TestFlight" "已构建（未上传）")
           ANDROID_LABEL=$(platform "$ANDROID" "Play 内测 + APK" "APK（未上传 Play）")
+          # A rejected Play upload does not fail the job; the card has to say it anyway.
+          if [ "$ANDROID" = "success" ] && [ "$UPLOAD" != "false" ] && [ "$PLAY" = "failure" ]; then
+            ANDROID_LABEL="⚠️ 仅 APK（Play 未接受，版本号需高于线上）"
+          fi
           if [ -n "$BUILD_NUMBER" ]; then VER="${VERSION:-?} (${BUILD_NUMBER})"; else VER="${EE_SHA:0:7}"; fi
           if [ "$IOS" = "failure" ] || [ "$ANDROID" = "failure" ]; then
             TITLE="移动端构建失败! ${VER}"; COLOR="red"
