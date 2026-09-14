@@ -24,14 +24,16 @@ on:
         default: both
         options: [both, ios, android]
       build_number:
-        description: 'Build number / versionCode (default: the commit count)'
+        description: 'Build number / versionCode (default: the commit count + 100)'
         required: false
         type: string
       upload:
+        # Off by default: a branch build would take a number ahead of develop's, and Play
+        # refuses to go back down. The develop trigger passes upload=true itself.
         description: 'Upload to TestFlight / Play'
         required: false
         type: boolean
-        default: true
+        default: false
   repository_dispatch:
     types: [ee-mobile-release]
 
@@ -91,7 +93,9 @@ jobs:
           # Only this commit's history is fetched (a branch listing would show the private
           # repository's branch names in this public log).
           git fetch --quiet --unshallow --no-tags origin "$EE_SHA" 2>/dev/null || git fetch --quiet --no-tags origin "$EE_SHA"
-          N="${BUILD_NUMBER_INPUT:-$(git rev-list --count HEAD)}"
+          # Commit count + 100: the pipeline spike uploaded 4311 from the (longer) feature branch,
+          # and Play refuses any lower versionCode; the squash-merged develop counts fewer.
+          N="${BUILD_NUMBER_INPUT:-$(( $(git rev-list --count HEAD) + 100 ))}"
           echo "MOBILE_BUILD_NUMBER=$N" >> "$GITHUB_ENV"
           # Upload unless told not to (a manual run may only want the build checked).
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then U="$UPLOAD_DISPATCH"; else U="$UPLOAD_PAYLOAD"; fi
@@ -247,7 +251,9 @@ jobs:
           # Only this commit's history is fetched (a branch listing would show the private
           # repository's branch names in this public log).
           git fetch --quiet --unshallow --no-tags origin "$EE_SHA" 2>/dev/null || git fetch --quiet --no-tags origin "$EE_SHA"
-          N="${BUILD_NUMBER_INPUT:-$(git rev-list --count HEAD)}"
+          # Commit count + 100: the pipeline spike uploaded 4311 from the (longer) feature branch,
+          # and Play refuses any lower versionCode; the squash-merged develop counts fewer.
+          N="${BUILD_NUMBER_INPUT:-$(( $(git rev-list --count HEAD) + 100 ))}"
           echo "MOBILE_BUILD_NUMBER=$N" >> "$GITHUB_ENV"
           # Upload unless told not to (a manual run may only want the build checked).
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then U="$UPLOAD_DISPATCH"; else U="$UPLOAD_PAYLOAD"; fi
