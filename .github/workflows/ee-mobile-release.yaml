@@ -133,6 +133,10 @@ jobs:
         working-directory: enterprise/mobile
         env:
           CI: '1'
+          # The org and project slugs are defaulted in app.config.ts; only the token is a
+          # secret. Without it the plugin writes no upload credentials and the build carries
+          # on, shipping unsymbolicated crash reports.
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
         run: npx expo prebuild --platform ios --no-install > /tmp/prebuild.log 2>&1 || { tail -40 /tmp/prebuild.log; exit 1; }
 
       - name: Cache Pods
@@ -160,6 +164,7 @@ jobs:
       - name: Archive (cloud-managed signing)
         working-directory: enterprise/mobile
         env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
@@ -295,6 +300,10 @@ jobs:
         working-directory: enterprise/mobile
         env:
           CI: '1'
+          # The org and project slugs are defaulted in app.config.ts; only the token is a
+          # secret. Without it the plugin writes no upload credentials and the build carries
+          # on, shipping unsymbolicated crash reports.
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
         run: npx expo prebuild --platform android --no-install > /tmp/prebuild.log 2>&1 || { tail -40 /tmp/prebuild.log; exit 1; }
 
       - name: Upload key
@@ -317,6 +326,7 @@ jobs:
       - name: Build the bundle (signed with the upload key)
         working-directory: enterprise/mobile/android
         env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           MOBILE_UPLOAD_KEYSTORE: /home/runner/.teable/mobile/upload.keystore
           MOBILE_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEYSTORE_PASSWORD }}
           MOBILE_UPLOAD_KEY_ALIAS: upload
