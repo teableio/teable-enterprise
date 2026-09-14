@@ -64,10 +64,14 @@ jobs:
             enterprise/mobile/pnpm-lock.yaml
 
       - name: Build number
+        env:
+          UPLOAD_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.upload || github.event.client_payload.upload }}
         run: |
           N="${BUILD_NUMBER_INPUT:-$(git rev-list --count HEAD)}"
           echo "MOBILE_BUILD_NUMBER=$N" >> "$GITHUB_ENV"
-          echo "build number: $N (teable-ee ${EE_SHA:0:7})"
+          # Upload unless told not to (a manual run may only want the archive checked).
+          if [ "$UPLOAD_INPUT" = "false" ]; then echo "UPLOAD=false" >> "$GITHUB_ENV"; else echo "UPLOAD=true" >> "$GITHUB_ENV"; fi
+          echo "build number: $N (teable-ee ${EE_SHA:0:7}), upload: ${UPLOAD_INPUT:-true}"
 
       - name: Install monorepo (shared packages + their dependencies)
         run: >-
@@ -129,7 +133,7 @@ jobs:
           echo "CFBundleVersion: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' build/Teable.xcarchive/Products/Applications/Teable.app/Info.plist)"
 
       - name: Upload to TestFlight
-        if: ${{ github.event.inputs.upload != 'false' && github.event.client_payload.upload != false }}
+        if: env.UPLOAD == 'true'
         working-directory: enterprise/mobile
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
