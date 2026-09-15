@@ -177,6 +177,33 @@ jobs:
           printf '%s\n' "$ASC_KEY_P8" > ~/private_keys/AuthKey_${ASC_KEY_ID}.p8
           chmod 600 ~/private_keys/AuthKey_${ASC_KEY_ID}.p8
 
+      - name: Signing identity
+        # A hosted runner starts with an empty keychain, so -allowProvisioningUpdates asked
+        # App Store Connect for a fresh Apple Development certificate on every archive. Ten
+        # runs filled the account's pool and the eleventh failed with "your account has
+        # reached the maximum number of certificates". Import the one certificate we keep
+        # (873N4FD8Y6, expires 2027-09-15) instead: Xcode finds a valid identity and only
+        # provisioning profiles, which are not capped, are created from here on.
+        env:
+          CERT_P12: ${{ secrets.IOS_DEV_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.IOS_DEV_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p "" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "" "$KEYCHAIN"
+          printf '%s' "$CERT_P12" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security > /dev/null
+          rm -f "$RUNNER_TEMP/cert.p12"
+          # Without this codesign blocks on a UI prompt for the key that never comes.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed 's/[" ]//g')
+          security default-keychain -s "$KEYCHAIN"
+          # The archive cannot sign without one, and the failure it gives is indirect.
+          security find-identity -v -p codesigning | grep -q "Apple Development" \
+            || { echo "no Apple Development identity in the keychain"; exit 1; }
+
       - name: Archive (cloud-managed signing)
         working-directory: enterprise/mobile
         env:
