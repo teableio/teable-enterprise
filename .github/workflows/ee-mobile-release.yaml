@@ -457,6 +457,7 @@ jobs:
           MOBILE_TABLE: tblheQqpvzF9MpTSYqO
           RELEASES_TABLE: tblAhVLOxNtvkaF1ii5
           RELEASES_COMMIT_FIELD: fldmRSvaoLTr4uAb6Hh
+          RELEASES_MOBILE_FIELD: fldTVCH1y2dtFjA4FRA
           IOS: ${{ needs.ios.result }}
           ANDROID: ${{ needs.android.result }}
           BUILD_NUMBER: ${{ needs.ios.outputs.build_number || needs.android.outputs.build_number }}
@@ -506,12 +507,12 @@ jobs:
           # merge has none — build-trigger.yml ignores those paths — and the link stays empty.
           FILTER=$(jq -n --arg field "$RELEASES_COMMIT_FIELD" --arg sha "$EE_SHA" \
             '{conjunction:"and",filterSet:[{fieldId:$field,operator:"is",value:$sha}]}')
-          RELEASES='[]'
+          RELEASE_IDS=
           FOUND=$(api -G "https://app.teable.ai/api/table/${RELEASES_TABLE}/record" \
             --data-urlencode 'fieldKeyType=dbFieldName' --data-urlencode 'take=10' \
             --data-urlencode 'projection=tag' --data-urlencode "filter=$FILTER" | sed '$d')
-          if [ -n "$FOUND" ]; then RELEASES=$(printf '%s' "$FOUND" | jq -c '[.records[]? | {id}]' 2>/dev/null || echo '[]'); fi
-          echo "web releases from this commit: $(printf '%s' "$RELEASES" | jq 'length')"
+          if [ -n "$FOUND" ]; then RELEASE_IDS=$(printf '%s' "$FOUND" | jq -r '.records[]?.id' 2>/dev/null || true); fi
+          echo "web releases from this commit: $(printf '%s' "$RELEASE_IDS" | grep -c . || true)"
 
           payload=$(jq -n \
             --arg build "$BUILD" --arg status "$STATUS" \
@@ -521,13 +522,12 @@ jobs:
             --arg commit "$EE_SHA" --arg subject "$SUBJECT" --arg author "$AUTHOR" \
             --argjson duration "$MINUTES" --arg source "$SOURCE" \
             --arg runs "$RUN_URL" --arg apk "$APK_URL" \
-            --argjson uploaded "$UPLOADED" --argjson releases "$RELEASES" \
+            --argjson uploaded "$UPLOADED" \
             '{fieldKeyType:"dbFieldName", typecast:true, records:[{fields:{
                 Build:$build, Status:$status, iOS:$ios, Android:$android, Play:$play,
                 Version:$version, Build_number:$build_number, Commit:$commit,
                 Commit_message:$subject, Author:$author, Build_duration:$duration,
-                Source:$source, Runs:$runs, APK:$apk, Uploaded:$uploaded,
-                Releases:$releases}}]}')
+                Source:$source, Runs:$runs, APK:$apk, Uploaded:$uploaded}}]}')
 
           RESPONSE=$(api -X POST "https://app.teable.ai/api/table/${MOBILE_TABLE}/record" \
             -H 'Content-Type: application/json' -d "$payload")
@@ -541,3 +541,21 @@ jobs:
                printf '%s\n' "$BODY" | head -c 500
                exit 1 ;;
           esac
+
+          # Link from the Releases side, which is many-to-one: assigning it moves the row to
+          # this build. Creating the row with a Releases[] array instead is rejected with
+          # "already linked to another record" as soon as the commit has been built before,
+          # and a rejected create means no row, no Feishu card and a red run for a build that
+          # actually succeeded. The card matters more than the link, so a failure here warns.
+          ROW=$(printf '%s' "$BODY" | jq -r '.records[0].id // empty' 2>/dev/null || true)
+          for rid in $RELEASE_IDS; do
+            [ -n "$ROW" ] || break
+            LINK=$(api -X PATCH "https://app.teable.ai/api/table/${RELEASES_TABLE}/record/${rid}" \
+              -H 'Content-Type: application/json' \
+              -d "$(jq -n --arg f "$RELEASES_MOBILE_FIELD" --arg row "$ROW" \
+                    '{fieldKeyType:"id", record:{fields:{($f):{id:$row}}}}')" | tail -1)
+            case "$LINK" in
+              2??) echo "linked ${rid} -> ${ROW}" ;;
+              *) echo "::warning title=Release link skipped::${rid} -> ${ROW} (HTTP ${LINK})" ;;
+            esac
+          done
