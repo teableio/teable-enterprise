@@ -25,7 +25,7 @@ on:
         default: both
         options: [both, ios, android]
       build_number:
-        description: 'Build number / versionCode (default: the commit count)'
+        description: 'Build number / versionCode (default: 10000 + the commit count on develop)'
         required: false
         type: string
       upload:
@@ -96,14 +96,30 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           # Only this commit's history is fetched (a branch listing would show the private
-          # repository's branch names in this public log).
+          # repository's branch names in this public log); develop is named explicitly for
+          # the ancestry test below, which lists nothing either.
           git fetch --quiet --unshallow --no-tags origin "$EE_SHA" 2>/dev/null || git fetch --quiet --no-tags origin "$EE_SHA"
-          N="${BUILD_NUMBER_INPUT:-$(git rev-list --count HEAD)}"
+          # A history that did not come back whole would count a handful of commits and hand
+          # the stores a number far below the last one they took. Stop instead of guessing.
+          COUNT=$(git rev-list --count HEAD)
+          [ "$COUNT" -gt 1000 ] || { echo "history looks truncated: $COUNT commits"; exit 1; }
+          DEVELOP=
+          if git fetch --quiet --no-tags origin develop 2>/dev/null; then DEVELOP=$(git rev-parse FETCH_HEAD); fi
+          if [ -n "$DEVELOP" ] && git merge-base --is-ancestor HEAD "$DEVELOP"; then ON_DEVELOP=true; else ON_DEVELOP=false; fi
+          # Store builds number 10000 above the commit count; branch builds take the bare
+          # count and never upload. A branch carries every commit it merged from develop
+          # plus its own, so its count runs ahead of develop's, and squash-merging it puts
+          # develop back below the number the branch already took -- which is how builds
+          # 4310 (TestFlight) and 4372 (Play) came to outrank every release after them.
+          # Neither store will go back down, so the two must not share a range.
+          if [ "$ON_DEVELOP" = true ]; then N="${BUILD_NUMBER_INPUT:-$((COUNT + 10000))}"; else N="${BUILD_NUMBER_INPUT:-$COUNT}"; fi
           echo "MOBILE_BUILD_NUMBER=$N" >> "$GITHUB_ENV"
-          # Upload unless told not to (a manual run may only want the build checked).
+          # Upload unless told not to (a manual run may only want the build checked), and
+          # never from a commit that is not on develop: merge it first.
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then U="$UPLOAD_DISPATCH"; else U="$UPLOAD_PAYLOAD"; fi
+          if [ "$ON_DEVELOP" = false ]; then U=false; fi
           if [ "$U" = "false" ]; then echo "UPLOAD=false" >> "$GITHUB_ENV"; else echo "UPLOAD=true" >> "$GITHUB_ENV"; fi
-          echo "build number: $N (teable-ee ${EE_SHA:0:7}), upload: ${U:-true}"
+          echo "build number: $N (teable-ee ${EE_SHA:0:7}), on develop: $ON_DEVELOP, upload: ${U:-true}"
           # For the Teable row the last job writes (values go to the row, not to this log).
           {
             echo "build_number=$N"
@@ -258,14 +274,30 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           # Only this commit's history is fetched (a branch listing would show the private
-          # repository's branch names in this public log).
+          # repository's branch names in this public log); develop is named explicitly for
+          # the ancestry test below, which lists nothing either.
           git fetch --quiet --unshallow --no-tags origin "$EE_SHA" 2>/dev/null || git fetch --quiet --no-tags origin "$EE_SHA"
-          N="${BUILD_NUMBER_INPUT:-$(git rev-list --count HEAD)}"
+          # A history that did not come back whole would count a handful of commits and hand
+          # the stores a number far below the last one they took. Stop instead of guessing.
+          COUNT=$(git rev-list --count HEAD)
+          [ "$COUNT" -gt 1000 ] || { echo "history looks truncated: $COUNT commits"; exit 1; }
+          DEVELOP=
+          if git fetch --quiet --no-tags origin develop 2>/dev/null; then DEVELOP=$(git rev-parse FETCH_HEAD); fi
+          if [ -n "$DEVELOP" ] && git merge-base --is-ancestor HEAD "$DEVELOP"; then ON_DEVELOP=true; else ON_DEVELOP=false; fi
+          # Store builds number 10000 above the commit count; branch builds take the bare
+          # count and never upload. A branch carries every commit it merged from develop
+          # plus its own, so its count runs ahead of develop's, and squash-merging it puts
+          # develop back below the number the branch already took -- which is how builds
+          # 4310 (TestFlight) and 4372 (Play) came to outrank every release after them.
+          # Neither store will go back down, so the two must not share a range.
+          if [ "$ON_DEVELOP" = true ]; then N="${BUILD_NUMBER_INPUT:-$((COUNT + 10000))}"; else N="${BUILD_NUMBER_INPUT:-$COUNT}"; fi
           echo "MOBILE_BUILD_NUMBER=$N" >> "$GITHUB_ENV"
-          # Upload unless told not to (a manual run may only want the build checked).
+          # Upload unless told not to (a manual run may only want the build checked), and
+          # never from a commit that is not on develop: merge it first.
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then U="$UPLOAD_DISPATCH"; else U="$UPLOAD_PAYLOAD"; fi
+          if [ "$ON_DEVELOP" = false ]; then U=false; fi
           if [ "$U" = "false" ]; then echo "UPLOAD=false" >> "$GITHUB_ENV"; else echo "UPLOAD=true" >> "$GITHUB_ENV"; fi
-          echo "build number: $N (teable-ee ${EE_SHA:0:7}), upload: ${U:-true}"
+          echo "build number: $N (teable-ee ${EE_SHA:0:7}), on develop: $ON_DEVELOP, upload: ${U:-true}"
           # For the Teable row the last job writes (values go to the row, not to this log).
           {
             echo "build_number=$N"
@@ -355,10 +387,9 @@ jobs:
           echo "APK: https://github.com/${LOGS_REPO}/releases/tag/${TAG}"
           echo "url=https://github.com/${LOGS_REPO}/releases/tag/${TAG}" >> "$GITHUB_OUTPUT"
 
-      # Play only accepts a versionCode above the highest one it already has. After a squash
-      # merge (or a manual branch build) develop's commit count can sit below that for a few
-      # days, and Play rejects the upload: skip it, keep TestFlight and the APK, and say so
-      # on the card. develop's count passes the mark on its own.
+      # Play only accepts a versionCode above the highest one it already has, and only
+      # develop gets to claim one (see the build number step). Should it still refuse, keep
+      # TestFlight and the APK, and say so on the card rather than failing the release.
       - name: Upload to Google Play (internal testing)
         id: play
         if: env.UPLOAD == 'true'
