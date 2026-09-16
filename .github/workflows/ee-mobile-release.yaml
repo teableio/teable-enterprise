@@ -1,13 +1,13 @@
 # Source of truth: teableio/teable-ee .github/enterprise-ci/ee-mobile-release.yaml (synced to
 # teable-enterprise by sync-ci-to-enterprise.yml). Builds the mobile app from a teable-ee
-# commit and ships it to the internal testers: iOS to TestFlight from a hosted macOS runner
+# commit and uploads it: iOS to App Store Connect from a hosted macOS runner
 # (free on this public repo), Android to Google Play's internal track from Linux. iOS signing
 # is cloud-managed through the App Store Connect API key; Android signs with the Play upload
 # key held in secrets.
 #
 # Public logs carry exit codes and error lines only; the private repository's content stays
-# in files on the runner. The last job records the outcome (success, failure or cancelled) as
-# a row in the Mobile Releases table of the Project Management base; a Teable automation there
+# in files on the runner. The first job reserves a Mobile Releases row and its build number;
+# the last job updates its outcome (success, failure or cancelled). A Teable automation there
 # is what posts the R&D Feishu card, the same way Web releases are announced.
 name: EE Mobile Release
 
@@ -24,27 +24,20 @@ on:
         type: choice
         default: both
         options: [both, ios, android]
-      build_number:
-        description: 'Build number / versionCode (default: 10000 + the commit count on develop)'
-        required: false
-        type: string
       upload:
-        # Off by default: a branch build would take a number ahead of develop's, and Play
-        # refuses to go back down. The develop trigger passes upload=true itself.
-        description: 'Upload to TestFlight / Play'
+        # Off by default for validation. Only commits on develop may upload.
+        description: 'Upload to App Store Connect / Play (does not submit for review)'
         required: false
         type: boolean
         default: false
   repository_dispatch:
     types: [ee-mobile-release]
 
-# A newer app merge supersedes the build it would queue behind: only develop's latest commit
-# is worth 30 minutes of runner and a TestFlight slot, and the superseded run says so on its
-# card. Web releases work the same way (build-trigger.yml). Manual runs get their own lane,
-# keyed by event: a branch build must not take down a release on its way to the testers.
+# Serialize allocation through upload across both trigger types: a faster newer build must
+# not upload ahead of an older build. Pending runs may be superseded before allocating.
 concurrency:
-  group: ee-mobile-release-${{ github.event_name }}
-  cancel-in-progress: true
+  group: ee-mobile-release
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -52,12 +45,122 @@ permissions:
 env:
   EE_SHA: ${{ github.event.inputs.ee_sha || github.event.client_payload.ee_sha }}
   PLATFORMS: ${{ github.event.inputs.platforms || github.event.client_payload.platforms || 'both' }}
-  BUILD_NUMBER_INPUT: ${{ github.event.inputs.build_number || github.event.client_payload.build_number }}
+  MOBILE_TABLE: tblheQqpvzF9MpTSYqO
   EXPO_PUBLIC_SERVER_URL: https://app.teable.ai
 
 jobs:
+  prepare:
+    name: Reserve build number
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+      build_number: ${{ steps.allocate.outputs.build_number }}
+      record_id: ${{ steps.allocate.outputs.record_id }}
+      attempt: ${{ steps.allocate.outputs.attempt }}
+      started: ${{ steps.allocate.outputs.started }}
+    steps:
+      - name: Validate request
+        env:
+          LEGACY_BUILD_NUMBER: ${{ github.event.client_payload.build_number }}
+        run: |
+          case "$PLATFORMS" in ios|android|both) ;; *) exit 1 ;; esac
+          [ -z "$LEGACY_BUILD_NUMBER" ] || { echo 'Build number overrides are no longer supported'; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ env.EE_SHA }}
+          fetch-depth: 1
+      - name: Resolve commit
+        id: commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Allocate from Teable
+        id: allocate
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_SHA: ${{ steps.commit.outputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+          SOURCE: ${{ github.event_name == 'workflow_dispatch' && '手动' || 'develop 合并' }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const table = `https://app.teable.ai/api/table/${process.env.MOBILE_TABLE}`;
+          const allocated = 'fldvxneaC4umnduDmDT';
+          const actual = 'fldWgSjUszaamyu1qiu';
+          const output = (key, value) => fs.appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`);
+          async function api(path, method = 'GET', body) {
+            const res = await fetch(`${table}${path}`, {
+              method,
+              headers: { Authorization: `Bearer ${process.env.TEABLE_API_TOKEN}`, 'Content-Type': 'application/json' },
+              body: body === undefined ? undefined : JSON.stringify(body),
+              signal: AbortSignal.timeout(30000),
+            });
+            if (!res.ok) throw new Error(`Teable allocation HTTP ${res.status}`);
+            return res.json();
+          }
+          async function maximum(field) {
+            const query = new URLSearchParams({
+              fieldKeyType: 'id', take: '1', projection: field,
+              orderBy: JSON.stringify([{ fieldId: field, order: 'desc' }]),
+              filter: JSON.stringify({ conjunction: 'and', filterSet: [{ fieldId: field, operator: 'isNotEmpty', value: null }] }),
+            });
+            const data = await api(`/record?${query}`);
+            if (!Array.isArray(data.records)) throw new Error('Invalid Teable record response');
+            const value = data.records[0]?.fields[field] ?? 0;
+            if (!Number.isSafeInteger(value) || value < 0) throw new Error('Invalid previous build number');
+            return value;
+          }
+          (async () => {
+            if (!process.env.TEABLE_API_TOKEN) throw new Error('Missing TEABLE_API_TOKEN');
+            // Changing/resetting the remote formula must never silently move releases backwards.
+            const field = await api(`/field/${allocated}`);
+            if (field.type !== 'formula' || field.options?.expression !== 'AUTO_NUMBER() + 14332') {
+              throw new Error('Build allocation formula changed; reconcile the sequence before building');
+            }
+            const previous = Math.max(14366, await maximum(actual), await maximum(allocated));
+            // One POST only: an ambiguous network failure may consume a number, never reuse it.
+            const created = await api('/record', 'POST', {
+              fieldKeyType: 'id', typecast: true,
+              records: [{ fields: {
+                fldgBV1XkZ6l5d6r9W6: `Building ${process.env.GITHUB_RUN_ID}/${process.env.GITHUB_RUN_ATTEMPT}`,
+                fld0Mt4fh2adcyAb1o3: 'Building',
+                fldVQzDCz4j5nnxts17: process.env.RELEASE_SHA,
+                fldma4dHn1odiPU3wyg: process.env.RUN_URL,
+                fldOQr5i2AzUzwPOge1: process.env.SOURCE,
+                ...(process.env.PLATFORMS !== 'android' ? {
+                  fldckrvAHfy4HfffRpb: 'App Store',
+                } : {}),
+              } }],
+            });
+            let row = created.records?.[0];
+            if (!row || !/^rec[a-zA-Z0-9]+$/.test(row.id)) throw new Error('Allocation returned no record ID');
+            // Allow computed values to become readable without creating another allocation.
+            for (let attempt = 0; row.fields?.[allocated] == null && attempt < 5; attempt++) {
+              await new Promise(resolve => setTimeout(resolve, 1000));
+              row = await api(`/record/${row.id}?fieldKeyType=id`);
+            }
+            const number = row.fields?.[allocated];
+            if (!Number.isSafeInteger(number) || number <= previous || number > 2100000000) {
+              throw new Error('Allocated build number is missing, stale or out of range; stop without fallback');
+            }
+            await api(`/record/${row.id}`, 'PATCH', {
+              fieldKeyType: 'id', record: { fields: { [actual]: number } },
+            });
+            output('record_id', row.id);
+            output('build_number', number);
+            output('attempt', process.env.GITHUB_RUN_ATTEMPT);
+            output('started', Math.floor(Date.now() / 1000));
+            console.log(`Reserved build ${number}`);
+          })().catch(error => { console.error(error.message); process.exitCode = 1; });
+          NODE
+
   ios:
-    name: iOS · TestFlight
+    needs: prepare
+    env:
+      EE_SHA: ${{ needs.prepare.outputs.sha }}
+      MOBILE_BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+    name: iOS · App Store Connect
     if: ${{ contains(fromJSON('["both","ios"]'), github.event.inputs.platforms || github.event.client_payload.platforms || 'both') }}
     runs-on: macos-26
     timeout-minutes: 90
@@ -69,6 +172,11 @@ jobs:
       upload: ${{ steps.meta.outputs.upload }}
       started: ${{ steps.meta.outputs.started }}
     steps:
+      - name: Require a fresh allocation for this attempt
+        env:
+          ALLOCATED_ATTEMPT: ${{ needs.prepare.outputs.attempt }}
+        run: |
+          [ "$ALLOCATED_ATTEMPT" = "$GITHUB_RUN_ATTEMPT" ] || { echo 'Use Re-run all jobs or Run workflow to reserve a fresh build number'; exit 1; }
       - name: Checkout teable-ee
         uses: actions/checkout@v4
         with:
@@ -99,21 +207,10 @@ jobs:
           # repository's branch names in this public log); develop is named explicitly for
           # the ancestry test below, which lists nothing either.
           git fetch --quiet --unshallow --no-tags origin "$EE_SHA" 2>/dev/null || git fetch --quiet --no-tags origin "$EE_SHA"
-          # A history that did not come back whole would count a handful of commits and hand
-          # the stores a number far below the last one they took. Stop instead of guessing.
-          COUNT=$(git rev-list --count HEAD)
-          [ "$COUNT" -gt 1000 ] || { echo "history looks truncated: $COUNT commits"; exit 1; }
           DEVELOP=
           if git fetch --quiet --no-tags origin develop 2>/dev/null; then DEVELOP=$(git rev-parse FETCH_HEAD); fi
           if [ -n "$DEVELOP" ] && git merge-base --is-ancestor HEAD "$DEVELOP"; then ON_DEVELOP=true; else ON_DEVELOP=false; fi
-          # Store builds number 10000 above the commit count; branch builds take the bare
-          # count and never upload. A branch carries every commit it merged from develop
-          # plus its own, so its count runs ahead of develop's, and squash-merging it puts
-          # develop back below the number the branch already took -- which is how builds
-          # 4310 (TestFlight) and 4372 (Play) came to outrank every release after them.
-          # Neither store will go back down, so the two must not share a range.
-          if [ "$ON_DEVELOP" = true ]; then N="${BUILD_NUMBER_INPUT:-$((COUNT + 10000))}"; else N="${BUILD_NUMBER_INPUT:-$COUNT}"; fi
-          echo "MOBILE_BUILD_NUMBER=$N" >> "$GITHUB_ENV"
+          N="$MOBILE_BUILD_NUMBER"
           # Upload unless told not to (a manual run may only want the build checked), and
           # never from a commit that is not on develop: merge it first.
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then U="$UPLOAD_DISPATCH"; else U="$UPLOAD_PAYLOAD"; fi
@@ -221,7 +318,7 @@ jobs:
           grep -E "ARCHIVE (SUCCEEDED|FAILED)" /tmp/archive.log
           echo "CFBundleVersion: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' build/Teable.xcarchive/Products/Applications/Teable.app/Info.plist)"
 
-      - name: Upload to TestFlight
+      - name: Upload to App Store Connect
         if: env.UPLOAD == 'true'
         working-directory: enterprise/mobile
         env:
@@ -238,7 +335,7 @@ jobs:
             <key>teamID</key><string>6RGCFV3CTU</string>
             <key>signingStyle</key><string>automatic</string>
             <key>manageAppVersionAndBuildNumber</key><false/>
-            <key>testFlightInternalTestingOnly</key><true/>
+            <key>testFlightInternalTestingOnly</key><false/>
             <key>uploadSymbols</key><true/>
           </dict>
           </plist>
@@ -255,11 +352,16 @@ jobs:
         run: |
           {
             echo "### iOS build ${MOBILE_BUILD_NUMBER}"
+            echo "- distribution: App Store eligible (upload only; no review submission)"
             echo "- teable-ee: \`${EE_SHA}\`"
             echo "- result: ${{ job.status }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   android:
+    needs: prepare
+    env:
+      EE_SHA: ${{ needs.prepare.outputs.sha }}
+      MOBILE_BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
     name: Android · Play internal
     if: ${{ contains(fromJSON('["both","android"]'), github.event.inputs.platforms || github.event.client_payload.platforms || 'both') }}
     runs-on: ubuntu-latest
@@ -274,6 +376,11 @@ jobs:
       apk_url: ${{ steps.apk.outputs.url }}
       play: ${{ steps.play.outcome }}
     steps:
+      - name: Require a fresh allocation for this attempt
+        env:
+          ALLOCATED_ATTEMPT: ${{ needs.prepare.outputs.attempt }}
+        run: |
+          [ "$ALLOCATED_ATTEMPT" = "$GITHUB_RUN_ATTEMPT" ] || { echo 'Use Re-run all jobs or Run workflow to reserve a fresh build number'; exit 1; }
       - name: Checkout teable-ee
         uses: actions/checkout@v4
         with:
@@ -304,21 +411,10 @@ jobs:
           # repository's branch names in this public log); develop is named explicitly for
           # the ancestry test below, which lists nothing either.
           git fetch --quiet --unshallow --no-tags origin "$EE_SHA" 2>/dev/null || git fetch --quiet --no-tags origin "$EE_SHA"
-          # A history that did not come back whole would count a handful of commits and hand
-          # the stores a number far below the last one they took. Stop instead of guessing.
-          COUNT=$(git rev-list --count HEAD)
-          [ "$COUNT" -gt 1000 ] || { echo "history looks truncated: $COUNT commits"; exit 1; }
           DEVELOP=
           if git fetch --quiet --no-tags origin develop 2>/dev/null; then DEVELOP=$(git rev-parse FETCH_HEAD); fi
           if [ -n "$DEVELOP" ] && git merge-base --is-ancestor HEAD "$DEVELOP"; then ON_DEVELOP=true; else ON_DEVELOP=false; fi
-          # Store builds number 10000 above the commit count; branch builds take the bare
-          # count and never upload. A branch carries every commit it merged from develop
-          # plus its own, so its count runs ahead of develop's, and squash-merging it puts
-          # develop back below the number the branch already took -- which is how builds
-          # 4310 (TestFlight) and 4372 (Play) came to outrank every release after them.
-          # Neither store will go back down, so the two must not share a range.
-          if [ "$ON_DEVELOP" = true ]; then N="${BUILD_NUMBER_INPUT:-$((COUNT + 10000))}"; else N="${BUILD_NUMBER_INPUT:-$COUNT}"; fi
-          echo "MOBILE_BUILD_NUMBER=$N" >> "$GITHUB_ENV"
+          N="$MOBILE_BUILD_NUMBER"
           # Upload unless told not to (a manual run may only want the build checked), and
           # never from a commit that is not on develop: merge it first.
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then U="$UPLOAD_DISPATCH"; else U="$UPLOAD_PAYLOAD"; fi
@@ -439,20 +535,23 @@ jobs:
             echo "- result: ${{ job.status }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # One row per run in the Mobile Releases table of the Project Management base. A Teable
+  # Update the row reserved by prepare; never create a second row and consume another number. A Teable
   # automation (移动端构建通知（研发群）) turns that row into the Feishu card — the same place the
   # Web release notification is built, so the card lives with the people who read it and not
   # in this file. Nothing here talks to Feishu. Runs whatever the build jobs did.
   track:
     name: Teable
-    needs: [ios, android]
-    if: always()
+    needs: [prepare, ios, android]
+    if: ${{ always() && needs.prepare.result == 'success' && needs.prepare.outputs.attempt == format('{0}', github.run_attempt) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Record the build in Teable
         env:
           TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          EE_SHA: ${{ needs.prepare.outputs.sha }}
+          ALLOCATION_ROW: ${{ needs.prepare.outputs.record_id }}
+          ALLOCATION_STARTED: ${{ needs.prepare.outputs.started }}
           # https://app.teable.ai/base/bserJ2pmgiLHFHfXNwE/table/tblheQqpvzF9MpTSYqO
           MOBILE_TABLE: tblheQqpvzF9MpTSYqO
           RELEASES_TABLE: tblAhVLOxNtvkaF1ii5
@@ -460,7 +559,7 @@ jobs:
           RELEASES_MOBILE_FIELD: fldTVCH1y2dtFjA4FRA
           IOS: ${{ needs.ios.result }}
           ANDROID: ${{ needs.android.result }}
-          BUILD_NUMBER: ${{ needs.ios.outputs.build_number || needs.android.outputs.build_number }}
+          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
           VERSION: ${{ needs.ios.outputs.version || needs.android.outputs.version }}
           SUBJECT: ${{ needs.ios.outputs.subject || needs.android.outputs.subject }}
           AUTHOR: ${{ needs.ios.outputs.author || needs.android.outputs.author }}
@@ -470,7 +569,7 @@ jobs:
           APK_URL: ${{ needs.android.outputs.apk_url }}
           PLAY: ${{ needs.android.outputs.play }}
           SOURCE: ${{ github.event_name == 'workflow_dispatch' && '手动' || 'develop 合并' }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
         run: |
           api() { curl -sS -w '\n%{http_code}' -H "Authorization: Bearer $TEABLE_API_TOKEN" "$@"; }
 
@@ -496,6 +595,7 @@ jobs:
           fi
 
           START="${IOS_STARTED:-$ANDROID_STARTED}"
+          START="${START:-$ALLOCATION_STARTED}"
           if [ -n "$ANDROID_STARTED" ] && [ -n "$IOS_STARTED" ] && [ "$ANDROID_STARTED" -lt "$IOS_STARTED" ]; then START="$ANDROID_STARTED"; fi
           MINUTES=null; if [ -n "$START" ]; then MINUTES=$(( ($(date +%s) - START + 59) / 60 )); fi
 
@@ -529,16 +629,15 @@ jobs:
                 Commit_message:$subject, Author:$author, Build_duration:$duration,
                 Source:$source, Runs:$runs, APK:$apk, Uploaded:$uploaded}}]}')
 
-          RESPONSE=$(api -X POST "https://app.teable.ai/api/table/${MOBILE_TABLE}/record" \
+          payload=$(printf '%s' "$payload" | jq '{fieldKeyType, typecast, record: .records[0]}')
+          RESPONSE=$(api -X PATCH "https://app.teable.ai/api/table/${MOBILE_TABLE}/record/${ALLOCATION_ROW}" \
             -H 'Content-Type: application/json' -d "$payload")
           HTTP=$(printf '%s' "$RESPONSE" | tail -1)
-          BODY=$(printf '%s' "$RESPONSE" | sed '$d')
-          echo "teable: HTTP ${HTTP} $(printf '%s' "$BODY" | jq -rc '.records[0].id // .message' 2>/dev/null)"
+          echo "teable: HTTP ${HTTP}"
           # A row that never lands means no Feishu card and no trace of this build — fail loudly.
           case "$HTTP" in
             2??) ;;
             *) echo "::error title=Teable tracking failed::${BUILD} (${STATUS}) was not recorded"
-               printf '%s\n' "$BODY" | head -c 500
                exit 1 ;;
           esac
 
@@ -547,7 +646,7 @@ jobs:
           # "already linked to another record" as soon as the commit has been built before,
           # and a rejected create means no row, no Feishu card and a red run for a build that
           # actually succeeded. The card matters more than the link, so a failure here warns.
-          ROW=$(printf '%s' "$BODY" | jq -r '.records[0].id // empty' 2>/dev/null || true)
+          ROW="$ALLOCATION_ROW"
           for rid in $RELEASE_IDS; do
             [ -n "$ROW" ] || break
             LINK=$(api -X PATCH "https://app.teable.ai/api/table/${RELEASES_TABLE}/record/${rid}" \
