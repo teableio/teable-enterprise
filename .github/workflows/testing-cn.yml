@@ -248,6 +248,11 @@ jobs:
             exit 1
           fi
           echo 'Preview admin bootstrap completed; credentials were not published'
+      - name: Stamp known QA passwords for the space under test
+        if: steps.freshness.outputs.current == 'true'
+        env:
+          TESTING_CN_DATABASE_URL: ${{ secrets.TESTING_CN_DATABASE_URL }}
+        run: node control/.github/scripts/testing-cn-qa-access.mjs apply
       - name: Finalize private deployment receipt
         if: always() && steps.receipt.outputs.deployment_id != ''
         id: result
