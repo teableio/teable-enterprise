@@ -44,12 +44,18 @@ jobs:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
           CONTROL_SHA: ${{ steps.control.outputs.sha }}
         run: node control/.github/scripts/testing-cn-deployment.mjs verify-dispatch
+      # The name must not embed github.run_attempt: rerunning failed jobs reuses this
+      # successful job from the previous attempt, so consumers that run in a later
+      # attempt would otherwise look for an artifact that was never uploaded.
+      # request.json is derived from the immutable dispatch payload, so overwriting
+      # it on a full rerun is idempotent.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: testing-cn-request-${{ github.run_id }}-${{ github.run_attempt }}
+          name: testing-cn-request-${{ github.run_id }}
           path: request.json
           if-no-files-found: error
+          overwrite: true
 
   build-push:
     needs: verify
@@ -159,7 +165,7 @@ jobs:
             community/packages/core/src/auth
       - uses: actions/download-artifact@v4
         with:
-          name: testing-cn-request-${{ github.run_id }}-${{ github.run_attempt }}
+          name: testing-cn-request-${{ github.run_id }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -279,9 +285,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: testing-cn-env-drift-${{ github.run_id }}-${{ github.run_attempt }}
+          name: testing-cn-env-drift-${{ github.run_id }}
           path: ${{ runner.temp }}/env-drift.json
           if-no-files-found: ignore
+          overwrite: true
       - name: Remove local credentials and rendered secrets
         if: always()
         run: |
@@ -304,11 +311,11 @@ jobs:
           sparse-checkout: .github/scripts
       - uses: actions/download-artifact@v4
         with:
-          name: testing-cn-request-${{ github.run_id }}-${{ github.run_attempt }}
+          name: testing-cn-request-${{ github.run_id }}
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          name: testing-cn-env-drift-${{ github.run_id }}-${{ github.run_attempt }}
+          name: testing-cn-env-drift-${{ github.run_id }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
