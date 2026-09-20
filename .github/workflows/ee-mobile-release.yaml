@@ -189,11 +189,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # The repository's Node (`use-node-version` in .npmrc): the PR gate tests on it.
+          node-version: 24.19.0
           cache: pnpm
-          cache-dependency-path: |
-            pnpm-lock.yaml
-            enterprise/mobile/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Build number
         id: meta
@@ -227,20 +226,16 @@ jobs:
             echo "started=$(date +%s)"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Install monorepo (shared packages + their dependencies)
+      - name: Install the app and the packages it depends on
         run: >-
-          pnpm install --frozen-lockfile
-          --filter "@teable/core..." --filter "@teable/openapi..." --filter "@teable/openapi-ee..."
-          --filter "@teable/chat-core..." > /tmp/install.log 2>&1 || { tail -30 /tmp/install.log; exit 1; }
+          pnpm install --frozen-lockfile --filter "@teable/mobile..."
+          > /tmp/install.log 2>&1 || { tail -30 /tmp/install.log; exit 1; }
 
       - name: Build shared packages
         run: >-
           pnpm -r --filter @teable/formula --filter @teable/core
           --filter @teable/openapi --filter @teable/openapi-ee --filter @teable/chat-core build
           > /tmp/build-packages.log 2>&1 || { tail -30 /tmp/build-packages.log; exit 1; }
-
-      - name: Install mobile app
-        run: pnpm -C enterprise/mobile install --frozen-lockfile > /tmp/install-mobile.log 2>&1 || { tail -30 /tmp/install-mobile.log; exit 1; }
 
       - name: Prebuild the iOS project
         working-directory: enterprise/mobile
@@ -258,7 +253,7 @@ jobs:
           path: |
             enterprise/mobile/ios/Pods
             ~/Library/Caches/CocoaPods
-          key: pods-${{ runner.os }}-${{ hashFiles('enterprise/mobile/ios/Podfile', 'enterprise/mobile/pnpm-lock.yaml') }}
+          key: pods-${{ runner.os }}-${{ hashFiles('enterprise/mobile/ios/Podfile', 'pnpm-lock.yaml') }}
           restore-keys: pods-${{ runner.os }}-
 
       - name: Pod install
@@ -393,11 +388,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # The repository's Node (`use-node-version` in .npmrc): the PR gate tests on it.
+          node-version: 24.19.0
           cache: pnpm
-          cache-dependency-path: |
-            pnpm-lock.yaml
-            enterprise/mobile/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Build number
         id: meta
@@ -431,20 +425,16 @@ jobs:
             echo "started=$(date +%s)"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Install monorepo (shared packages + their dependencies)
+      - name: Install the app and the packages it depends on
         run: >-
-          pnpm install --frozen-lockfile
-          --filter "@teable/core..." --filter "@teable/openapi..." --filter "@teable/openapi-ee..."
-          --filter "@teable/chat-core..." > /tmp/install.log 2>&1 || { tail -30 /tmp/install.log; exit 1; }
+          pnpm install --frozen-lockfile --filter "@teable/mobile..."
+          > /tmp/install.log 2>&1 || { tail -30 /tmp/install.log; exit 1; }
 
       - name: Build shared packages
         run: >-
           pnpm -r --filter @teable/formula --filter @teable/core
           --filter @teable/openapi --filter @teable/openapi-ee --filter @teable/chat-core build
           > /tmp/build-packages.log 2>&1 || { tail -30 /tmp/build-packages.log; exit 1; }
-
-      - name: Install mobile app
-        run: pnpm -C enterprise/mobile install --frozen-lockfile > /tmp/install-mobile.log 2>&1 || { tail -30 /tmp/install-mobile.log; exit 1; }
 
       - uses: actions/setup-java@v4
         with:
@@ -475,7 +465,7 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('enterprise/mobile/pnpm-lock.yaml') }}
+          key: gradle-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: gradle-${{ runner.os }}-
 
       - name: Build the bundle (signed with the upload key)
