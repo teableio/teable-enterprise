@@ -76,7 +76,8 @@ jobs:
           {
             echo "=== prisma generate ==="
             pnpm -C community/packages/db-main-prisma prisma-generate-ci &&
-            pnpm -C packages/db-main-prisma prisma-generate-ci
+            pnpm -C packages/db-main-prisma prisma-generate-ci &&
+            pnpm -C community/packages/db-data-prisma prisma-generate-ci
           } >> "$LOG_DIR/e2e.log" 2>&1 || status=$?
           echo "prisma generate exit=$status"
           exit $status
@@ -135,6 +136,9 @@ jobs:
           exit $status
 
       - name: 🏗️ Build Backend
+        env:
+          # The clients were generated serially above; parallel writers can truncate their types.
+          TEABLE_SKIP_PRISMA_GENERATE: '1'
         run: |
           status=0
           {
