@@ -37,7 +37,9 @@
  *
  * This script is a release gate: every turbopack-*.js runtime chunk must
  * match exactly once, anything else aborts with a non-zero exit — a broken
- * launch is always preferable to a half-patched image.
+ * launch is always preferable to a half-patched image. Exit 3 (not an error)
+ * means the image has no Turbopack runtime at all: a pre-Turbopack build the
+ * deploy may launch untouched.
  */
 
 import fs from 'node:fs';
@@ -89,7 +91,20 @@ const runtimeChunks = fs
   .filter((name) => RUNTIME_CHUNK_RE.test(name))
   .sort();
 
-if (runtimeChunks.length === 0) fail(`no turbopack-*.js runtime chunks found in ${chunksDir}`);
+if (runtimeChunks.length === 0) {
+  // No Turbopack runtime at all: a pre-Turbopack image, whose assets were uploaded at build time.
+  // Exit 3 tells the deploy it may launch such an image untouched. A Turbopack bundle whose runtime
+  // this script cannot find is a format drift instead — fatal, since pods read the CDN prefix at
+  // boot and an unpatched launch would reference assets that were never uploaded.
+  const turbopack = fs
+    .readdirSync(chunksDir)
+    .some((name) => name.endsWith('.js') && fs.readFileSync(path.join(chunksDir, name), 'utf8').includes('TURBOPACK'));
+  if (!turbopack) {
+    console.log(`[patch-asset-prefix] not a Turbopack bundle (${chunksDir}); nothing to patch`);
+    process.exit(3);
+  }
+  fail(`no turbopack-*.js runtime chunks found in ${chunksDir}`);
+}
 
 let patched = 0;
 
