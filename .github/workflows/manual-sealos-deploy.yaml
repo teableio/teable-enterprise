@@ -317,13 +317,26 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Unrecognized bundle format → deploy untouched, don't block.
-          if ! docker run --rm --entrypoint node -e PATCH_DRY_RUN=1 \
-              -v "$PWD/.github/scripts/patch-asset-prefix.mjs:/tmp/patch-asset-prefix.mjs:ro" \
-              "${ALIYUN_IMAGE}:${IMAGE_TAG}" /tmp/patch-asset-prefix.mjs "${CDN_ORIGIN}" /app; then
-            echo "::warning::${IMAGE_TAG} bundle format not recognized by the patch script; deploying it untouched"
+          # Pre-flight dry-run with the mounted script. Exit 3: no Turbopack runtime at all (a
+          # pre-Turbopack image, its assets uploaded at build time), so it launches untouched. Any
+          # other failure is a Turbopack bundle the script cannot patch (a Next upgrade whose form
+          # is not in the list yet — the build's verify-cdn-patchability canary goes red first):
+          # stop here. Pods read the CDN prefix at boot, so launching it unpatched serves pages
+          # whose assets were never uploaded — every asset 403/404 (2026-09-22, Next 16.3).
+          set +e
+          docker run --rm --entrypoint node -e PATCH_DRY_RUN=1 \
+            -v "$PWD/.github/scripts/patch-asset-prefix.mjs:/tmp/patch-asset-prefix.mjs:ro" \
+            "${ALIYUN_IMAGE}:${IMAGE_TAG}" /tmp/patch-asset-prefix.mjs "${CDN_ORIGIN}" /app
+          rc=$?
+          set -e
+          if [ "$rc" = 3 ]; then
+            echo "::notice::${IMAGE_TAG} has no Turbopack runtime (pre-Turbopack build); deploying it untouched"
             echo "patched=false" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          if [ "$rc" != 0 ]; then
+            echo "::error::${IMAGE_TAG} bundle format not recognized by .github/scripts/patch-asset-prefix.mjs; refusing to deploy an image whose CDN assets cannot be uploaded. Add the new pattern to the script and deploy again."
+            exit 1
           fi
 
           docker build -t app-cdn-variant \

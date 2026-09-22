@@ -7,6 +7,8 @@
  *
  *   minified:   TURBOPACK))return;let t="/_next/"      (one per runtime chunk)
  *   unminified: CHUNK_BASE_PATH="/_next/"              (dev/fallback form)
+ *   Next ≥16.3: ...?TURBOPACK_CHUNK_BASE_PATH:"/_next/"  (a global override,
+ *               else the default — only the default is rewritten)
  *        ->     ...="<cdnOrigin>/_next/"
  *
  * Server-rendered HTML picks the prefix up separately via the
@@ -35,7 +37,9 @@
  *
  * This script is a release gate: every turbopack-*.js runtime chunk must
  * match exactly once, anything else aborts with a non-zero exit — a broken
- * launch is always preferable to a half-patched image.
+ * launch is always preferable to a half-patched image. Exit 3 (not an error)
+ * means the image has no Turbopack runtime at all: a pre-Turbopack build the
+ * deploy may launch untouched.
  */
 
 import fs from 'node:fs';
@@ -43,6 +47,18 @@ import path from 'node:path';
 
 const MINIFIED_RE = /(\bTURBOPACK\)\)return;let [A-Za-z_$][A-Za-z0-9_$]*=)"\/_next\/"/g;
 const UNMINIFIED_RE = /(\bCHUNK_BASE_PATH=)"\/_next\/"/g;
+// Next 16.3 reads the base from a TURBOPACK_CHUNK_BASE_PATH global when one is defined:
+//   U="string"==typeof TURBOPACK_CHUNK_BASE_PATH?TURBOPACK_CHUNK_BASE_PATH:"/_next/"
+const OVERRIDABLE_RE = /(\bTURBOPACK_CHUNK_BASE_PATH\?TURBOPACK_CHUNK_BASE_PATH:)"\/_next\/"/g;
+const PATTERNS = [MINIFIED_RE, UNMINIFIED_RE, OVERRIDABLE_RE];
+// Runtime chunk names: hex hashes up to Next 16.1 (turbopack-3afdf0d6ba805d08.js), base-36
+// ids from 16.3 (turbopack-0fn2gq477ga4z.js).
+const RUNTIME_CHUNK_RE = /^turbopack-[0-9a-z_-]+\.js$/;
+const hasUnpatched = (content) =>
+  PATTERNS.some((re) => {
+    re.lastIndex = 0;
+    return re.test(content);
+  });
 
 function fail(msg) {
   console.error(`[patch-asset-prefix] FATAL: ${msg}`);
@@ -72,10 +88,23 @@ if (!fs.existsSync(chunksDir)) fail(`chunks dir does not exist: ${chunksDir}`);
 
 const runtimeChunks = fs
   .readdirSync(chunksDir)
-  .filter((name) => /^turbopack-[0-9a-f]+\.js$/.test(name))
+  .filter((name) => RUNTIME_CHUNK_RE.test(name))
   .sort();
 
-if (runtimeChunks.length === 0) fail(`no turbopack-*.js runtime chunks found in ${chunksDir}`);
+if (runtimeChunks.length === 0) {
+  // No Turbopack runtime at all: a pre-Turbopack image, whose assets were uploaded at build time.
+  // Exit 3 tells the deploy it may launch such an image untouched. A Turbopack bundle whose runtime
+  // this script cannot find is a format drift instead — fatal, since pods read the CDN prefix at
+  // boot and an unpatched launch would reference assets that were never uploaded.
+  const turbopack = fs
+    .readdirSync(chunksDir)
+    .some((name) => name.endsWith('.js') && fs.readFileSync(path.join(chunksDir, name), 'utf8').includes('TURBOPACK'));
+  if (!turbopack) {
+    console.log(`[patch-asset-prefix] not a Turbopack bundle (${chunksDir}); nothing to patch`);
+    process.exit(3);
+  }
+  fail(`no turbopack-*.js runtime chunks found in ${chunksDir}`);
+}
 
 let patched = 0;
 
@@ -83,28 +112,26 @@ for (const name of runtimeChunks) {
   const file = path.join(chunksDir, name);
   const content = fs.readFileSync(file, 'utf8');
 
-  const minified = [...content.matchAll(MINIFIED_RE)];
-  const unminified = [...content.matchAll(UNMINIFIED_RE)];
-  const total = minified.length + unminified.length;
+  const counts = PATTERNS.map((re) => [...content.matchAll(re)].length);
+  const total = counts.reduce((a, b) => a + b, 0);
 
   if (total !== 1) {
     fail(
       `expected exactly 1 chunk-base occurrence in ${name}, found ${total} ` +
-        `(minified=${minified.length}, unminified=${unminified.length}) — bundler output changed?`
+        `(minified=${counts[0]}, unminified=${counts[1]}, overridable=${counts[2]}) — bundler output changed?`
     );
   }
 
   if (!dryRun) {
-    const next = content
-      .replace(MINIFIED_RE, `$1"${cdnOrigin}/_next/"`)
-      .replace(UNMINIFIED_RE, `$1"${cdnOrigin}/_next/"`);
+    const next = PATTERNS.reduce(
+      (text, re) => text.replace(re, `$1"${cdnOrigin}/_next/"`),
+      content
+    );
     fs.writeFileSync(file, next);
 
     // Re-read and assert: original pattern gone, patched base present.
     const verify = fs.readFileSync(file, 'utf8');
-    MINIFIED_RE.lastIndex = 0;
-    UNMINIFIED_RE.lastIndex = 0;
-    if (MINIFIED_RE.test(verify) || UNMINIFIED_RE.test(verify)) {
+    if (hasUnpatched(verify)) {
       fail(`verification failed: unpatched pattern still present in ${name}`);
     }
     if (!verify.includes(`"${cdnOrigin}/_next/"`)) {
@@ -126,10 +153,7 @@ if (!dryRun) {
       const p = path.join(dir, entry.name);
       if (entry.isDirectory()) sweep(p);
       else if (entry.isFile() && entry.name.endsWith('.js')) {
-        const content = fs.readFileSync(p, 'utf8');
-        MINIFIED_RE.lastIndex = 0;
-        UNMINIFIED_RE.lastIndex = 0;
-        if (MINIFIED_RE.test(content) || UNMINIFIED_RE.test(content)) leftovers.push(p);
+        if (hasUnpatched(fs.readFileSync(p, 'utf8'))) leftovers.push(p);
       }
     }
   };
