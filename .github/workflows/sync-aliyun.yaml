@@ -50,12 +50,16 @@ env:
   DST_REGISTRY: registry.cn-shenzhen.aliyuncs.com/teable
   MAX_RETRIES: 3
   RETRY_DELAY: 15
+  # A killed upload discards the partial blob and the next attempt restarts
+  # it from zero, so this must outlast the biggest layer (teable-cloud's
+  # ~375MB node_modules) at the current ghcr -> Aliyun Shenzhen throughput.
+  COPY_TIMEOUT: 40m
 
 jobs:
   sync:
     name: Sync ${{ inputs.edition }} images
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - name: Checkout lock validation script
         if: inputs.release_record_id != '' && inputs.publish_lock_id != '' && inputs.publish_target != ''
@@ -105,7 +109,7 @@ jobs:
 
             for attempt in $(seq 1 "$primary_attempts"); do
               echo "[$attempt/$primary_attempts] Copying ${src} -> ${dst}"
-              if timeout --signal=TERM 15m skopeo copy ${all_flag} \
+              if timeout --signal=TERM "$COPY_TIMEOUT" skopeo copy ${all_flag} \
                   "docker://${src}" "docker://${dst}" \
                   --src-creds="${SRC_CREDS}" \
                   --dest-creds="${DST_CREDS}"; then
@@ -119,7 +123,7 @@ jobs:
             if [ -n "$fallback_src" ]; then
               for attempt in $(seq 1 "$MAX_RETRIES"); do
                 echo "[$attempt/$MAX_RETRIES] Falling back to ${fallback_src} -> ${dst}"
-                if timeout --signal=TERM 15m skopeo copy ${all_flag} \
+                if timeout --signal=TERM "$COPY_TIMEOUT" skopeo copy ${all_flag} \
                     "docker://${fallback_src}" "docker://${dst}" \
                     --src-creds="${fallback_creds}" \
                     --dest-creds="${DST_CREDS}"; then
