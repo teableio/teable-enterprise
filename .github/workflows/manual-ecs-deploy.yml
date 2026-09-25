@@ -676,6 +676,11 @@ jobs:
   sync-aliyun:
     needs: [stamp-release, promote-latest]
     if: needs.promote-latest.result == 'success'
+    # Same group as manual-sealos-deploy's ensure-aliyun for this tag, so the
+    # two launches upload the shared layers once instead of racing.
+    concurrency:
+      group: aliyun-upload-${{ inputs.image_tag }}
+      cancel-in-progress: false
     uses: ./.github/workflows/sync-aliyun.yaml
     with:
       edition: cloud

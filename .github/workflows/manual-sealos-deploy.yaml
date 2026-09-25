@@ -159,7 +159,14 @@ jobs:
     name: Ensure release images on Aliyun
     needs: validate-publish-lock
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Shared with manual-ecs-deploy's sync-aliyun for the same release tag:
+    # both push the same teable-cloud layers over the slow cross-border link,
+    # and racing each other splits the bandwidth until both time out.
+    # Serialized, whichever runs second finds the blobs already on Aliyun.
+    concurrency:
+      group: aliyun-upload-${{ inputs.image_tag }}
+      cancel-in-progress: false
+    timeout-minutes: 120
     steps:
       - name: Checkout lock validation script
         if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
@@ -204,10 +211,15 @@ jobs:
           set -euo pipefail
           BETA_TAG="beta-${TAG#release.}"
 
+          # A killed upload discards the partial blob and the next attempt
+          # restarts it from zero, so the per-attempt timeout must outlast
+          # the biggest layer (teable-cloud's ~375MB node_modules) at the
+          # current ghcr -> Aliyun Shenzhen throughput. Blobs that did finish
+          # stay on Aliyun, so retries only make progress past that point.
           retry_copy() {
-            local src="$1" dst="$2" dst_creds="$3"
+            local src="$1" dst="$2" dst_creds="$3" arch_flags="$4"
             for attempt in 1 2 3; do
-              if timeout --signal=TERM 15m skopeo copy --all \
+              if timeout --signal=TERM 40m skopeo copy ${arch_flags} \
                   --src-creds="$SRC_CREDS" \
                   --dest-creds="$dst_creds" \
                   "docker://${src}" "docker://${dst}"; then
@@ -236,14 +248,22 @@ jobs:
               retry_copy \
                 "${SRC_REGISTRY}/${image}:${BETA_TAG}" \
                 "${SRC_REGISTRY}/${image}:${TAG}" \
-                "$SRC_CREDS"
+                "$SRC_CREDS" \
+                "--all"
             fi
+
+            # Same arch rule as sync-aliyun: the app images are amd64-only on
+            # Aliyun (patch-cdn re-pushes the tag amd64-only anyway), so
+            # shipping the arm64 half would double the upload for nothing.
+            arch_flags="--override-arch amd64 --override-os linux"
+            [ "$image" = "teable-sandbox-agent" ] && arch_flags="--all"
 
             echo "⏫ ${image}:${TAG} missing on Aliyun, copying from ghcr"
             retry_copy \
               "${SRC_REGISTRY}/${image}:${TAG}" \
               "${DST_REGISTRY}/${image}:${TAG}" \
-              "$DST_CREDS"
+              "$DST_CREDS" \
+              "$arch_flags"
           done
 
   # Preheat CN sandbox-agent nodes as soon as the agent tag lands on Aliyun,
