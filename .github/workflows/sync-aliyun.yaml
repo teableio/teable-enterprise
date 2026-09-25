@@ -150,6 +150,17 @@ jobs:
             for image in "${IMAGES[@]}"; do
               for tag in "${TAGS[@]}"; do
                 [ -n "$tag" ] || continue
+                # teable.cn's manual-sealos-deploy patches teable-cloud:<release>
+                # in place on Aliyun for the CN CDN. Re-copying the clean ghcr
+                # image over it reverts that patch (whichever launch wrote last
+                # won), so a release tag already on Aliyun is left alone, the
+                # same rule as ensure-aliyun. Only "latest" is re-pointed.
+                if [ "$image" = "teable-cloud" ] && [ "$tag" != "latest" ] && \
+                   timeout 60s skopeo inspect --raw --creds="${DST_CREDS}" \
+                     "docker://${DST_REGISTRY}/${image}:${tag}" >/dev/null 2>&1; then
+                  echo "✅ ${image}:${tag} already on Aliyun, keeping it"
+                  continue
+                fi
                 retry_copy \
                   "${SRC_REGISTRY}/${image}:${tag}" \
                   "${DST_REGISTRY}/${image}:${tag}" \
