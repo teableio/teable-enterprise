@@ -306,9 +306,9 @@ jobs:
             fi
             ADMIN_STATUS="${{ steps.preview_admin.outputs.status }}"
             if [ "$ADMIN_STATUS" = "created" ]; then
-              BODY="${BODY}\n🔐 Admin: \`${{ steps.preview_admin.outputs.admin_email }}\` / \`${{ steps.preview_admin.outputs.admin_password }}\`\n🔑 Instance API token: \`${{ steps.preview_admin.outputs.admin_token }}\`"
+              BODY="${BODY}\n🔐 Admin: \`${{ steps.preview_admin.outputs.admin_email }}\` / \`${{ steps.preview_admin.outputs.admin_password }}\`\n🔑 Full access token: \`${{ steps.preview_admin.outputs.admin_token }}\`"
             elif [ "$ADMIN_STATUS" = "exists" ]; then
-              BODY="${BODY}\n🔐 Admin: \`${{ steps.preview_admin.outputs.admin_email }}\` / \`${{ steps.preview_admin.outputs.admin_password }}\` (API token unchanged - see the first deployment comment)"
+              BODY="${BODY}\n🔐 Admin: \`${{ steps.preview_admin.outputs.admin_email }}\` / \`${{ steps.preview_admin.outputs.admin_password }}\`\n🔑 Full access token: unchanged - see the first deployment comment"
             fi
           else
             STATUS="❌ Failed"
