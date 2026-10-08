@@ -14,9 +14,12 @@
  * Server-rendered HTML picks the prefix up separately via the
  * NEXT_BUILD_ENV_ASSET_PREFIX env var at boot (pages router, non-standalone
  * `next start`), and the PageLoader route chunks already prepend the runtime
- * __NEXT_DATA__.assetPrefix — so the Turbopack runtime chunks are the only
- * build artifacts that need patching. community/plugins/.next is a separate
- * app with no CDN prefix; deliberately out of scope.
+ * __NEXT_DATA__.assetPrefix. The one exception is the build-time prerendered
+ * .next/server/pages/404.html (pages/404.tsx uses getStaticProps): Next serves
+ * that file verbatim, so its asset URLs are rewritten here as well — otherwise
+ * the CDN-based runtime never hydrates it and every `notFound: true` page is
+ * blank. community/plugins/.next is a separate app with no CDN prefix;
+ * deliberately out of scope.
  *
  * Usage:
  *   node patch-asset-prefix.mjs <cdnOrigin> [appRoot]
@@ -141,6 +144,26 @@ for (const name of runtimeChunks) {
 
   patched += 1;
 }
+
+// Prerendered 404.html: give it exactly what Next emits for a build-time assetPrefix —
+// static asset URLs on the CDN, and `"assetPrefix"` in __NEXT_DATA__ right after buildId.
+// (`/_next/image?...` stays origin-relative; Next never prefixes it with assetPrefix.)
+const html404 = path.join(appRoot, 'enterprise/app-ee/.next/server/pages/404.html');
+if (!fs.existsSync(html404)) fail(`missing ${html404}`);
+const html = fs.readFileSync(html404, 'utf8');
+const assetRefs = (html.match(/"\/_next\/static\//g) ?? []).length;
+if (assetRefs === 0 || !/"buildId":"[^"]+",/.test(html)) {
+  fail(`404.html has no "/_next/static/" asset URLs or no __NEXT_DATA__ buildId — already patched?`);
+}
+if (!dryRun) {
+  fs.writeFileSync(
+    html404,
+    html
+      .replaceAll('"/_next/static/', `"${cdnOrigin}/_next/static/`)
+      .replace(/("buildId":"[^"]+"),/, `$1,"assetPrefix":"${cdnOrigin}",`)
+  );
+}
+console.log(`[patch-asset-prefix] ${dryRun ? 'would rewrite' : 'rewrote'} ${assetRefs} asset URL(s) in 404.html`);
 
 // Global backstop: after patching, NO file under static/ may still contain
 // the chunk-base bootstrap pattern. Catches runtime code hiding outside the
