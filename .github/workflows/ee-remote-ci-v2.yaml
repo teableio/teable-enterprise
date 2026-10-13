@@ -37,6 +37,7 @@ jobs:
       contains(fromJson(github.event.client_payload.filters), 'v2_adapter_table_query_ops_postgres') ||
       contains(fromJson(github.event.client_payload.filters), 'v2_adapter_table_repository_postgres') ||
       contains(fromJson(github.event.client_payload.filters), 'v2_core') ||
+      contains(fromJson(github.event.client_payload.filters), 'v2_data_query') ||
       contains(fromJson(github.event.client_payload.filters), 'v2_formula_sql_pg') ||
       contains(fromJson(github.event.client_payload.filters), 'v2_table_query_ops')
     runs-on: ubuntu-latest
@@ -81,6 +82,12 @@ jobs:
             @teable/v2-formula-sql-pg...
             --filter
             @teable/v2-table-query-ops...
+            --filter
+            @teable/v2-data-query...
+            --filter
+            @teable/v2-query-library...
+            --filter
+            @teable/v2-adapter-query-library-postgres...
 
       - name: ☁️ Upload workspace dependencies
         uses: ./.github/actions/workspace-deps-upload
@@ -174,6 +181,16 @@ jobs:
           - label: '@teable/v2-table-query-ops'
             name: '@teable/v2-table-query-ops'
             gate: v2_table_query_ops
+          - label: '@teable/v2-data-query'
+            name: '@teable/v2-data-query'
+            gate: v2_data_query
+          - label: '@teable/v2-query-library'
+            name: '@teable/v2-query-library'
+            gate: v2_data_query
+          - label: '@teable/v2-adapter-query-library-postgres'
+            name: '@teable/v2-adapter-query-library-postgres'
+            gate: v2_data_query
+            pgIntegration: true
 
     # Empty image skips the service container for matrix entries without
     # `postgres: true` — only adapter-table-query-ops-postgres needs it.
@@ -234,6 +251,9 @@ jobs:
           # (a set value reroutes them to localhost:5432 → ECONNREFUSED).
           if [ -n "${{ matrix.pkg.dburl }}" ]; then
             export PRISMA_DATABASE_URL="${{ matrix.pkg.dburl }}"
+          fi
+          if [ "${{ matrix.pkg.pgIntegration }}" = "true" ]; then
+            export TEABLE_V2_RUN_PG_INTEGRATION=1
           fi
           mkdir -p "$LOG_DIR"
           SLUG=$(echo "${{ matrix.pkg.label }}" | tr '@/' '--' | tr ' ' '-')
