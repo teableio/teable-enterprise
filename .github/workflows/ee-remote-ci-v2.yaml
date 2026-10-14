@@ -37,11 +37,14 @@ jobs:
       contains(fromJson(github.event.client_payload.filters), 'v2_adapter_table_query_ops_postgres') ||
       contains(fromJson(github.event.client_payload.filters), 'v2_adapter_table_repository_postgres') ||
       contains(fromJson(github.event.client_payload.filters), 'v2_core') ||
+      contains(fromJson(github.event.client_payload.filters), 'v2_data_query') ||
       contains(fromJson(github.event.client_payload.filters), 'v2_formula_sql_pg') ||
       contains(fromJson(github.event.client_payload.filters), 'v2_table_query_ops')
     runs-on: ubuntu-latest
     name: V2 Unit Dependencies
     timeout-minutes: 15
+    outputs:
+      data-query-present: ${{ steps.query-package.outputs.present }}
     env:
       CI: 1
       TESTCONTAINERS_REUSE_ENABLE: 'false'
@@ -63,6 +66,21 @@ jobs:
         with:
           node-version: 24.19.0
 
+      - name: Detect optional inline query package
+        id: query-package
+        run: |
+          if [ -f community/packages/v2/data-query/package.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            {
+              echo 'install-args<<EOF'
+              printf '%s\n' '--filter' '@teable/v2-data-query...' '--filter' '@teable/cli...'
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "inline query package absent at tested SHA — skipping optional checks"
+          fi
+
       - name: 📥 Monorepo install
         uses: ./.github/actions/pnpm-install
         with:
@@ -81,6 +99,11 @@ jobs:
             @teable/v2-formula-sql-pg...
             --filter
             @teable/v2-table-query-ops...
+            --filter
+            @teable/v2-contract-http-client...
+            --filter
+            @teable/v2-contract-http-openapi...
+            ${{ steps.query-package.outputs.install-args }}
 
       - name: ☁️ Upload workspace dependencies
         uses: ./.github/actions/workspace-deps-upload
@@ -174,6 +197,23 @@ jobs:
           - label: '@teable/v2-table-query-ops'
             name: '@teable/v2-table-query-ops'
             gate: v2_table_query_ops
+          - label: '@teable/v2-data-query'
+            name: '@teable/v2-data-query'
+            gate: v2_data_query
+            optionalQuery: true
+          - label: '@teable/v2-contract-http-client'
+            name: '@teable/v2-contract-http-client'
+            gate: v2_data_query
+            queryTests: true
+          - label: '@teable/v2-contract-http-openapi'
+            name: '@teable/v2-contract-http-openapi'
+            gate: v2_data_query
+            queryTests: true
+          - label: '@teable/cli query protocol'
+            name: '@teable/cli'
+            gate: v2_data_query
+            optionalQuery: true
+            queryCli: true
 
     # Empty image skips the service container for matrix entries without
     # `postgres: true` — only adapter-table-query-ops-postgres needs it.
@@ -197,8 +237,14 @@ jobs:
         id: gate
         env:
           FILTERS: ${{ github.event.client_payload.filters }}
+          GATE: ${{ matrix.pkg.gate }}
+          OPTIONAL_QUERY: ${{ matrix.pkg.optionalQuery }}
+          DATA_QUERY_PRESENT: ${{ needs.unit-deps.outputs.data-query-present }}
         run: |
-          if echo "$FILTERS" | grep -qE '"(v2_shared|${{ matrix.pkg.gate }})"'; then
+          if [ "$OPTIONAL_QUERY" = "true" ] && [ "$DATA_QUERY_PRESENT" != "true" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "inline query package absent at tested SHA — skipping"
+          elif echo "$FILTERS" | grep -qE "\"(v2_shared|$GATE)\""; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -228,6 +274,8 @@ jobs:
 
       - name: 🧪 Run unit tests
         if: steps.gate.outputs.run == 'true'
+        env:
+          DATA_QUERY_PRESENT: ${{ needs.unit-deps.outputs.data-query-present }}
         run: |
           # Only the query-ops package runs against the service container; the
           # rest use testcontainers/pglite and must NOT see PRISMA_DATABASE_URL
@@ -241,7 +289,18 @@ jobs:
           status=0
           {
             echo "=== ${{ matrix.pkg.label }} test-unit-cover ==="
-            if [ -n "${{ matrix.pkg.shard }}" ]; then
+            if [ "${{ matrix.pkg.queryCli }}" = "true" ]; then
+              pnpm --fail-if-no-match -F @teable/cli build &&
+                pnpm --fail-if-no-match -F @teable/cli typecheck &&
+                node --test packages/ai-tools-cli/test/query-commands.test.js
+            elif [ "${{ matrix.pkg.gate }}" = "v2_data_query" ]; then
+              pnpm --fail-if-no-match -F "${{ matrix.pkg.name }}" typecheck &&
+                if [ "${{ matrix.pkg.queryTests }}" != "true" ] || [ "$DATA_QUERY_PRESENT" = "true" ]; then
+                  pnpm --fail-if-no-match -F "${{ matrix.pkg.name }}" test-unit-cover
+                else
+                  echo "query protocol specs absent before feature — typecheck completed"
+                fi
+            elif [ -n "${{ matrix.pkg.shard }}" ]; then
               pnpm -F "${{ matrix.pkg.name }}" test-unit-cover --shard=${{ matrix.pkg.shard }}
             else
               pnpm -F "${{ matrix.pkg.name }}" --if-present test-unit-cover
@@ -266,6 +325,103 @@ jobs:
           if [ "$JOB_STATUS" != "success" ]; then
             echo failed > "$LOG_DIR/v2-unit-$SLUG.failed"
             gh release upload "$LOG_TAG" "$LOG_DIR/v2-unit-$SLUG.failed" -R "$LOGS_REPO" --clobber
+          fi
+
+  host-query:
+    needs: [unit-deps]
+    if: >-
+      !cancelled() && needs.unit-deps.result == 'success' &&
+      needs.unit-deps.outputs.data-query-present == 'true' &&
+      (contains(fromJson(github.event.client_payload.filters), 'v2_shared') ||
+       contains(fromJson(github.event.client_payload.filters), 'v2_data_query'))
+    runs-on: ubuntu-latest
+    name: V2 Inline Query Host (CLOUD and EE, enabled and disabled)
+    timeout-minutes: 25
+    env:
+      CI: 1
+      TEABLE_TSDOWN_DISABLE_DTS: '1'
+      PRISMA_DATABASE_URL: 'postgresql://teable:teable@127.0.0.1:25432/e2e_test_teable?schema=public&statement_cache_size=0&connection_limit=20'
+      BACKEND_CACHE_REDIS_URI: 'redis://127.0.0.1:6379/0'
+      VITEST_MAX_THREADS: 2
+      VITEST_MIN_THREADS: 1
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: e2e_test_teable
+          POSTGRES_USER: teable
+          POSTGRES_PASSWORD: teable
+        ports:
+          - 25432:5432
+        options: >-
+          --health-cmd "pg_isready -U teable -d e2e_test_teable"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7.2.4
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: Use Node.js 24.19.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: Monorepo install
+        uses: ./.github/actions/pnpm-install
+
+      - name: Run focused host checks in fresh processes
+        id: host-query-tests
+        run: |
+          mkdir -p "$LOG_DIR"
+          set +e
+          (
+            set -euo pipefail
+            test -f enterprise/backend-ee/test/data-query.e2e-spec-edition.ts
+            test -f enterprise/backend-ee/test/data-query-disabled.e2e-spec-edition.ts
+            (cd packages/db-main-prisma && pnpm prisma-generate)
+            (cd community/packages/db-data-prisma && pnpm prisma-generate)
+            (cd packages/db-main-prisma && pnpm prisma-migrate deploy --schema ./prisma/postgres/schema.prisma)
+            (cd community/packages/db-data-prisma && pnpm prisma-migrate deploy --schema ./prisma/schema.prisma)
+            for script in test-e2e test-e2e:ee; do
+              echo "=== $script: inline query enabled ==="
+              V2_DATA_QUERY_ENABLED=true pnpm --fail-if-no-match -F @teable/backend-ee "$script" test/data-query.e2e-spec-edition.ts --passWithNoTests=false
+              echo "=== $script: inline query disabled ==="
+              V2_DATA_QUERY_ENABLED=false pnpm --fail-if-no-match -F @teable/backend-ee "$script" test/data-query-disabled.e2e-spec-edition.ts --passWithNoTests=false
+            done
+          ) >> "$LOG_DIR/v2-host-query.log" 2>&1
+          status=$?
+          set -e
+          echo "inline query host exit=$status ($(wc -l < "$LOG_DIR/v2-host-query.log") log lines)"
+          exit "$status"
+
+      - name: Ship host check log
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          [ -f "$LOG_DIR/v2-host-query.log" ] || echo "(host checks failed before their first logged step)" > "$LOG_DIR/v2-host-query.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/v2-host-query.log" -R "$LOGS_REPO" --clobber
+          if [ "$JOB_STATUS" != "success" ]; then
+            echo failed > "$LOG_DIR/v2-host-query.failed"
+            gh release upload "$LOG_TAG" "$LOG_DIR/v2-host-query.failed" -R "$LOGS_REPO" --clobber
           fi
 
   e2e:
@@ -459,7 +615,7 @@ jobs:
           fi
 
   verdict:
-    needs: [unit-deps, e2e-deps, unit, e2e, e2e-json-formula-cascade, e2e-postgres-only]
+    needs: [unit-deps, e2e-deps, unit, host-query, e2e, e2e-json-formula-cascade, e2e-postgres-only]
     if: always()
     runs-on: ubuntu-latest
     name: V2 verdict
@@ -488,7 +644,7 @@ jobs:
         uses: ./.github/actions/remote-ci-conclude
         with:
           suite: v2
-          results: 'unit-deps=${{ needs.unit-deps.result }} e2e-deps=${{ needs.e2e-deps.result }} unit=${{ needs.unit.result }} e2e=${{ needs.e2e.result }} json-formula-cascade=${{ needs.e2e-json-formula-cascade.result }} postgres-only=${{ needs.e2e-postgres-only.result }}'
+          results: 'unit-deps=${{ needs.unit-deps.result }} e2e-deps=${{ needs.e2e-deps.result }} unit=${{ needs.unit.result }} host-query=${{ needs.host-query.result }} e2e=${{ needs.e2e.result }} json-formula-cascade=${{ needs.e2e-json-formula-cascade.result }} postgres-only=${{ needs.e2e-postgres-only.result }}'
           app-token: ${{ steps.app.outputs.token }}
           logs-token: ${{ secrets.PACKAGES_KEY }}
 
@@ -505,4 +661,4 @@ jobs:
             -f "client_payload[log_tag]=${LOG_TAG}" \
             -f "client_payload[remote_run_url]=${RUN_URL}" \
             -f "client_payload[check_run_id]=${{ github.event.client_payload.check_run_id }}" \
-            -f "client_payload[results]=unit-deps=${{ needs.unit-deps.result }} e2e-deps=${{ needs.e2e-deps.result }} unit=${{ needs.unit.result }} e2e=${{ needs.e2e.result }} json-formula-cascade=${{ needs.e2e-json-formula-cascade.result }} postgres-only=${{ needs.e2e-postgres-only.result }}"
+            -f "client_payload[results]=unit-deps=${{ needs.unit-deps.result }} e2e-deps=${{ needs.e2e-deps.result }} unit=${{ needs.unit.result }} host-query=${{ needs.host-query.result }} e2e=${{ needs.e2e.result }} json-formula-cascade=${{ needs.e2e-json-formula-cascade.result }} postgres-only=${{ needs.e2e-postgres-only.result }}"
