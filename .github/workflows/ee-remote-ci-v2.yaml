@@ -342,6 +342,8 @@ jobs:
     env:
       CI: 1
       TEABLE_TSDOWN_DISABLE_DTS: '1'
+      TESTCONTAINERS_REUSE_ENABLE: 'false'
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
       PRISMA_DATABASE_URL: 'postgresql://teable:teable@127.0.0.1:25432/e2e_test_teable?schema=public&statement_cache_size=0&connection_limit=20'
       BACKEND_CACHE_REDIS_URI: 'redis://127.0.0.1:6379/0'
       VITEST_MAX_THREADS: 2
@@ -399,9 +401,13 @@ jobs:
             (cd community/packages/db-data-prisma && pnpm prisma-generate)
             (cd packages/db-main-prisma && pnpm prisma-migrate deploy --schema ./prisma/postgres/schema.prisma)
             (cd community/packages/db-data-prisma && pnpm prisma-migrate deploy --schema ./prisma/schema.prisma)
+            echo "=== inline query: PGlite and PostgreSQL executor ==="
+            TEABLE_V2_RUN_PG_INTEGRATION=1 pnpm --fail-if-no-match -F @teable/v2-adapter-table-repository-postgres exec vitest run src/record/data-query/PostgresDataQueryExecutor.pglite.spec.ts src/record/data-query/PostgresDataQueryExecutor.pg.integration.spec.ts --passWithNoTests=false
+            echo "=== inline query: failure trace privacy and host boundaries ==="
+            TEABLE_V2_RUN_PG_INTEGRATION=1 pnpm --fail-if-no-match -F @teable/backend exec vitest run src/tracing-pg.integration.spec.ts src/tracing-db-context.spec.ts src/configs/env.validation.schema.spec.ts src/filter/global-exception.filter.spec.ts --passWithNoTests=false
             for script in test-e2e test-e2e:ee; do
               echo "=== $script: inline query enabled ==="
-              V2_DATA_QUERY_ENABLED=true pnpm --fail-if-no-match -F @teable/backend-ee "$script" test/data-query.e2e-spec-edition.ts --passWithNoTests=false
+              V2_DATA_QUERY_ENABLED=1 pnpm --fail-if-no-match -F @teable/backend-ee "$script" test/data-query.e2e-spec-edition.ts --passWithNoTests=false
               echo "=== $script: inline query disabled ==="
               V2_DATA_QUERY_ENABLED=false pnpm --fail-if-no-match -F @teable/backend-ee "$script" test/data-query-disabled.e2e-spec-edition.ts --passWithNoTests=false
             done
