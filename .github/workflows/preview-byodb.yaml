@@ -79,14 +79,19 @@ jobs:
       # `preview-byodb` is normally added together with `preview-cloud` /
       # `preview-ee`, and both labels dispatch immediately while the preview
       # build + deploy still takes tens of minutes. So this waits for the
-      # deployment to appear instead of failing on the first look; the comment
-      # step reports the timeout if it never does.
+      # deployment to appear instead of failing on the first look, and then for
+      # the running pod to carry the BYODB SSRF opt-out: a preview whose rebuild
+      # is still in flight answers /health on the previous env, and provisioning
+      # against that pod fails with PRIVATE_NETWORK_BLOCKED (PR 3864 hit exactly
+      # that). Each failure writes `problem`, so the comment step reports the
+      # real reason instead of a generic one.
       - name: Wait for the preview to be up
         id: pick
         env:
           KINDS: ${{ steps.labels.outputs.kinds }}
           PR_LABELS: ${{ steps.labels.outputs.labels }}
           WAIT_MINUTES: '30'
+          OPT_OUT_WAIT_MINUTES: '20'
         run: |
           set -euo pipefail
           # No `-n`: the deploy workflows apply and roll out in the kubeconfig's
@@ -107,6 +112,7 @@ jobs:
             [ -n "${instance}" ] && break
             if [ "$(date -u +%s)" -ge "${deadline}" ]; then
               echo "no preview deployment for PR #${PR_NUMBER} after ${WAIT_MINUTES} minutes (PR labels: ${PR_LABELS}); deploy the preview and re-add the label" >&2
+              echo "problem=the preview deployment never showed up within the ${WAIT_MINUTES} minute wait (PR labels: ${PR_LABELS}) — deploy the preview first, then re-add \`preview-byodb\`" >> "$GITHUB_OUTPUT"
               exit 1
             fi
             echo "waiting for the PR preview deployment to exist (labels: ${PR_LABELS})"
@@ -116,6 +122,37 @@ jobs:
           kubectl rollout status "deployment/teable-${instance}" --timeout=900s
           kubectl exec "deployment/teable-${instance}" -- \
             curl -f --retry 30 --retry-delay 5 --retry-connrefused http://localhost:3000/health
+          # The BYODB binding targets a database inside the preview cluster, and
+          # the preflight SSRF guard refuses that host unless the app runs with
+          # the opt-out the preview template sets. /health alone cannot prove it:
+          # a pod from an earlier build answers it too. An instance created
+          # before the template gained the opt-out never re-applies it (the
+          # update path only rolls deployments out), so set it here once - a
+          # preview-only posture change the PR comment reports.
+          opt_out_deadline=$(( $(date -u +%s) + OPT_OUT_WAIT_MINUTES * 60 ))
+          set_flag_after=$(( $(date -u +%s) + 60 ))
+          tried_set=""
+          while :; do
+            flag=$(kubectl exec "deployment/teable-${instance}" -- printenv TEABLE_SSRF_PROTECTION_DISABLED 2>/dev/null || true)
+            [ "${flag}" = "true" ] && break
+            if [ -z "${tried_set}" ] && [ "$(date -u +%s)" -ge "${set_flag_after}" ]; then
+              tried_set="yes"
+              echo "preview ${instance} does not carry the BYODB SSRF opt-out (got '${flag:-unset}'); setting it on the deployment"
+              if kubectl set env "deployment/teable-${instance}" TEABLE_SSRF_PROTECTION_DISABLED=true; then
+                kubectl rollout status "deployment/teable-${instance}" --timeout=900s || true
+                echo "opt_out_set=yes" >> "$GITHUB_OUTPUT"
+              else
+                echo "could not set TEABLE_SSRF_PROTECTION_DISABLED (no permission?); waiting for a deploy to carry it" >&2
+              fi
+            fi
+            if [ "$(date -u +%s)" -ge "${opt_out_deadline}" ]; then
+              echo "preview ${instance} does not run TEABLE_SSRF_PROTECTION_DISABLED=true (got '${flag:-unset}')" >&2
+              echo "problem=the running preview has TEABLE_SSRF_PROTECTION_DISABLED=${flag:-unset} and the job could not set it; rebuild it from a ref whose preview template sets the BYODB SSRF opt-out, then re-add \`preview-byodb\`" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+            echo "waiting for the preview to run with the BYODB SSRF opt-out (got '${flag:-unset}')"
+            sleep 15
+          done
           echo "INSTANCE_NAME=${instance}" >> "$GITHUB_ENV"
           echo "PREVIEW_URL=https://${instance}.sealoshzh.site" >> "$GITHUB_ENV"
 
@@ -132,6 +169,8 @@ jobs:
           KINDS: ${{ steps.labels.outputs.kinds }}
           PR_LABELS: ${{ steps.labels.outputs.labels }}
           PICK_OUTCOME: ${{ steps.pick.outcome }}
+          PICK_PROBLEM: ${{ steps.pick.outputs.problem }}
+          OPT_OUT_SET: ${{ steps.pick.outputs.opt_out_set }}
           BYODB_STATUS: ${{ steps.byodb.outputs.status }}
           BYODB_ERROR: ${{ steps.byodb.outputs.error }}
           SPACE_ID: ${{ steps.byodb.outputs.space_id }}
@@ -147,6 +186,8 @@ jobs:
           if [ "${BYODB_STATUS}" = "created" ] || [ "${BYODB_STATUS}" = "exists" ]; then
             verb="created"
             [ "${BYODB_STATUS}" = "exists" ] && verb="reused (already bound on this preview)"
+            opt_note=()
+            [ "${OPT_OUT_SET}" = "yes" ] && opt_note=("- Note: this preview did not carry the template's BYODB SSRF opt-out, so the job set \`TEABLE_SSRF_PROTECTION_DISABLED=true\` on the deployment and rolled it out.")
             body="$(printf '%s\n' \
               "🧪 **BYODB preview space ${verb}**" \
               "" \
@@ -154,13 +195,16 @@ jobs:
               "- Space: \`${SPACE_NAME}\` — ${PREVIEW_URL}/space/${SPACE_ID}" \
               "- Bound data DB: \`${DISPLAY_HOST}/${DISPLAY_DATABASE}\` — state \`${DATA_DB_STATE}\`, internal schema \`${INTERNAL_SCHEMA}\`" \
               "- Owner: \`${OWNER_EMAIL}\` (the fixed preview admin the deploy comment publishes)" \
+              ${opt_note[@]+"${opt_note[@]}"} \
               "" \
               "Remove the \`preview-byodb\` label and add it again (two separate actions) to re-provision; the database lives inside the preview cluster and is deleted with the preview. [Run](${run_url})")"
           else
             if [ -z "${KINDS}" ]; then
               reason="pull request labels are \`${PR_LABELS}\`: neither \`preview-cloud\` nor \`preview-ee\` is set, so there is no preview to bind"
+            elif [ -n "${PICK_PROBLEM}" ]; then
+              reason="${PICK_PROBLEM}"
             elif [ "${PICK_OUTCOME}" != "success" ]; then
-              reason="the preview deployment never showed up within the 30 minute wait — deploy the preview first, then re-add \`preview-byodb\`"
+              reason="the preview did not become ready — deploy the preview first, then re-add \`preview-byodb\`"
             else
               reason="${BYODB_ERROR:-provisioning aborted before it reported a result; see the run log}"
             fi
