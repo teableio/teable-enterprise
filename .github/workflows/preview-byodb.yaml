@@ -1,0 +1,175 @@
+name: Preview BYODB
+
+# Gives a PR preview a real BYODB space: a dedicated database and login role
+# inside the preview's own PostgreSQL cluster, bound to a new space through the
+# product API. Dispatched by teable-ee's preview-trigger.yml when a pull request
+# gains the `preview-byodb` label.
+#
+# Source of truth: teable-ee/.github/enterprise-ci (synced to this repository by
+# sync-ci-to-enterprise.yml). The scripts come from the PR's own ref, exactly
+# like the preview deploy workflows, so a PR can validate its own version.
+#
+# This covers the legacy full previews only (teable-pr-cloud-<N> /
+# teable-pr-ee-<N>, ns-38puz7wo). Preview-pool instances live in the infra
+# cluster and are not reachable with this repository's kubeconfig.
+
+on:
+  repository_dispatch:
+    types: [preview-byodb]
+
+concurrency:
+  group: preview-byodb-${{ github.event.client_payload.pr_number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    # 30 min waiting for the preview deployment to appear + a rollout + a slow
+    # baseline; a hung preview must not hold a runner for hours.
+    timeout-minutes: 60
+    env:
+      NAMESPACE: 38puz7wo
+      PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+      PR_REF: ${{ github.event.client_payload.ref }}
+    steps:
+      # The label, not the dispatch payload, decides the edition: an EE preview
+      # may exist next to a cloud one, and the label is what the operator set.
+      - name: Resolve preview labels
+        id: labels
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PACKAGES_KEY }}
+          script: |
+            const prNumber = Number(process.env.PR_NUMBER);
+            if (!Number.isSafeInteger(prNumber) || prNumber < 1) {
+              throw new Error(`invalid pr_number in the dispatch payload: ${process.env.PR_NUMBER}`);
+            }
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner: 'teableio',
+              repo: 'teable-ee',
+              pull_number: prNumber,
+            });
+            const labels = pullRequest.labels.map((label) => label.name);
+            const kinds = ['ee', 'cloud'].filter((kind) => labels.includes(`preview-${kind}`));
+            core.setOutput('kinds', kinds.join(' '));
+            core.setOutput('labels', labels.join(', ') || '(none)');
+            if (kinds.length === 0) {
+              core.setFailed(
+                `pull request #${prNumber} has neither the preview-cloud nor the preview-ee label; there is no preview to bind`
+              );
+            }
+
+      - name: Checkout teable-ee at the PR ref
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          token: ${{ secrets.PACKAGES_KEY }}
+          ref: ${{ github.event.client_payload.ref }}
+
+      - name: Prepare kubeconfig
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/kube"
+          printf '%s' "${KUBE_CONFIG}" | base64 -d > "${RUNNER_TEMP}/kube/config"
+          chmod 600 "${RUNNER_TEMP}/kube/config"
+          echo "KUBECONFIG=${RUNNER_TEMP}/kube/config" >> "$GITHUB_ENV"
+
+      # `preview-byodb` is normally added together with `preview-cloud` /
+      # `preview-ee`, and both labels dispatch immediately while the preview
+      # build + deploy still takes tens of minutes. So this waits for the
+      # deployment to appear instead of failing on the first look; the comment
+      # step reports the timeout if it never does.
+      - name: Wait for the preview to be up
+        id: pick
+        env:
+          KINDS: ${{ steps.labels.outputs.kinds }}
+          PR_LABELS: ${{ steps.labels.outputs.labels }}
+          WAIT_MINUTES: '30'
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date -u +%s) + WAIT_MINUTES * 60 ))
+          instance=""
+          while :; do
+            for kind in ${KINDS}; do
+              candidate="pr-${kind}-${PR_NUMBER}"
+              if kubectl -n "${NAMESPACE}" get deployment "teable-${candidate}" >/dev/null 2>&1; then
+                instance="${candidate}"
+                break
+              fi
+            done
+            [ -n "${instance}" ] && break
+            if [ "$(date -u +%s)" -ge "${deadline}" ]; then
+              echo "no preview deployment for PR #${PR_NUMBER} in ${NAMESPACE} after ${WAIT_MINUTES} minutes (PR labels: ${PR_LABELS}); deploy the preview and re-add the label" >&2
+              exit 1
+            fi
+            echo "waiting for the PR preview deployment to exist (labels: ${PR_LABELS})"
+            sleep 20
+          done
+          echo "preview instance: ${instance}"
+          kubectl -n "${NAMESPACE}" rollout status "deployment/teable-${instance}" --timeout=900s
+          kubectl -n "${NAMESPACE}" exec "deployment/teable-${instance}" -- \
+            curl -f --retry 30 --retry-delay 5 --retry-connrefused http://localhost:3000/health
+          echo "INSTANCE_NAME=${instance}" >> "$GITHUB_ENV"
+          echo "PREVIEW_URL=https://${instance}.sealoshzh.site" >> "$GITHUB_ENV"
+
+      # Logic lives in teable-ee: .github/scripts/preview-byodb.sh (runner) and
+      # preview-byodb-pod.sh (runs inside the app container).
+      - name: Provision the BYODB database and space
+        id: byodb
+        run: bash .github/scripts/preview-byodb.sh
+
+      - name: Comment the result on the PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          KINDS: ${{ steps.labels.outputs.kinds }}
+          PR_LABELS: ${{ steps.labels.outputs.labels }}
+          PICK_OUTCOME: ${{ steps.pick.outcome }}
+          BYODB_STATUS: ${{ steps.byodb.outputs.status }}
+          BYODB_ERROR: ${{ steps.byodb.outputs.error }}
+          SPACE_ID: ${{ steps.byodb.outputs.space_id }}
+          SPACE_NAME: ${{ steps.byodb.outputs.space_name }}
+          OWNER_EMAIL: ${{ steps.byodb.outputs.admin_email }}
+          DATA_DB_STATE: ${{ steps.byodb.outputs.state }}
+          DISPLAY_HOST: ${{ steps.byodb.outputs.display_host }}
+          DISPLAY_DATABASE: ${{ steps.byodb.outputs.display_database }}
+          INTERNAL_SCHEMA: ${{ steps.byodb.outputs.internal_schema }}
+        run: |
+          set -euo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [ "${BYODB_STATUS}" = "created" ] || [ "${BYODB_STATUS}" = "exists" ]; then
+            verb="created"
+            [ "${BYODB_STATUS}" = "exists" ] && verb="reused (already bound on this preview)"
+            body="$(printf '%s\n' \
+              "🧪 **BYODB preview space ${verb}**" \
+              "" \
+              "- Preview: ${PREVIEW_URL}" \
+              "- Space: \`${SPACE_NAME}\` — ${PREVIEW_URL}/space/${SPACE_ID}" \
+              "- Bound data DB: \`${DISPLAY_HOST}/${DISPLAY_DATABASE}\` — state \`${DATA_DB_STATE}\`, internal schema \`${INTERNAL_SCHEMA}\`" \
+              "- Owner: \`${OWNER_EMAIL}\` (the fixed preview admin the deploy comment publishes)" \
+              "" \
+              "Add or remove the \`preview-byodb\` label to re-provision. The database lives inside the preview cluster and is deleted with the preview. [Run](${run_url})")"
+          else
+            if [ -z "${KINDS}" ]; then
+              reason="pull request labels are \`${PR_LABELS}\`: neither \`preview-cloud\` nor \`preview-ee\` is set, so there is no preview to bind"
+            elif [ "${PICK_OUTCOME}" != "success" ]; then
+              reason="no running preview deployment for this pull request in \`${NAMESPACE}\` — deploy the preview first, then re-add \`preview-byodb\`"
+            else
+              reason="${BYODB_ERROR:-provisioning aborted before it reported a result; see the run log}"
+            fi
+            body="$(printf '%s\n' \
+              "⚠️ **BYODB provisioning failed**" \
+              "" \
+              "- Reason: ${reason}" \
+              "" \
+              "[Run](${run_url})")"
+          fi
+          jq -n --arg body "$body" '{body: $body}' > "${RUNNER_TEMP}/comment.json"
+          curl -sS -X POST \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/teableio/teable-ee/issues/${PR_NUMBER}/comments" \
+            -d @"${RUNNER_TEMP}/comment.json"
