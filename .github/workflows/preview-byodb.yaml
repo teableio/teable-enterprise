@@ -155,7 +155,7 @@ jobs:
               "- Bound data DB: \`${DISPLAY_HOST}/${DISPLAY_DATABASE}\` — state \`${DATA_DB_STATE}\`, internal schema \`${INTERNAL_SCHEMA}\`" \
               "- Owner: \`${OWNER_EMAIL}\` (the fixed preview admin the deploy comment publishes)" \
               "" \
-              "Add or remove the \`preview-byodb\` label to re-provision. The database lives inside the preview cluster and is deleted with the preview. [Run](${run_url})")"
+              "Remove the \`preview-byodb\` label and add it again (two separate actions) to re-provision; the database lives inside the preview cluster and is deleted with the preview. [Run](${run_url})")"
           else
             if [ -z "${KINDS}" ]; then
               reason="pull request labels are \`${PR_LABELS}\`: neither \`preview-cloud\` nor \`preview-ee\` is set, so there is no preview to bind"
