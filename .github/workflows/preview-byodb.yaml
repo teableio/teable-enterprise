@@ -30,7 +30,6 @@ jobs:
     # baseline; a hung preview must not hold a runner for hours.
     timeout-minutes: 60
     env:
-      NAMESPACE: 38puz7wo
       PR_NUMBER: ${{ github.event.client_payload.pr_number }}
       PR_REF: ${{ github.event.client_payload.ref }}
     steps:
@@ -90,27 +89,32 @@ jobs:
           WAIT_MINUTES: '30'
         run: |
           set -euo pipefail
+          # No `-n`: the deploy workflows apply and roll out in the kubeconfig's
+          # default namespace (ns-38puz7wo), and `38puz7wo` is only the bare id
+          # the template renders into service DNS. Passing it to kubectl looked
+          # for the deployment in a namespace that holds nothing, so the first
+          # live run waited out its deadline on a healthy preview.
           deadline=$(( $(date -u +%s) + WAIT_MINUTES * 60 ))
           instance=""
           while :; do
             for kind in ${KINDS}; do
               candidate="pr-${kind}-${PR_NUMBER}"
-              if kubectl -n "${NAMESPACE}" get deployment "teable-${candidate}" >/dev/null 2>&1; then
+              if kubectl get deployment "teable-${candidate}" >/dev/null 2>&1; then
                 instance="${candidate}"
                 break
               fi
             done
             [ -n "${instance}" ] && break
             if [ "$(date -u +%s)" -ge "${deadline}" ]; then
-              echo "no preview deployment for PR #${PR_NUMBER} in ${NAMESPACE} after ${WAIT_MINUTES} minutes (PR labels: ${PR_LABELS}); deploy the preview and re-add the label" >&2
+              echo "no preview deployment for PR #${PR_NUMBER} after ${WAIT_MINUTES} minutes (PR labels: ${PR_LABELS}); deploy the preview and re-add the label" >&2
               exit 1
             fi
             echo "waiting for the PR preview deployment to exist (labels: ${PR_LABELS})"
             sleep 20
           done
           echo "preview instance: ${instance}"
-          kubectl -n "${NAMESPACE}" rollout status "deployment/teable-${instance}" --timeout=900s
-          kubectl -n "${NAMESPACE}" exec "deployment/teable-${instance}" -- \
+          kubectl rollout status "deployment/teable-${instance}" --timeout=900s
+          kubectl exec "deployment/teable-${instance}" -- \
             curl -f --retry 30 --retry-delay 5 --retry-connrefused http://localhost:3000/health
           echo "INSTANCE_NAME=${instance}" >> "$GITHUB_ENV"
           echo "PREVIEW_URL=https://${instance}.sealoshzh.site" >> "$GITHUB_ENV"
@@ -156,7 +160,7 @@ jobs:
             if [ -z "${KINDS}" ]; then
               reason="pull request labels are \`${PR_LABELS}\`: neither \`preview-cloud\` nor \`preview-ee\` is set, so there is no preview to bind"
             elif [ "${PICK_OUTCOME}" != "success" ]; then
-              reason="no running preview deployment for this pull request in \`${NAMESPACE}\` — deploy the preview first, then re-add \`preview-byodb\`"
+              reason="the preview deployment never showed up within the 30 minute wait — deploy the preview first, then re-add \`preview-byodb\`"
             else
               reason="${BYODB_ERROR:-provisioning aborted before it reported a result; see the run log}"
             fi
