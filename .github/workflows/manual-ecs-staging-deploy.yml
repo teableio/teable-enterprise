@@ -290,6 +290,29 @@ jobs:
           role-session-name: eks-staging-deploy
           aws-region: us-west-2
 
+      - name: Open EKS API tunnel via the SSM bastion
+        # teable-infra's API endpoint is private. Port-forward through the SSM bastion
+        # (policy eks-api-via-bastion: port forwarding only, no shell) and point kubeconfig at it.
+        # Same as teable-infra scripts/aws/eks-tunnel.sh.
+        run: |
+          set -euo pipefail
+          if ! command -v session-manager-plugin >/dev/null; then
+            curl -fsSL -o "$RUNNER_TEMP/smp.deb" https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb
+            sudo dpkg -i "$RUNNER_TEMP/smp.deb" >/dev/null
+          fi
+          EP=$(aws eks describe-cluster --region us-west-2 --name teable-infra --query cluster.endpoint --output text)
+          HOST=${EP#https://}
+          nohup aws ssm start-session --region us-west-2 --target i-024bdb934f65cd973 \
+            --document-name AWS-StartPortForwardingSessionToRemoteHost \
+            --parameters "{\"host\":[\"$HOST\"],\"portNumber\":[\"443\"],\"localPortNumber\":[\"16454\"]}" \
+            > "$RUNNER_TEMP/eks-tunnel.log" 2>&1 &
+          for _ in $(seq 1 60); do grep -q "Waiting for connections" "$RUNNER_TEMP/eks-tunnel.log" && break; sleep 1; done
+          grep -q "Waiting for connections" "$RUNNER_TEMP/eks-tunnel.log" || { cat "$RUNNER_TEMP/eks-tunnel.log"; exit 1; }
+          aws eks update-kubeconfig --region us-west-2 --name teable-infra
+          ARN=$(aws eks describe-cluster --region us-west-2 --name teable-infra --query cluster.arn --output text)
+          kubectl config set-cluster "$ARN" --server=https://127.0.0.1:16454 --tls-server-name="$HOST"
+          kubectl version --request-timeout=30s >/dev/null
+
       - name: Roll EKS deployments to this build
         id: roll
         env:
@@ -297,7 +320,6 @@ jobs:
           ECR: 649941507946.dkr.ecr.us-west-2.amazonaws.com
         run: |
           set -euo pipefail
-          aws eks update-kubeconfig --region us-west-2 --name teable-infra
 
           # ── Computed-outbox config gate (see prod twin) ──
           REDIS_URI=$(kubectl -n teable-staging get secret teable-staging-env \
