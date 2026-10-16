@@ -47,7 +47,7 @@ jobs:
       - name: 🟢 Use Node.js 24.19.0
         uses: actions/setup-node@v4
         with:
-          # The repository's Node (`use-node-version` in .npmrc), which is what pnpm runs the
+          # The repository's Node (`devEngines.runtime` in package.json), which is what pnpm runs the
           # gate's scripts with; the bare `node` of the export step is then the same one.
           node-version: 24.19.0
           cache: pnpm
