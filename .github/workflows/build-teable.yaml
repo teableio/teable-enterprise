@@ -296,9 +296,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.PACKAGES_KEY }}
 
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22.18.0
+          node-version: 24.19.0
 
       - name: Prepare generated Docker contexts
         run: node ./scripts/generate-docker-contexts.mjs
@@ -455,9 +456,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.PACKAGES_KEY }}
 
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22.18.0
+          node-version: 24.19.0
 
       - name: Prepare generated Docker contexts
         if: matrix.file == 'Dockerfile'
@@ -566,9 +568,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.PACKAGES_KEY }}
 
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22.18.0
+          node-version: 24.19.0
 
       - name: Prepare generated Docker contexts
         if: matrix.file == 'Dockerfile'
