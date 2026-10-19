@@ -508,6 +508,54 @@ jobs:
           echo "APK: https://github.com/${LOGS_REPO}/releases/tag/${TAG}"
           echo "url=https://github.com/${LOGS_REPO}/releases/tag/${TAG}" >> "$GITHUB_OUTPUT"
 
+      # Develop builds are also published to media-static.teable.ai, the R2 bucket behind the
+      # official site's videos, and android/latest.json is moved to them. The one link handed
+      # out, https://teable.ai/download/android (teable-official), reads that pointer and
+      # redirects, so it always downloads the newest develop build. Each APK key is written
+      # once and cached for a year; the pointer is never cached. A failure here keeps the
+      # previous APK on that link and does not hold back Play.
+      - name: Publish the APK (media-static.teable.ai)
+        if: env.UPLOAD == 'true'
+        continue-on-error: true
+        working-directory: enterprise/mobile/android/app/build/outputs
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://0c41865550770a80e0a363f1ae821ca7.r2.cloudflarestorage.com
+          R2_BUCKET: media-static
+          CDN_ORIGIN: https://media-static.teable.ai
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          s3() { aws s3api "$@" --bucket "$R2_BUCKET" --endpoint-url "$R2_ENDPOINT"; }
+          FILE="Teable-android-${MOBILE_BUILD_NUMBER}.apk"
+          KEY="android/Teable-${VERSION}-${MOBILE_BUILD_NUMBER}.apk"
+          if s3 head-object --key "$KEY" > /dev/null 2>&1; then
+            echo "$KEY is already published"
+          else
+            s3 put-object --key "$KEY" --body "$FILE" \
+              --content-type application/vnd.android.package-archive \
+              --content-disposition "attachment; filename=\"Teable-${VERSION}-${MOBILE_BUILD_NUMBER}.apk\"" \
+              --cache-control 'public, max-age=31536000, immutable' > /dev/null
+          fi
+
+          # Only forward: a run that finishes late must not take the link back to an older build.
+          CURRENT=0
+          if s3 get-object --key android/latest.json latest.json > /dev/null 2>&1; then
+            CURRENT=$(jq -r '.build // 0' latest.json)
+          fi
+          if [ "$MOBILE_BUILD_NUMBER" -le "$CURRENT" ]; then
+            echo "android/latest.json stays on ${CURRENT}"
+            exit 0
+          fi
+          jq -n --argjson build "$MOBILE_BUILD_NUMBER" --arg version "$VERSION" --arg url "${CDN_ORIGIN}/${KEY}" \
+            --argjson size "$(wc -c < "$FILE" | tr -d " ")" --arg sha256 "$(sha256sum "$FILE" | cut -d' ' -f1)" \
+            --arg published "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{build:$build, version:$version, url:$url, size:$size, sha256:$sha256, published:$published}' > latest.json
+          s3 put-object --key android/latest.json --body latest.json \
+            --content-type application/json --cache-control no-store > /dev/null
+          echo "https://teable.ai/download/android -> ${CDN_ORIGIN}/${KEY}"
+
       # Play only accepts a versionCode above the highest one it already has, and only
       # develop gets to claim one (see the build number step). Should it still refuse, keep
       # TestFlight and the APK, and say so on the card rather than failing the release.
