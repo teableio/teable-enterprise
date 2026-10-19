@@ -1,0 +1,697 @@
+name: Manual ACK CN Deploy
+
+# teable.cn on Aliyun ACK (cluster teable-cn-app, namespace teable-app) — the
+# successor of manual-sealos-deploy.yaml for the Sealos -> Aliyun migration.
+# Same inputs/outputs/secrets contract, so at cutover callers (rollback-launch,
+# Release Publisher) only switch the workflow path. Until then nothing calls it:
+# it is dispatched by hand against the rehearsal environment.
+#
+# Differences from the Sealos leg:
+#   - Cluster access via GitHub OIDC -> RAM role teable-cn-app-github-deploy
+#     (AssumeRoleWithOIDC, 1h STS); no KUBE_CONFIG. The role trusts
+#     refs/heads/main only; callers must grant `id-token: write`.
+#   - The migration Job reads PRISMA_DATABASE_URL from the cluster Secret
+#     teable-cloud-env; no database credentials in GitHub.
+#   - Patched _next/static goes to the OSS public bucket (CDN origin after
+#     cutover) with the same STS credentials; no SEALOS_OBJECTSTORAGE_* keys.
+#     Uploaded on every run, even when the image was already patched by the
+#     Sealos leg (whose fast path skips its own upload).
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Docker image tag (e.g., release.2026-04-20T10-38-57Z.1)'
+        required: true
+      trigger:
+        description: 'Who triggered this deployment'
+        required: false
+        default: 'Manual'
+      release_created_time:
+        description: 'Creation time of the Release record that triggered this deploy'
+        required: false
+        default: ''
+      release_record_id:
+        description: 'Cloud Release record ID used to track publishing progress'
+        required: false
+        default: ''
+      related_release_record_ids:
+        description: 'Comma-separated Release record IDs to link on the Launch'
+        required: false
+        default: ''
+      refined_changelog:
+        description: 'Reviewed English changelog to store on the Launch'
+        required: false
+        default: ''
+      refined_changelog_zh:
+        description: 'Reviewed Chinese changelog to store on the Launch'
+        required: false
+        default: ''
+      publish_mode:
+        description: 'Release Publisher target mode: ai, cn, or all'
+        required: false
+        default: ''
+      publish_lock_id:
+        description: 'Release Publisher lock identifier'
+        required: false
+        default: ''
+      record_launch:
+        description: 'Create and finalize Teable Launch records in this workflow (off for rehearsal runs)'
+        required: false
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      image_tag:
+        description: 'Docker image tag'
+        required: true
+        type: string
+      trigger:
+        description: 'Who triggered this deployment'
+        required: false
+        type: string
+        default: 'Automation'
+      release_created_time:
+        description: 'Creation time of the Release record that triggered this deploy'
+        required: false
+        type: string
+        default: ''
+      release_record_id:
+        description: 'Cloud Release record ID used to track publishing progress'
+        required: false
+        type: string
+        default: ''
+      related_release_record_ids:
+        description: 'Comma-separated Release record IDs to link on the Launch'
+        required: false
+        type: string
+        default: ''
+      refined_changelog:
+        description: 'Reviewed English changelog to store on the Launch'
+        required: false
+        type: string
+        default: ''
+      refined_changelog_zh:
+        description: 'Reviewed Chinese changelog to store on the Launch'
+        required: false
+        type: string
+        default: ''
+      publish_mode:
+        description: 'Release Publisher target mode: ai, cn, or all'
+        required: false
+        type: string
+        default: ''
+      publish_lock_id:
+        description: 'Release Publisher lock identifier'
+        required: false
+        type: string
+        default: ''
+      record_launch:
+        description: 'Create and finalize Teable Launch records in this workflow'
+        required: false
+        type: boolean
+        default: true
+    outputs:
+      start_time:
+        description: 'Deployment start timestamp'
+        value: ${{ jobs.deploy.outputs.start_time }}
+      image_tag:
+        description: 'Deployed image tag'
+        value: ${{ jobs.deploy.outputs.image_tag }}
+    secrets:
+      TEABLE_API_TOKEN:
+        required: false
+      LARK_BOT_URL:
+        required: false
+      # Used by the ensure-aliyun job (ghcr pull / Aliyun push) — callers
+      # not using `secrets: inherit` must pass these for the self-heal
+      # copy to work.
+      PACKAGES_KEY:
+        required: false
+      ALI_DOCKER_PASSWORD:
+        required: false
+      # Used by the preheat-sandbox-agent job — same contract as above.
+      INFRA_TEABLE_CN_PREHEAT_TOKEN:
+        required: false
+
+env:
+  # Defaults match terraform/deployments/aliyun-ack-cn-app in teable-infra;
+  # repository variables override them.
+  ACK_CN_APP_CLUSTER_ID: ${{ vars.ACK_CN_APP_CLUSTER_ID || 'c8200c68711e1417a885670b094a80988' }}
+  ACK_CN_APP_REGION: ${{ vars.ACK_CN_APP_REGION || 'cn-hangzhou' }}
+  ACK_CN_APP_NAMESPACE: teable-app
+  ALIYUN_ROLE_ARN: ${{ vars.ACK_CN_APP_DEPLOY_ROLE_ARN || 'acs:ram::1145786521954482:role/teable-cn-app-github-deploy' }}
+  ALIYUN_OIDC_PROVIDER_ARN: ${{ vars.ACK_CN_APP_OIDC_PROVIDER_ARN || 'acs:ram::1145786521954482:oidc-provider/github-actions' }}
+
+# GitHub's "re-run failed jobs" reuses successful upstream jobs from the
+# previous attempt. Keep the initial fast-fail job, but every job that can
+# mutate images or production must also revalidate the lock in its own steps.
+jobs:
+  validate-publish-lock:
+    name: Validate teable.cn publishing lock
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout lock validation script
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        uses: actions/checkout@v4
+
+      - name: Validate publishing lock
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: cn
+        run: bash .github/scripts/validate-teable-publish-lock.sh
+
+  # teable.cn deploys official release.<id> tags from Aliyun, but Aliyun
+  # only receives images at release time (manual-ecs-deploy's sync-aliyun).
+  # This job makes the CN launch self-sufficient: if this build was never
+  # released yet, its release.<id> is first stamped on ghcr from the
+  # beta-<id> staging twin, then any tag missing on Aliyun is copied over —
+  # so the CN and AI launches can run in either order. Idempotent:
+  # near-instant when the tags already exist.
+  ensure-aliyun:
+    name: Ensure release images on Aliyun
+    needs: validate-publish-lock
+    runs-on: ubuntu-latest
+    # Shared with manual-ecs-deploy's sync-aliyun for the same release tag:
+    # both push the same teable-cloud layers over the slow cross-border link,
+    # and racing each other splits the bandwidth until both time out.
+    # Serialized, whichever runs second finds the blobs already on Aliyun.
+    concurrency:
+      group: aliyun-upload-${{ inputs.image_tag }}
+      cancel-in-progress: false
+    timeout-minutes: 120
+    steps:
+      - name: Checkout lock validation script
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        uses: actions/checkout@v4
+
+      - name: Revalidate teable.cn publishing lock
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: cn
+        run: bash .github/scripts/validate-teable-publish-lock.sh
+
+      - name: Install skopeo
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if sudo timeout 180s apt-get update \
+                -o Acquire::Retries=3 \
+                -o Acquire::http::Timeout=30 \
+                -o Acquire::https::Timeout=30 && \
+               sudo env DEBIAN_FRONTEND=noninteractive \
+                timeout 180s apt-get install -y skopeo; then
+              exit 0
+            fi
+            echo "::warning::skopeo install attempt ${attempt} failed"
+            sudo dpkg --configure -a || true
+            sleep 10
+          done
+          echo "::error::skopeo installation failed after 3 attempts"
+          exit 1
+
+      - name: Stamp and copy any missing images
+        env:
+          SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
+          DST_CREDS: ${{ vars.ALI_DOCKER_USERNAME }}:${{ secrets.ALI_DOCKER_PASSWORD }}
+          SRC_REGISTRY: ghcr.io/teableio
+          DST_REGISTRY: registry.cn-shenzhen.aliyuncs.com/teable
+          TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          BETA_TAG="beta-${TAG#release.}"
+
+          # A killed upload discards the partial blob and the next attempt
+          # restarts it from zero, so the per-attempt timeout must outlast
+          # the biggest layer (teable-cloud's ~375MB node_modules) at the
+          # current ghcr -> Aliyun Shenzhen throughput. Blobs that did finish
+          # stay on Aliyun, so retries only make progress past that point.
+          retry_copy() {
+            local src="$1" dst="$2" dst_creds="$3" arch_flags="$4"
+            for attempt in 1 2 3; do
+              if timeout --signal=TERM 40m skopeo copy ${arch_flags} \
+                  --src-creds="$SRC_CREDS" \
+                  --dest-creds="$dst_creds" \
+                  "docker://${src}" "docker://${dst}"; then
+                return 0
+              fi
+              echo "⚠️ attempt ${attempt} failed for ${src}, retrying in 10s"
+              sleep 10
+            done
+            echo "❌ failed to copy ${src} -> ${dst}"
+            return 1
+          }
+
+          # The agent is included because CN sandboxes pull
+          # <aliyun prefix>:<the app's release id> at spawn time; it always
+          # carries the release tag already (tagged at build time).
+          for image in teable-cloud teable-sandbox-cloud teable-sandbox-agent; do
+            if timeout 60s skopeo inspect --raw --creds="$DST_CREDS" \
+                "docker://${DST_REGISTRY}/${image}:${TAG}" >/dev/null 2>&1; then
+              echo "✅ ${image}:${TAG} already on Aliyun"
+              continue
+            fi
+
+            if ! timeout 60s skopeo inspect --raw --creds="$SRC_CREDS" \
+                "docker://${SRC_REGISTRY}/${image}:${TAG}" >/dev/null 2>&1; then
+              echo "⏫ ${image}:${TAG} not stamped yet, stamping from ${BETA_TAG} on ghcr"
+              retry_copy \
+                "${SRC_REGISTRY}/${image}:${BETA_TAG}" \
+                "${SRC_REGISTRY}/${image}:${TAG}" \
+                "$SRC_CREDS" \
+                "--all"
+            fi
+
+            # Same arch rule as sync-aliyun: the app images are amd64-only on
+            # Aliyun (patch-cdn re-pushes the tag amd64-only anyway), so
+            # shipping the arm64 half would double the upload for nothing.
+            arch_flags="--override-arch amd64 --override-os linux"
+            [ "$image" = "teable-sandbox-agent" ] && arch_flags="--all"
+
+            echo "⏫ ${image}:${TAG} missing on Aliyun, copying from ghcr"
+            retry_copy \
+              "${SRC_REGISTRY}/${image}:${TAG}" \
+              "${DST_REGISTRY}/${image}:${TAG}" \
+              "$DST_CREDS" \
+              "$arch_flags"
+          done
+
+  # Preheat CN sandbox-agent nodes as soon as the agent tag lands on Aliyun,
+  # so a CN-first launch doesn't wait for the AI launch's both-cloud preheat.
+  # Best-effort: not part of the notify gating — a preheat miss only costs
+  # first-spawn latency.
+  preheat-sandbox-agent:
+    needs: ensure-aliyun
+    if: needs.ensure-aliyun.result == 'success'
+    uses: ./.github/workflows/preheat-sandbox-agent-cloud.yaml
+    with:
+      image_tag: ${{ inputs.image_tag }}
+      targets: cn
+      best_effort: true
+    secrets: inherit
+
+  # Same image patch as manual-sealos-deploy (both legs stamp the same
+  # release tag with the same CDN origin; the label check makes it
+  # idempotent), but the patched static goes to the OSS public bucket that
+  # sss.teable.cn will use as origin after cutover. Caveats as in the Sealos
+  # leg: an AI launch's sync-aliyun overwrites the patch — re-run to re-patch.
+  patch-cdn:
+    name: Patch image for CN CDN
+    needs: ensure-aliyun
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      CDN_ORIGIN: https://sss.teable.cn
+      ASSET_BUCKET: ${{ vars.ACK_CN_APP_PUBLIC_BUCKET || 'teable-cn2-app-public' }}
+      ALIYUN_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud
+
+    steps:
+      - name: Checkout deploy and lock validation scripts
+        uses: actions/checkout@v4
+
+      - name: Revalidate teable.cn publishing lock
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: cn
+        run: bash .github/scripts/validate-teable-publish-lock.sh
+
+      - name: Login to Aliyun container registry
+        uses: docker/login-action@v3
+        with:
+          registry: registry.cn-shenzhen.aliyuncs.com
+          username: ${{ vars.ALI_DOCKER_USERNAME }}
+          password: ${{ secrets.ALI_DOCKER_PASSWORD }}
+
+      - name: Check if the image is already patched (redeploy fast-path)
+        id: existing
+        run: |
+          set -euo pipefail
+          docker pull "${ALIYUN_IMAGE}:${IMAGE_TAG}"
+          CURRENT=$(docker inspect --format '{{index .Config.Labels "teable.asset-prefix"}}' \
+            "${ALIYUN_IMAGE}:${IMAGE_TAG}" 2>/dev/null || echo "")
+          if [ "$CURRENT" = "$CDN_ORIGIN" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "✅ ${IMAGE_TAG} already carries the ${CDN_ORIGIN} patch; assets are append-only, skipping"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build patch layer
+        if: steps.existing.outputs.exists == 'false'
+        id: patch
+        run: |
+          set -euo pipefail
+
+          # Pre-flight dry-run with the mounted script. Exit 3: no Turbopack runtime at all (a
+          # pre-Turbopack image, its assets uploaded at build time), so it launches untouched. Any
+          # other failure is a Turbopack bundle the script cannot patch (a Next upgrade whose form
+          # is not in the list yet — the build's verify-cdn-patchability canary goes red first):
+          # stop here. Pods read the CDN prefix at boot, so launching it unpatched serves pages
+          # whose assets were never uploaded — every asset 403/404 (2026-09-22, Next 16.3).
+          set +e
+          docker run --rm --entrypoint node -e PATCH_DRY_RUN=1 \
+            -v "$PWD/.github/scripts/patch-asset-prefix.mjs:/tmp/patch-asset-prefix.mjs:ro" \
+            "${ALIYUN_IMAGE}:${IMAGE_TAG}" /tmp/patch-asset-prefix.mjs "${CDN_ORIGIN}" /app
+          rc=$?
+          set -e
+          if [ "$rc" = 3 ]; then
+            echo "::notice::${IMAGE_TAG} has no Turbopack runtime (pre-Turbopack build); deploying it untouched"
+            echo "patched=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$rc" != 0 ]; then
+            echo "::error::${IMAGE_TAG} bundle format not recognized by .github/scripts/patch-asset-prefix.mjs; refusing to deploy an image whose CDN assets cannot be uploaded. Add the new pattern to the script and deploy again."
+            exit 1
+          fi
+
+          docker build -t app-cdn-variant \
+            --build-arg BASE_IMAGE="${ALIYUN_IMAGE}:${IMAGE_TAG}" \
+            --build-arg CDN_ORIGIN="${CDN_ORIGIN}" \
+            -f - .github/scripts <<'EOF'
+          ARG BASE_IMAGE
+          FROM ${BASE_IMAGE}
+          ARG CDN_ORIGIN
+          RUN --mount=type=bind,source=patch-asset-prefix.mjs,target=/tmp/patch-asset-prefix.mjs \
+              node /tmp/patch-asset-prefix.mjs "${CDN_ORIGIN}" /app
+          ENV NEXT_BUILD_ENV_ASSET_PREFIX=${CDN_ORIGIN}
+          LABEL teable.asset-prefix=${CDN_ORIGIN}
+          EOF
+          echo "patched=true" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-check the patched image
+        if: steps.existing.outputs.exists == 'false' && steps.patch.outputs.patched == 'true'
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh app-cdn-variant -c '
+            set -e
+            SAMPLE=$(ls /app/enterprise/app-ee/.next/static/chunks/turbopack-*.js | head -1)
+            grep -q "'"${CDN_ORIGIN}"'/_next/" "$SAMPLE"
+            [ "$NEXT_BUILD_ENV_ASSET_PREFIX" = "'"${CDN_ORIGIN}"'" ]
+            echo "smoke OK: $SAMPLE"
+          '
+
+      - name: Get Aliyun STS credentials via OIDC
+        if: steps.existing.outputs.exists == 'true' || steps.patch.outputs.patched == 'true'
+        run: bash .github/scripts/aliyun-oidc-login.sh
+
+      # Runs on the fast path too: when the Sealos leg patched this tag first,
+      # its own upload went to the Sealos bucket only.
+      - name: Upload patched static assets to the OSS public bucket (append-only)
+        if: steps.existing.outputs.exists == 'true' || steps.patch.outputs.patched == 'true'
+        env:
+          SOURCE_IMAGE: ${{ steps.existing.outputs.exists == 'true' && format('{0}:{1}', env.ALIYUN_IMAGE, env.IMAGE_TAG) || 'app-cdn-variant' }}
+        run: |
+          set -euo pipefail
+          CID=$(docker create "${SOURCE_IMAGE}")
+          docker cp "$CID:/app/enterprise/app-ee/.next/static" ./static-out
+          docker rm "$CID" >/dev/null
+          # NEVER delete: chunks of other builds must survive. -u skips
+          # objects that are already there and not older.
+          aliyun oss cp ./static-out "oss://${ASSET_BUCKET}/_next/static/" -r -u -f --jobs 16 \
+            --mode StsToken \
+            --access-key-id "${ALIBABA_CLOUD_ACCESS_KEY_ID}" \
+            --access-key-secret "${ALIBABA_CLOUD_ACCESS_KEY_SECRET}" \
+            --sts-token "${ALIBABA_CLOUD_SECURITY_TOKEN}" \
+            -e "oss-${ACK_CN_APP_REGION}.aliyuncs.com"
+          echo "uploaded $(find ./static-out -type f | wc -l) files from ${SOURCE_IMAGE}"
+
+      - name: Push patched image back under the same release tag
+        if: steps.existing.outputs.exists == 'false' && steps.patch.outputs.patched == 'true'
+        run: |
+          set -euo pipefail
+          docker tag app-cdn-variant "${ALIYUN_IMAGE}:${IMAGE_TAG}"
+          docker push "${ALIYUN_IMAGE}:${IMAGE_TAG}"
+
+  deploy:
+    name: Deploy to ACK (teable-cn-app)
+    needs: [ensure-aliyun, patch-cdn]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    # One rollout at a time against the cluster, whichever caller started it.
+    concurrency:
+      group: ack-cn-app-deploy
+      cancel-in-progress: false
+    outputs:
+      start_time: ${{ steps.start_time.outputs.start }}
+      image_tag: ${{ inputs.image_tag }}
+    env:
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      REGISTRY: registry.cn-shenzhen.aliyuncs.com/teable
+
+    steps:
+      - name: Checkout deploy and lock validation scripts
+        uses: actions/checkout@v4
+
+      - name: Revalidate teable.cn publishing lock
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: cn
+        run: bash .github/scripts/validate-teable-publish-lock.sh
+
+      - name: Record start time
+        id: start_time
+        run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Get Aliyun STS credentials via OIDC
+        run: bash .github/scripts/aliyun-oidc-login.sh
+
+      - name: Fetch cluster kubeconfig
+        run: |
+          set -euo pipefail
+          aliyun cs GET "/k8s/${ACK_CN_APP_CLUSTER_ID}/user_config" \
+            --mode StsToken \
+            --access-key-id "${ALIBABA_CLOUD_ACCESS_KEY_ID}" \
+            --access-key-secret "${ALIBABA_CLOUD_ACCESS_KEY_SECRET}" \
+            --sts-token "${ALIBABA_CLOUD_SECURITY_TOKEN}" \
+            --region "${ACK_CN_APP_REGION}" | jq -r '.config' > "${RUNNER_TEMP}/kubeconfig"
+          test -s "${RUNNER_TEMP}/kubeconfig"
+          chmod 600 "${RUNNER_TEMP}/kubeconfig"
+          echo "KUBECONFIG=${RUNNER_TEMP}/kubeconfig" >> "${GITHUB_ENV}"
+          # GITHUB_ENV only applies to later steps.
+          KUBECONFIG="${RUNNER_TEMP}/kubeconfig" kubectl -n "${ACK_CN_APP_NAMESPACE}" get deploy teable-cloud teable-sandbox-cloud
+
+      - name: Update sandbox deployment
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/teable-sandbox-cloud:${IMAGE_TAG}"
+          kubectl -n "${ACK_CN_APP_NAMESPACE}" set image deployment/teable-sandbox-cloud teable-sandbox-cloud="${image}"
+          kubectl -n "${ACK_CN_APP_NAMESPACE}" annotate deployment/teable-sandbox-cloud originImageName="${image}" --overwrite
+          kubectl -n "${ACK_CN_APP_NAMESPACE}" rollout status deployment/teable-sandbox-cloud --timeout=10m
+
+      # PRISMA_DATABASE_URL comes from the cluster Secret, the same one the
+      # app reads, so GitHub holds no database credentials.
+      - name: Run migration job
+        run: |
+          set -euo pipefail
+          job="teable-migration-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          kubectl -n "${ACK_CN_APP_NAMESPACE}" delete job "${job}" --ignore-not-found=true
+          cat <<EOF | kubectl -n "${ACK_CN_APP_NAMESPACE}" apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${job}
+          spec:
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 3600
+            template:
+              spec:
+                restartPolicy: Never
+                nodeSelector:
+                  teable.io/node-pool: app
+                imagePullSecrets:
+                  - name: teable-cloud
+                containers:
+                  - name: teable
+                    image: "${REGISTRY}/teable-cloud:${IMAGE_TAG}"
+                    imagePullPolicy: IfNotPresent
+                    args: [migrate-only]
+                    env:
+                      - name: PRISMA_DATABASE_URL
+                        valueFrom:
+                          secretKeyRef:
+                            name: teable-cloud-env
+                            key: PRISMA_DATABASE_URL
+                    resources:
+                      requests: { cpu: 100m, memory: 256Mi }
+                      limits: { cpu: 500m, memory: 512Mi }
+          EOF
+          # Wait for either outcome so a failed migration fails fast with its log.
+          for _ in $(seq 1 120); do
+            state=$(kubectl -n "${ACK_CN_APP_NAMESPACE}" get job "${job}" -o jsonpath='{.status.succeeded}/{.status.failed}')
+            case "${state}" in
+              1/*) echo "migration succeeded"; break ;;
+              */1) echo "::error::migration job failed"; kubectl -n "${ACK_CN_APP_NAMESPACE}" logs "job/${job}" --tail=200 || true; exit 1 ;;
+            esac
+            sleep 10
+          done
+          kubectl -n "${ACK_CN_APP_NAMESPACE}" wait --for=condition=complete "job/${job}" --timeout=1s
+          kubectl -n "${ACK_CN_APP_NAMESPACE}" logs "job/${job}" --tail=20 || true
+
+      - name: Update application deployment
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/teable-cloud:${IMAGE_TAG}"
+          kubectl -n "${ACK_CN_APP_NAMESPACE}" set image deployment/teable-cloud teable-cloud="${image}"
+          kubectl -n "${ACK_CN_APP_NAMESPACE}" annotate deployment/teable-cloud originImageName="${image}" --overwrite
+          kubectl -n "${ACK_CN_APP_NAMESPACE}" rollout status deployment/teable-cloud --timeout=15m
+
+  notify:
+    name: Record teable.cn Launch
+    needs: deploy
+    if: inputs.record_launch != false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create teable.cn Launch
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          REGION: teable.cn
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          TRIGGER: ${{ inputs.trigger || github.actor }}
+          RELEASE_CREATED_TIME: ${{ inputs.release_created_time }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          RELATED_RELEASE_RECORD_IDS: ${{ inputs.related_release_record_ids }}
+          REFINED_CHANGELOG: ${{ inputs.refined_changelog }}
+          REFINED_CHANGELOG_ZH: ${{ inputs.refined_changelog_zh }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+        run: bash .github/scripts/record-teable-launch.sh
+
+  finalize-release:
+    name: Finalize Release publishing progress
+    needs: notify
+    if: >-
+      inputs.record_launch != false &&
+      needs.notify.result == 'success' &&
+      inputs.release_record_id != '' &&
+      inputs.publish_lock_id != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: finalize-teable-release-${{ inputs.release_record_id }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Record teable.cn completion
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          RELATED_RELEASE_RECORD_IDS: ${{ inputs.related_release_record_ids }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: cn
+        run: bash .github/scripts/finalize-teable-release.sh
+
+  notify-failure:
+    name: Report teable.cn deploy failure
+    needs: [validate-publish-lock, ensure-aliyun, patch-cdn, deploy, notify, finalize-release]
+    if: >-
+      always() &&
+      inputs.record_launch != false &&
+      (needs.validate-publish-lock.result == 'failure' ||
+       needs.validate-publish-lock.result == 'cancelled' ||
+       needs.ensure-aliyun.result == 'failure' ||
+       needs.ensure-aliyun.result == 'cancelled' ||
+       needs.patch-cdn.result == 'failure' ||
+       needs.patch-cdn.result == 'cancelled' ||
+       needs.deploy.result == 'failure' ||
+       needs.deploy.result == 'cancelled' ||
+       needs.notify.result == 'failure' ||
+       needs.notify.result == 'cancelled' ||
+       needs.finalize-release.result == 'failure' ||
+       needs.finalize-release.result == 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: finalize-teable-release-${{ inputs.release_record_id || github.run_id }}
+    steps:
+      - name: Checkout code
+        if: inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        uses: actions/checkout@v4
+
+      - name: Settle teable.cn publishing target
+        if: inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          RELATED_RELEASE_RECORD_IDS: ${{ inputs.related_release_record_ids }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: cn
+          TARGET_RESULT: ${{ needs.notify.result == 'success' && 'success' || 'failure' }}
+          FAILURE_MESSAGE: teable.cn publishing workflow failed
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$TARGET_RESULT" = "success" ]; then
+            bash .github/scripts/finalize-teable-release.sh
+          else
+            bash .github/scripts/mark-teable-release-failed.sh
+          fi
+
+      - name: Send Feishu failure notification
+        if: always()
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.LARK_BOT_URL }}
+          PREFLIGHT_RESULT: ${{ needs.validate-publish-lock.result }}
+          ENSURE_RESULT: ${{ needs.ensure-aliyun.result }}
+          PATCH_RESULT: ${{ needs.patch-cdn.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          LAUNCH_RESULT: ${{ needs.notify.result }}
+          FINALIZE_RESULT: ${{ needs.finalize-release.result }}
+        run: |
+          set -euo pipefail
+          if [ -z "$FEISHU_WEBHOOK_URL" ]; then
+            echo "::error::LARK_BOT_URL is not configured"
+            exit 1
+          fi
+
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          card_payload=$(jq -n \
+            --arg title "teable.cn（ACK）发布失败 ${{ inputs.image_tag }}" \
+            --arg preflight "$PREFLIGHT_RESULT" \
+            --arg ensure "$ENSURE_RESULT" \
+            --arg patch "$PATCH_RESULT" \
+            --arg deploy "$DEPLOY_RESULT" \
+            --arg launch "$LAUNCH_RESULT" \
+            --arg finalize "$FINALIZE_RESULT" \
+            --arg url "$run_url" \
+            '{
+              "msg_type": "interactive",
+              "card": {
+                "header": {
+                  "title": {"tag": "plain_text", "content": $title},
+                  "template": "red"
+                },
+                "elements": [
+                  {"tag": "div", "text": {"tag": "lark_md", "content": ("**发布锁预检**: " + $preflight + "\n**Aliyun 镜像准备**: " + $ensure + "\n**CDN patch**: " + $patch + "\n**ACK 部署**: " + $deploy + "\n**Launch 记录**: " + $launch + "\n**Release 收敛**: " + $finalize + "\n已回写失败目标；重试必须从 Release Publisher 重新获取全局锁。\n[查看 Actions](" + $url + ")")}}
+                ]
+              }
+            }')
+          curl -fsS -X POST "$FEISHU_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "$card_payload" >/dev/null
