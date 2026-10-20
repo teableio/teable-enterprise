@@ -1,0 +1,225 @@
+# Source of truth: teableio/teable-ee .github/enterprise-ci/ee-mobile-version-bump.yaml (synced
+# to teable-enterprise by sync-ci-to-enterprise.yml). Runs here because the App Store Connect
+# key lives here and minutes are free.
+#
+# Once App Store review approves a version, App Store Connect closes its train: uploads of that
+# version fail ("Invalid Pre-Release Train ... is closed for new build submissions") and none of
+# its builds can be submitted for external TestFlight testing. So every develop merge after an
+# approval would build for half an hour and fail at the upload. This sweep notices the approval
+# and opens a teable-ee PR moving enterprise/mobile/app.config.ts to the next patch version,
+# under a new issue in the team's issue table for the Check Issue IDs gate (a closed issue
+# cannot take a later PR, so each bump gets its own). Merging stays with a person: the version
+# is part of what ships.
+#
+# Public log: versions (public on the App Store anyway), the issue ID, the PR link and HTTP
+# status codes only.
+name: EE Mobile Version Bump
+
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Only report what would be proposed'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ee-mobile-version-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Propose the next version after an approval
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          # Same base as the Mobile Releases table the release workflow writes with it.
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          # Read as a string: a boolean false would otherwise vanish in an && / || expression.
+          DRY_RUN: ${{ format('{0}', inputs.dry_run) }}
+        run: |
+          node <<'NODE'
+          const crypto = require('node:crypto');
+          const APP = '6810557646';
+          const REPO = 'teableio/teable-ee';
+          const FILE = 'enterprise/mobile/app.config.ts';
+          // The states a version reaches once review approves it; its train is closed from then on.
+          const APPROVED = new Set([
+            'ACCEPTED', 'PENDING_DEVELOPER_RELEASE', 'PROCESSING_FOR_DISTRIBUTION',
+            'READY_FOR_DISTRIBUTION', 'REPLACED_WITH_NEW_VERSION',
+          ]);
+          const VERSION_LINE = /^  version: '(\d+\.\d+\.\d+)',$/m;
+          // The issue table (Issue management) and the fields an issue is filed with.
+          const ISSUES = 'https://app.teable.ai/api/table/tblNHimLUhUDtC3K7Jk';
+          const ISSUE_ID = 'fldHodMrroUb4t9NimT';
+          const DESCRIPTION = 'fldmaRyC6TkhumRDs5X';
+          const OWNER = 'bieber@teable.ai';
+          const parse = value => /^\d+\.\d+\.\d+$/.test(value) ? value.split('.').map(Number) : null;
+          const compare = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+
+          function ascToken() {
+            const now = Math.floor(Date.now() / 1000);
+            const part = value => Buffer.from(JSON.stringify(value)).toString('base64url');
+            const unsigned = `${part({ alg: 'ES256', kid: process.env.ASC_KEY_ID, typ: 'JWT' })}.${part({
+              iss: process.env.ASC_ISSUER_ID, iat: now, exp: now + 600, aud: 'appstoreconnect-v1',
+            })}`;
+            const signature = crypto.sign('sha256', Buffer.from(unsigned), {
+              key: process.env.ASC_KEY_P8, dsaEncoding: 'ieee-p1363',
+            });
+            return `${unsigned}.${signature.toString('base64url')}`;
+          }
+          async function asc(path) {
+            const res = await fetch(`https://api.appstoreconnect.apple.com/v1${path}`, {
+              headers: { Authorization: `Bearer ${ascToken()}` },
+              signal: AbortSignal.timeout(30000),
+            });
+            if (!res.ok) throw new Error(`App Store Connect HTTP ${res.status}`);
+            return res.json();
+          }
+          // Statuses listed in `accept` come back to the caller instead of failing the run.
+          async function github(path, method = 'GET', body, accept = []) {
+            const res = await fetch(`https://api.github.com${path}`, {
+              method,
+              headers: {
+                Authorization: `Bearer ${process.env.GH_TOKEN}`,
+                Accept: 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28',
+                ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+              },
+              body: body === undefined ? undefined : JSON.stringify(body),
+              signal: AbortSignal.timeout(30000),
+            });
+            if (accept.includes(res.status)) return { status: res.status };
+            if (!res.ok) throw new Error(`GitHub ${method} HTTP ${res.status}`);
+            return { status: res.status, data: await res.json() };
+          }
+          async function teable(path, method = 'GET', body) {
+            const res = await fetch(`${ISSUES}${path}`, {
+              method,
+              headers: { Authorization: `Bearer ${process.env.TEABLE_API_TOKEN}`, 'Content-Type': 'application/json' },
+              body: body === undefined ? undefined : JSON.stringify(body),
+              signal: AbortSignal.timeout(30000),
+            });
+            if (!res.ok) throw new Error(`Teable ${method} HTTP ${res.status}`);
+            return res.json();
+          }
+          // The branch named in the description finds the issue again when an earlier run filed
+          // it but stopped before the PR, so a rerun does not file a second one.
+          async function fileIssue(approved, next, branch) {
+            const marker = `Branch: ${branch}`;
+            const query = new URLSearchParams({
+              fieldKeyType: 'id', take: '1',
+              filter: JSON.stringify({ conjunction: 'and', filterSet: [
+                { fieldId: DESCRIPTION, operator: 'contains', value: marker },
+              ] }),
+            });
+            let record = (await teable(`/record?${query}`)).records?.[0];
+            if (!record) {
+              const created = await teable('/record', 'POST', {
+                fieldKeyType: 'id', typecast: true,
+                records: [{ fields: {
+                  [DESCRIPTION]: [
+                    `iOS ${approved} 已通过 App Store 审核，App Store Connect 随即关闭了 ${approved} 的 train：`,
+                    `之后同版本号的 TestFlight 上传会失败（Invalid Pre-Release Train），也不能再提交外部测试。`,
+                    `需要把 enterprise/mobile/app.config.ts 的 version 升到 ${next}；PR 由 teable-enterprise 的`,
+                    'EE Mobile Version Bump 工作流自动开出，合并后 develop 的移动端构建恢复上传。',
+                    '',
+                    marker,
+                  ].join('\n'),
+                  fldUqfNhgSeMfnbmmTN: 'Feature request', // Type
+                  fldzmyl9RVJGM8LIW6L: 'P1', // Priority: develop builds stop reaching TestFlight
+                  fldG6IxvweKt7rWFN9p: 'Cloud', // Edition
+                  fldZEOhIAR7u39qwN5i: OWNER, // Email
+                  fldfCutUFNWofErzEsT: OWNER, // Assignee
+                } }],
+              });
+              record = created.records?.[0];
+              if (!record || !/^rec[a-zA-Z0-9]+$/.test(record.id)) throw new Error('Issue creation returned no record ID');
+            }
+            // The T number is a formula; give it a moment to compute.
+            for (let attempt = 0; !/^T\d+$/.test(record.fields?.[ISSUE_ID] ?? '') && attempt < 5; attempt++) {
+              await new Promise(resolve => setTimeout(resolve, 1000));
+              record = await teable(`/record/${record.id}?fieldKeyType=id`);
+            }
+            const id = record.fields?.[ISSUE_ID];
+            if (!/^T\d+$/.test(id ?? '')) throw new Error('Issue ID did not resolve');
+            return id;
+          }
+          async function readConfig(ref) {
+            const { data } = await github(`/repos/${REPO}/contents/${FILE}?ref=${encodeURIComponent(ref)}`);
+            return { sha: data.sha, source: Buffer.from(data.content, 'base64').toString('utf8') };
+          }
+
+          (async () => {
+            for (const name of ['ASC_KEY_P8', 'ASC_KEY_ID', 'ASC_ISSUER_ID', 'GH_TOKEN', 'TEABLE_API_TOKEN']) {
+              if (!process.env[name]) throw new Error(`Missing ${name}`);
+            }
+            const versions = await asc(`/apps/${APP}/appStoreVersions?filter[platform]=IOS&limit=200`
+              + '&fields[appStoreVersions]=versionString,appVersionState');
+            const approved = versions.data
+              .filter(version => APPROVED.has(version.attributes.appVersionState))
+              .map(version => parse(version.attributes.versionString))
+              .filter(Boolean)
+              .sort(compare)
+              .pop();
+            if (!approved) return console.log('No approved iOS version yet');
+
+            const develop = await readConfig('develop');
+            const current = parse(VERSION_LINE.exec(develop.source)?.[1]);
+            if (!current) throw new Error(`No version line in ${FILE}`);
+            console.log(`develop: ${current.join('.')}, latest approved: ${approved.join('.')}`);
+            if (compare(current, approved) > 0) return console.log('Version is open, nothing to do');
+
+            const next = `${approved[0]}.${approved[1]}.${approved[2] + 1}`;
+            const branch = `chore/mobile-version-${next}`;
+            // Any PR for this version, open or closed: a person already decided on it.
+            const { data: existing } = await github(
+              `/repos/${REPO}/pulls?state=all&head=${encodeURIComponent(`teableio:${branch}`)}`,
+            );
+            if (existing.length) return console.log(`Already proposed: ${existing[0].html_url}`);
+            if (process.env.DRY_RUN === 'true') return console.log(`Dry run: would propose ${next}`);
+
+            const issue = await fileIssue(approved.join('.'), next, branch);
+            console.log(`Issue: ${issue}`);
+            const { data: head } = await github(`/repos/${REPO}/git/ref/heads/develop`);
+            // 422: the branch is left over from an interrupted run; carry on with it.
+            await github(`/repos/${REPO}/git/refs`, 'POST', {
+              ref: `refs/heads/${branch}`, sha: head.object.sha,
+            }, [422]);
+            const onBranch = await readConfig(branch);
+            if (VERSION_LINE.exec(onBranch.source)?.[1] !== next) {
+              await github(`/repos/${REPO}/contents/${FILE}`, 'PUT', {
+                message: `chore(mobile): bump app version to ${next} ${issue}`,
+                content: Buffer.from(onBranch.source.replace(VERSION_LINE, `  version: '${next}',`)).toString('base64'),
+                sha: onBranch.sha,
+                branch,
+              });
+            }
+            const { data: pr } = await github(`/repos/${REPO}/pulls`, 'POST', {
+              title: `chore(mobile): bump app version to ${next} ${issue}`,
+              head: branch,
+              base: 'develop',
+              body: [
+                `App Store review approved iOS ${approved.join('.')}, so App Store Connect closed its train:`,
+                'TestFlight uploads of that version now fail with "Invalid Pre-Release Train", and its builds',
+                'cannot be submitted for external testing. This moves `app.config.ts` to the next patch',
+                `version, ${next}. Change it to a minor or major version here if this release calls for one.`,
+                '',
+                'Opened by the EE Mobile Version Bump workflow in teable-enterprise',
+                '(source: `.github/enterprise-ci/ee-mobile-version-bump.yaml`).',
+              ].join('\n'),
+            });
+            console.log(`Opened ${pr.html_url}`);
+          })().catch(error => { console.error(error.message); process.exitCode = 1; });
+          NODE
