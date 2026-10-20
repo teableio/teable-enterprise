@@ -138,27 +138,17 @@ jobs:
       - name: 📥 Monorepo install
         uses: ./.github/actions/pnpm-install
 
-      # Community db-main-prisma imports named exports from @prisma/client,
-      # which only exist after generation; without this the import/export lint rule fails.
-      - name: 🧩 Generate Prisma Client
+      # import-js/order tells workspace packages from npm ones by resolving them,
+      # and @teable/* packages resolve through their built dist.
+      - name: 🏗 Build community lint dependencies
         run: |
           mkdir -p "$LOG_DIR"
           status=0
           {
-            echo "=== prisma generate (community) ==="
-            pnpm -F @teable/db-main-prisma prisma-generate-ci
-          } >> "$LOG_DIR/lint-eslint.log" 2>&1 || status=$?
-          echo "prisma generate exit=$status ($(wc -l < "$LOG_DIR/lint-eslint.log") log lines)"
-          exit $status
-
-      - name: 🏗 Build community lint dependencies
-        run: |
-          status=0
-          {
             echo "=== build plugin deps ==="
             pnpm -r --filter "@teable/plugin^..." --sort --workspace-concurrency=4 run build
-          } >> "$LOG_DIR/lint-eslint.log" 2>&1 || status=$?
-          echo "deps build exit=$status ($(wc -l < "$LOG_DIR/lint-eslint.log") log lines)"
+          } >> "$LOG_DIR/lint-oxlint.log" 2>&1 || status=$?
+          echo "deps build exit=$status ($(wc -l < "$LOG_DIR/lint-oxlint.log") log lines)"
           exit $status
 
       - name: 🔬 Linter
@@ -174,9 +164,9 @@ jobs:
           wait $p3 || status=1
           wait $p4 || status=1
           for part in ee community styles-ee styles-community; do
-            { echo "=== lint ($part) ==="; cat "$LOG_DIR/li-$part.log"; } >> "$LOG_DIR/lint-eslint.log"
+            { echo "=== lint ($part) ==="; cat "$LOG_DIR/li-$part.log"; } >> "$LOG_DIR/lint-oxlint.log"
           done
-          echo "lint exit=$status ($(wc -l < "$LOG_DIR/lint-eslint.log") log lines total)"
+          echo "lint exit=$status ($(wc -l < "$LOG_DIR/lint-oxlint.log") log lines total)"
           exit $status
 
       - name: 📤 Ship log
@@ -186,14 +176,14 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           mkdir -p "$LOG_DIR"
-          [ -f "$LOG_DIR/lint-eslint.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/lint-eslint.log"
+          [ -f "$LOG_DIR/lint-oxlint.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/lint-oxlint.log"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/lint-eslint.log" -R "$LOGS_REPO" --clobber
+          gh release upload "$LOG_TAG" "$LOG_DIR/lint-oxlint.log" -R "$LOGS_REPO" --clobber
           # Failure marker — the conclude step tails only marked logs instead
           # of guessing from log text (which false-positived on ERROR noise).
           if [ "$JOB_STATUS" != "success" ]; then
-            echo failed > "$LOG_DIR/lint-eslint.failed"
-            gh release upload "$LOG_TAG" "$LOG_DIR/lint-eslint.failed" -R "$LOGS_REPO" --clobber
+            echo failed > "$LOG_DIR/lint-oxlint.failed"
+            gh release upload "$LOG_TAG" "$LOG_DIR/lint-oxlint.failed" -R "$LOGS_REPO" --clobber
           fi
 
   verdict:
