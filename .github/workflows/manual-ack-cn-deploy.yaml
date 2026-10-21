@@ -551,7 +551,10 @@ jobs:
             esac
             sleep 10
           done
-          kubectl -n "${ACK_CN_APP_NAMESPACE}" wait --for=condition=complete "job/${job}" --timeout=1s
+          # Final assertion (also catches the loop running out). Not 1s: from a
+          # GitHub runner to the Hangzhou API server, kubectl's connection setup
+          # and discovery alone take longer, so an already-Complete Job timed out.
+          kubectl -n "${ACK_CN_APP_NAMESPACE}" wait --for=condition=complete "job/${job}" --timeout=60s
           kubectl -n "${ACK_CN_APP_NAMESPACE}" logs "job/${job}" --tail=20 || true
 
       - name: Update application deployment
