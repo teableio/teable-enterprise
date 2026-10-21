@@ -1,10 +1,9 @@
 name: Manual ACK CN Deploy
 
-# teable.cn on Aliyun ACK (cluster teable-cn-app, namespace teable-app) — the
-# successor of manual-sealos-deploy.yaml for the Sealos -> Aliyun migration.
-# Same inputs/outputs/secrets contract, so at cutover callers (rollback-launch,
-# Release Publisher) only switch the workflow path. Until then nothing calls it:
-# it is dispatched by hand against the rehearsal environment.
+# teable.cn on Aliyun ACK (cluster teable-cn-app, namespace teable-app). Serves
+# production since the 2026-10-20 cutover from Sealos and replaces
+# manual-sealos-deploy.yaml: same inputs/outputs/secrets contract, called by
+# rollback-launch (workflow_call) and dispatched by Release Publisher.
 #
 # Differences from the Sealos leg:
 #   - Cluster access via GitHub OIDC -> RAM role teable-cn-app-github-deploy
@@ -56,10 +55,10 @@ on:
         required: false
         default: ''
       record_launch:
-        description: 'Create and finalize Teable Launch records in this workflow (off for rehearsal runs)'
+        description: 'Create and finalize Teable Launch records in this workflow'
         required: false
         type: boolean
-        default: false
+        default: true
   workflow_call:
     inputs:
       image_tag:
@@ -299,7 +298,7 @@ jobs:
   # Same image patch as manual-sealos-deploy (both legs stamp the same
   # release tag with the same CDN origin; the label check makes it
   # idempotent), but the patched static goes to the OSS public bucket that
-  # sss.teable.cn will use as origin after cutover. Caveats as in the Sealos
+  # sss.teable.cn uses as origin. Caveats as in the Sealos
   # leg: an AI launch's sync-aliyun overwrites the patch — re-run to re-patch.
   patch-cdn:
     name: Patch image for CN CDN
@@ -516,6 +515,11 @@ jobs:
             backoffLimit: 0
             ttlSecondsAfterFinished: 3600
             template:
+              metadata:
+                annotations:
+                  # The app pool also has elastic nodes; keep cluster-autoscaler
+                  # from evicting the Job on scale-down (backoffLimit is 0).
+                  cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
               spec:
                 restartPolicy: Never
                 nodeSelector:
