@@ -424,6 +424,7 @@ jobs:
             --access-key-id "${ALIBABA_CLOUD_ACCESS_KEY_ID}" \
             --access-key-secret "${ALIBABA_CLOUD_ACCESS_KEY_SECRET}" \
             --sts-token "${ALIBABA_CLOUD_SECURITY_TOKEN}" \
+            --region "${ACK_CN_APP_REGION}" \
             -e "oss-${ACK_CN_APP_REGION}.aliyuncs.com"
           echo "uploaded $(find ./static-out -type f | wc -l) files from ${SOURCE_IMAGE}"
 
