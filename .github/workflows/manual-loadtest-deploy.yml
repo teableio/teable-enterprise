@@ -1,0 +1,333 @@
+# Loadtest environment follows staging: every staging run that rolled a build
+# out deploys the same build there, so load tests run against what staging
+# just accepted.
+#
+# Standalone on purpose: it only listens to Manual ECS Staging Deploy
+# (workflow_run) and changes nothing in it. A failure here never touches
+# staging, its release record or its notifications.
+#
+# This repository is public. Every identifier of the environment (RAM role,
+# cluster, bastion, region, namespace, Deployment, URL) comes from the
+# LOADTEST_DEPLOY_CONFIG secret and is masked before use, so none of them
+# appears in this file or in the run logs. The secret is a JSON object:
+#   role_arn, oidc_provider_arn, region, cluster_id, bastion_id,
+#   namespace, app_deployment, migrate_label, health_url
+#
+#   - Cluster access via GitHub OIDC -> RAM role (AssumeRoleWithOIDC, 1h STS;
+#     the role trusts refs/heads/main only and is namespace-scoped in the
+#     cluster). The API server has no public endpoint, so kubectl goes
+#     through a Cloud Assistant port forward on a bastion.
+#   - Order: migration Job -> sandbox and app images -> rollouts (both undone
+#     if either fails; migrations are forward-only) -> public /health.
+#   - Automatic runs leave the environment alone when the namespace carries
+#     teable.io/auto-update=paused, when the app image was changed by hand
+#     since the last deploy from here (e.g. a custom build under load test),
+#     or when the build is not newer than the live one. workflow_dispatch with
+#     force bypasses all three (rollback, or taking the environment back).
+name: Manual Loadtest Deploy
+
+on:
+  workflow_run:
+    workflows: ['Manual ECS Staging Deploy']
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag (beta-<ts>.<seq> or release.<ts>.<seq>)'
+        required: true
+      force:
+        description: 'Deploy even if paused, changed by hand, or not newer than the live build'
+        type: boolean
+        default: false
+
+permissions: {}
+
+env:
+  APP_IMAGE: ghcr.io/teableio/teable-cloud
+  SANDBOX_IMAGE: ghcr.io/teableio/teable-sandbox-cloud
+
+jobs:
+  resolve:
+    name: Resolve build
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+    steps:
+      - name: Resolve the image tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          INPUT_TAG: ${{ inputs.image_tag }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            TAG="$INPUT_TAG"
+          else
+            JOBS=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100")
+            # A staging run that lost the EKS ordering guard ends green but
+            # skips its rollout; the newer run that won will trigger us.
+            ROLLED=$(jq -r '.jobs[] | select(.name == "Deploy to Staging EKS")
+              | .steps[] | select(.name == "Wait for rollouts") | .conclusion' <<<"$JOBS")
+            if [ "$ROLLED" != success ]; then
+              echo "::notice::staging run ${RUN_ID} did not roll out a build; nothing to follow"
+              exit 0
+            fi
+            # The registry tag (beta twin of the release id) is only printed
+            # by the prepare job: "Deploying registry tag: <tag>". Match the
+            # tag itself; the log also echoes the script line with the variable.
+            PREP=$(jq -r '.jobs[] | select(.name == "Prepare Deployment") | .id' <<<"$JOBS")
+            TAG=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${REPO}/actions/jobs/${PREP}/logs" \
+              | grep -oE 'Deploying registry tag: (beta-|release\.)[0-9T-]+Z\.[0-9]+' | head -1 | awk '{print $4}' || true)
+            if [ -z "$TAG" ]; then
+              echo "::error::no 'Deploying registry tag' line in staging run ${RUN_ID} (job ${PREP})"
+              exit 1
+            fi
+          fi
+          if ! [[ "$TAG" =~ ^(beta-|release\.)[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z\.[0-9]+$ ]]; then
+            echo "::error::unexpected image tag '${TAG}'"
+            exit 1
+          fi
+          echo "image_tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Following ${TAG}"
+
+  deploy:
+    name: Deploy to loadtest
+    needs: resolve
+    if: needs.resolve.outputs.image_tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # One deploy at a time, queued at the job so staging runs that resolve to
+    # nothing never take the single pending slot from one that has a build.
+    concurrency:
+      group: loadtest-deploy
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      TAG: ${{ needs.resolve.outputs.image_tag }}
+      FORCE: ${{ (github.event_name == 'workflow_dispatch' && inputs.force) && 'true' || 'false' }}
+    steps:
+      - name: Load the environment config (masked)
+        env:
+          CONFIG: ${{ secrets.LOADTEST_DEPLOY_CONFIG }}
+        run: |
+          set -euo pipefail
+          KEYS="role_arn oidc_provider_arn region cluster_id bastion_id namespace app_deployment migrate_label health_url"
+          for key in $KEYS; do
+            if ! VALUE=$(jq -er --arg k "$key" '.[$k] | strings | select(length > 0)' <<<"$CONFIG" 2>/dev/null); then
+              echo "::error::secret LOADTEST_DEPLOY_CONFIG is missing or has no '${key}' (needs: ${KEYS})"
+              exit 1
+            fi
+            echo "::add-mask::${VALUE}"
+            NAME=$(tr '[:lower:]' '[:upper:]' <<<"$key")
+            echo "LT_${NAME}=${VALUE}" >> "$GITHUB_ENV"
+          done
+
+      - name: Checkout scripts
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Aliyun STS via GitHub OIDC
+        run: |
+          ALIYUN_ROLE_ARN="$LT_ROLE_ARN" ALIYUN_OIDC_PROVIDER_ARN="$LT_OIDC_PROVIDER_ARN" \
+            bash .github/scripts/aliyun-oidc-login.sh
+
+      - name: Open the cluster API tunnel via the bastion
+        env:
+          LOCAL_PORT: '16544'
+        run: |
+          set -euo pipefail
+          umask 077
+          KC="$RUNNER_TEMP/loadtest-kubeconfig"
+          # ali-instance-cli does not read credentials from the environment;
+          # both tools get one private config file instead of argv.
+          CFG="$RUNNER_TEMP/aliyun-sts.json"
+          jq -n --arg ak "$ALIBABA_CLOUD_ACCESS_KEY_ID" --arg sk "$ALIBABA_CLOUD_ACCESS_KEY_SECRET" \
+            --arg st "$ALIBABA_CLOUD_SECURITY_TOKEN" --arg region "$LT_REGION" \
+            '{current: "sts", profiles: [{name: "sts", mode: "StsToken", access_key_id: $ak,
+              access_key_secret: $sk, sts_token: $st, region_id: $region}]}' > "$CFG"
+          CLI="$RUNNER_TEMP/ali-instance-cli"
+          curl -fsSL -o "$CLI" https://aliyun-client-assist.oss-accelerate.aliyuncs.com/session-manager/linux/ali-instance-cli
+          chmod +x "$CLI"
+          aliyun cs GET "/k8s/${LT_CLUSTER_ID}/user_config" --PrivateIpAddress true --region "$LT_REGION" \
+            --profile sts --config-path "$CFG" | jq -r '.config' > "$KC"
+          EP=$(KUBECONFIG="$KC" kubectl config view -o jsonpath='{.clusters[0].cluster.server}')
+          EP=${EP#https://}
+          test -n "$EP"
+          echo "::add-mask::${EP%%:*}"
+          nohup "$CLI" portforward -i "$LT_BASTION_ID" -r "$EP" -l "$LOCAL_PORT" --region "$LT_REGION" \
+            --profile sts --config-path "$CFG" > "$RUNNER_TEMP/tunnel.log" 2>&1 &
+          for _ in $(seq 1 30); do grep -q "Waiting for connections" "$RUNNER_TEMP/tunnel.log" && break; sleep 1; done
+          # The tunnel log names private endpoints; this log is public, so no cat on failure.
+          grep -q "Waiting for connections" "$RUNNER_TEMP/tunnel.log" || { echo "::error::bastion port forward did not come up"; exit 1; }
+          KUBECONFIG="$KC" kubectl config set-cluster "$(KUBECONFIG="$KC" kubectl config view -o jsonpath='{.clusters[0].name}')" \
+            --server="https://127.0.0.1:${LOCAL_PORT}" --tls-server-name=kubernetes >/dev/null
+          KUBECONFIG="$KC" kubectl version --request-timeout=30s >/dev/null
+          echo "KUBECONFIG=$KC" >> "$GITHUB_ENV"
+
+      - name: Decide whether to deploy
+        id: guard
+        run: |
+          set -euo pipefail
+          k() { kubectl -n "$LT_NAMESPACE" --request-timeout=30s "$@"; }
+          decide() {
+            { echo "proceed=$1"; echo "reason=$2"; } >> "$GITHUB_OUTPUT"
+            [ "$1" = true ] && echo "deploying ${TAG}: $2" || echo "::notice::skipped ${TAG}: $2"
+            exit 0
+          }
+          LIVE=$(k get deploy "$LT_APP_DEPLOYMENT" -o jsonpath='{.spec.template.spec.containers[?(@.name=="teable")].image}')
+          OURS=$(k get deploy "$LT_APP_DEPLOYMENT" -o jsonpath='{.metadata.annotations.teable\.io/deploy-release}')
+          PAUSE=$(kubectl --request-timeout=30s get ns "$LT_NAMESPACE" -o jsonpath='{.metadata.annotations.teable\.io/auto-update}')
+          echo "live app image: ${LIVE}; last deployed from here: ${OURS:-none}"
+          if [ "$FORCE" = true ]; then
+            decide true "forced by ${GITHUB_ACTOR}"
+          fi
+          if [ "$PAUSE" = paused ]; then
+            decide false "auto-update is paused on the namespace"
+          fi
+          if [ -z "$OURS" ]; then
+            # Nothing deployed from here yet: adopt the live build if it is a plain build tag.
+            OURS=${LIVE#"${APP_IMAGE}:"}
+            if ! [[ "$OURS" =~ ^(beta-|release\.)[0-9T-]+Z\.[0-9]+$ ]]; then
+              decide false "the live app image is not a build tag (changed by hand)"
+            fi
+          elif [ "$LIVE" != "${APP_IMAGE}:${OURS}" ]; then
+            decide false "the app image was changed by hand after ${OURS}"
+          fi
+          # Builds order by timestamp, then sequence: <ts>.<seq> after the prefix.
+          key() { local t=${1#beta-}; echo "${t#release.}"; }
+          if [ "$(key "$TAG")" = "$(key "$OURS")" ]; then
+            decide false "already live"
+          fi
+          NEWEST=$(printf '%s\n%s\n' "$(key "$OURS")" "$(key "$TAG")" | sort -t. -k1,1 -k2,2n | tail -1)
+          if [ "$NEWEST" != "$(key "$TAG")" ]; then
+            decide false "older than the live ${OURS}"
+          fi
+          decide true "newer than ${OURS}"
+
+      - name: Migrate, then roll sandbox and app
+        if: steps.guard.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+          k() { kubectl -n "$LT_NAMESPACE" --request-timeout=30s "$@"; }
+          APP="$LT_APP_DEPLOYMENT"
+          JOB="loadtest-migrate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          # ── DB migration Job, built from the app Deployment's pod template:
+          # pull secrets, node placement and the env source come from there,
+          # so nothing about the environment lives in this file. The pod runs
+          # as the image's default user like the staging Job (user settings
+          # are not copied); the label lets the namespace NetworkPolicy reach
+          # the database. ──
+          k delete job "$JOB" --ignore-not-found >/dev/null
+          k get deploy "$APP" -o json | jq --arg job "$JOB" --arg ns "$LT_NAMESPACE" \
+            --arg img "${APP_IMAGE}:${TAG}" --arg label "$LT_MIGRATE_LABEL" '
+            .spec.template.spec as $p
+            | ($p.containers[] | select(.name == "teable")) as $c
+            | {apiVersion: "batch/v1", kind: "Job",
+               metadata: {name: $job, namespace: $ns},
+               spec: {backoffLimit: 0, ttlSecondsAfterFinished: 7200, activeDeadlineSeconds: 900,
+                 template: {metadata: {labels: {"app.kubernetes.io/name": $label}},
+                   spec: {restartPolicy: "Never",
+                     automountServiceAccountToken: $p.automountServiceAccountToken,
+                     imagePullSecrets: $p.imagePullSecrets, nodeSelector: $p.nodeSelector,
+                     tolerations: $p.tolerations,
+                     securityContext: {seccompProfile: {type: "RuntimeDefault"}},
+                     containers: [{name: "migrate", image: $img, imagePullPolicy: "IfNotPresent",
+                       args: ["migrate-only"], envFrom: $c.envFrom, env: $c.env,
+                       resources: {requests: {cpu: "250m", memory: "1Gi"}, limits: {cpu: "2", memory: "3Gi"}},
+                       securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}}]}}}}
+            | del(.. | nulls)' | k create -f - >/dev/null
+          echo "waiting for migration job ${JOB}..."
+          DEADLINE=$((SECONDS + 900)); ST=""
+          while :; do
+            ST=$(k get job "$JOB" -o jsonpath='{.status.conditions[?(@.status=="True")].type}' 2>/dev/null || true)
+            case "$ST" in *Complete*|*Failed*) break ;; esac
+            WAIT=$(k get pods -l "batch.kubernetes.io/job-name=${JOB}" \
+              -o jsonpath='{.items[*].status.containerStatuses[*].state.waiting.reason}' 2>/dev/null || true)
+            if [[ "$WAIT" =~ ErrImagePull|ImagePullBackOff|InvalidImageName|CreateContainerConfigError ]]; then
+              k delete job "$JOB" --wait=false >/dev/null || true
+              echo "::error::migration pod cannot start (${WAIT}); is ${TAG} on ghcr?"
+              exit 1
+            fi
+            if [ "$SECONDS" -ge "$DEADLINE" ]; then
+              echo "::error::migration timed out"
+              exit 1
+            fi
+            sleep 5
+          done
+          # Summary lines only: this log is public and the full one names the database host.
+          k logs "job/${JOB}" | grep -E 'migrations? found|No pending|Applying|applied|completed successfully' | head -20 || true
+          if [[ "$ST" != *Complete* ]]; then
+            echo "::error::migration failed; app untouched (job ${JOB} is kept for 2h)"
+            exit 1
+          fi
+          echo "migration completed"
+
+          # ── Images: the app image and the deploy-release record change in one
+          # patch, so a later run can tell our deploys from changes by hand ──
+          PREV=$(k get deploy "$APP" -o jsonpath='{.metadata.annotations.teable\.io/deploy-release}')
+          rollback() {
+            echo "::error::$1; undoing both rollouts (migrations stay applied)"
+            k rollout undo deploy/teable-sandbox >/dev/null || true
+            k rollout undo deploy/"$APP" >/dev/null || true
+            if [ -n "$PREV" ]; then
+              k annotate --overwrite deploy/"$APP" teable.io/deploy-release="$PREV" >/dev/null || true
+            else
+              k annotate deploy/"$APP" teable.io/deploy-release- >/dev/null || true
+            fi
+            exit 1
+          }
+          k set image deploy/teable-sandbox sandbox="${SANDBOX_IMAGE}:${TAG}" >/dev/null
+          k patch deploy/"$APP" --type=strategic -p "$(jq -nc --arg tag "$TAG" --arg img "${APP_IMAGE}:${TAG}" \
+            '{metadata: {annotations: {"teable.io/deploy-release": $tag}},
+              spec: {template: {spec: {containers: [{name: "teable", image: $img}]}}}}')" >/dev/null
+          # rollout status is a long watch; no --request-timeout
+          kubectl -n "$LT_NAMESPACE" rollout status deploy/teable-sandbox --timeout=600s || rollback "sandbox rollout failed"
+          kubectl -n "$LT_NAMESPACE" rollout status deploy/"$APP" --timeout=900s || rollback "app rollout failed"
+
+      - name: Smoke check through the ingress
+        if: steps.guard.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 10); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$LT_HEALTH_URL" || true)
+            [ "$code" = "200" ] && echo "loadtest /health: 200" && exit 0
+            echo "attempt $i: $code"; sleep 6
+          done
+          echo "::error::loadtest /health never returned 200 after the rollout"
+          exit 1
+
+      - name: Summary
+        if: always()
+        env:
+          PROCEED: ${{ steps.guard.outputs.proceed }}
+          REASON: ${{ steps.guard.outputs.reason }}
+          STATUS: ${{ job.status }}
+        run: |
+          {
+            echo "### Loadtest deploy \`${TAG}\`"
+            if [ "$PROCEED" = false ]; then
+              echo "Skipped: ${REASON}."
+            elif [ "$STATUS" = success ]; then
+              echo "Deployed (${REASON})."
+            else
+              echo "Failed at the step marked above."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
