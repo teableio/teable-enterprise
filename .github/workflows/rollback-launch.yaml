@@ -63,7 +63,12 @@ jobs:
     name: Roll back teable.cn Cloud
     needs: validate-lock
     if: inputs.region == 'teable.cn'
-    uses: ./.github/workflows/manual-sealos-deploy.yaml
+    # teable.cn runs on Aliyun ACK since the 2026-10-20 cutover. The ACK leg
+    # gets cluster and OSS access via GitHub OIDC, and a called workflow can't
+    # be granted id-token: write unless the caller job allows it; write-all
+    # keeps the permissive defaults this job had and adds id-token.
+    permissions: write-all
+    uses: ./.github/workflows/manual-ack-cn-deploy.yaml
     with:
       image_tag: ${{ inputs.image_tag }}
       trigger: ${{ inputs.trigger }}
