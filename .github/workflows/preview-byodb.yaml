@@ -9,9 +9,11 @@ name: Preview BYODB
 # sync-ci-to-enterprise.yml). The scripts come from the PR's own ref, exactly
 # like the preview deploy workflows, so a PR can validate its own version.
 #
-# This covers the legacy full previews only (teable-pr-cloud-<N> /
-# teable-pr-ee-<N>, ns-38puz7wo). Preview-pool instances live in the infra
-# cluster and are not reachable with this repository's kubeconfig.
+# This covers the PR previews on the CN test cluster (teable-pr-cloud-<N> /
+# teable-pr-ee-<N>, namespace teable-preview, deployed by preview-ack.yml).
+# Cluster access goes through GitHub OIDC (cn-test-kubeconfig.sh in this
+# repository). Preview-pool instances live in the infra cluster and are not
+# reachable from here.
 
 on:
   repository_dispatch:
@@ -29,9 +31,15 @@ jobs:
     # 30 min waiting for the preview deployment to appear + a rollout + a slow
     # baseline; a hung preview must not hold a runner for hours.
     timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
     env:
       PR_NUMBER: ${{ github.event.client_payload.pr_number }}
       PR_REF: ${{ github.event.client_payload.ref }}
+      PREVIEW_DOMAIN_BASE: ${{ vars.PREVIEW_DOMAIN_BASE || 'preview.teable.cn' }}
+      ALIYUN_ROLE_ARN: ${{ vars.CN_TEST_DEPLOY_ROLE_ARN || 'acs:ram::1145786521954482:role/teable-cn-test-github-deploy' }}
+      ALIYUN_OIDC_PROVIDER_ARN: ${{ vars.CN_TEST_OIDC_PROVIDER_ARN || 'acs:ram::1145786521954482:oidc-provider/github-actions' }}
     steps:
       # The label, not the dispatch payload, decides the edition: an EE preview
       # may exist next to a cloud one, and the label is what the operator set.
@@ -60,21 +68,24 @@ jobs:
               );
             }
 
+      - name: Checkout cluster access scripts
+        uses: actions/checkout@v4
+
       - name: Checkout teable-ee at the PR ref
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
           token: ${{ secrets.PACKAGES_KEY }}
           ref: ${{ github.event.client_payload.ref }}
+          path: teable-ee
 
-      - name: Prepare kubeconfig
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        run: |
-          mkdir -p "${RUNNER_TEMP}/kube"
-          printf '%s' "${KUBE_CONFIG}" | base64 -d > "${RUNNER_TEMP}/kube/config"
-          chmod 600 "${RUNNER_TEMP}/kube/config"
-          echo "KUBECONFIG=${RUNNER_TEMP}/kube/config" >> "$GITHUB_ENV"
+      - name: Get Aliyun STS credentials via OIDC
+        run: bash .github/scripts/aliyun-oidc-login.sh
+
+      # Sets the context's default namespace to teable-preview, which is where
+      # the kubectl calls below (and in preview-byodb.sh) look.
+      - name: Fetch cluster kubeconfig
+        run: bash .github/scripts/cn-test-kubeconfig.sh
 
       # `preview-byodb` is normally added together with `preview-cloud` /
       # `preview-ee`, and both labels dispatch immediately while the preview
@@ -94,11 +105,8 @@ jobs:
           OPT_OUT_WAIT_MINUTES: '20'
         run: |
           set -euo pipefail
-          # No `-n`: the deploy workflows apply and roll out in the kubeconfig's
-          # default namespace (ns-38puz7wo), and `38puz7wo` is only the bare id
-          # the template renders into service DNS. Passing it to kubectl looked
-          # for the deployment in a namespace that holds nothing, so the first
-          # live run waited out its deadline on a healthy preview.
+          # No `-n`: cn-test-kubeconfig.sh points the context at the preview
+          # namespace (teable-preview).
           deadline=$(( $(date -u +%s) + WAIT_MINUTES * 60 ))
           instance=""
           while :; do
@@ -154,13 +162,13 @@ jobs:
             sleep 15
           done
           echo "INSTANCE_NAME=${instance}" >> "$GITHUB_ENV"
-          echo "PREVIEW_URL=https://${instance}.sealoshzh.site" >> "$GITHUB_ENV"
+          echo "PREVIEW_URL=https://${instance}.${PREVIEW_DOMAIN_BASE}" >> "$GITHUB_ENV"
 
       # Logic lives in teable-ee: .github/scripts/preview-byodb.sh (runner) and
       # preview-byodb-pod.sh (runs inside the app container).
       - name: Provision the BYODB database and space
         id: byodb
-        run: bash .github/scripts/preview-byodb.sh
+        run: bash teable-ee/.github/scripts/preview-byodb.sh
 
       - name: Comment the result on the PR
         if: always()
