@@ -150,7 +150,7 @@ jobs:
             for image in "${IMAGES[@]}"; do
               for tag in "${TAGS[@]}"; do
                 [ -n "$tag" ] || continue
-                # teable.cn's manual-sealos-deploy patches teable-cloud:<release>
+                # teable.cn's manual-ack-cn-deploy patches teable-cloud:<release>
                 # in place on Aliyun for the CN CDN. Re-copying the clean ghcr
                 # image over it reverts that patch (whichever launch wrote last
                 # won), so a release tag already on Aliyun is left alone, the

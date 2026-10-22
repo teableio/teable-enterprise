@@ -692,13 +692,13 @@ jobs:
           done
 
   # Aliyun receives images ONLY at release time. The official release.<id>
-  # must ship alongside latest: teable.cn (manual-sealos-deploy) deploys
+  # must ship alongside latest: teable.cn (manual-ack-cn-deploy) deploys
   # that pinned tag from Aliyun, and the sync's cloud lane also carries the
   # canonical agent tag that CN sandboxes pull.
   sync-aliyun:
     needs: [stamp-release, promote-latest]
     if: needs.promote-latest.result == 'success'
-    # Same group as manual-sealos-deploy's ensure-aliyun for this tag, so the
+    # Same group as manual-ack-cn-deploy's ensure-aliyun for this tag, so the
     # two launches upload the shared layers once instead of racing.
     concurrency:
       group: aliyun-upload-${{ inputs.image_tag }}

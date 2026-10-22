@@ -1,11 +1,12 @@
 name: Manual ACK CN Deploy
 
 # teable.cn on Aliyun ACK (cluster teable-cn-app, namespace teable-app). Serves
-# production since the 2026-10-20 cutover from Sealos and replaces
-# manual-sealos-deploy.yaml: same inputs/outputs/secrets contract, called by
-# rollback-launch (workflow_call) and dispatched by Release Publisher.
+# production since the 2026-10-20 cutover from Sealos. It replaced the Sealos
+# leg (manual-sealos-deploy.yaml, since removed) and kept its inputs/outputs/
+# secrets contract; called by rollback-launch (workflow_call) and dispatched by
+# Release Publisher.
 #
-# Differences from the Sealos leg:
+# Differences from the former Sealos leg:
 #   - Cluster access via GitHub OIDC -> RAM role teable-cn-app-github-deploy
 #     (AssumeRoleWithOIDC, 1h STS); no KUBE_CONFIG. The role trusts
 #     refs/heads/main only; callers must grant `id-token: write`.
@@ -14,7 +15,7 @@ name: Manual ACK CN Deploy
 #   - Patched _next/static goes to the OSS public bucket (CDN origin after
 #     cutover) with the same STS credentials; no SEALOS_OBJECTSTORAGE_* keys.
 #     Uploaded on every run, even when the image was already patched by the
-#     Sealos leg (whose fast path skips its own upload).
+#     former Sealos leg (release tags from before the cutover).
 
 on:
   workflow_dispatch:
@@ -295,11 +296,11 @@ jobs:
       best_effort: true
     secrets: inherit
 
-  # Same image patch as manual-sealos-deploy (both legs stamp the same
-  # release tag with the same CDN origin; the label check makes it
-  # idempotent), but the patched static goes to the OSS public bucket that
-  # sss.teable.cn uses as origin. Caveats as in the Sealos
-  # leg: an AI launch's sync-aliyun overwrites the patch — re-run to re-patch.
+  # Stamps the release tag on Aliyun with the CDN origin (the label check
+  # makes it idempotent, also for tags the former Sealos leg patched with the
+  # same origin) and uploads the patched static to the OSS public bucket that
+  # sss.teable.cn uses as origin. Caveat: an AI launch's sync-aliyun overwrites
+  # the patch — re-run to re-patch.
   patch-cdn:
     name: Patch image for CN CDN
     needs: ensure-aliyun
@@ -406,8 +407,8 @@ jobs:
         if: steps.existing.outputs.exists == 'true' || steps.patch.outputs.patched == 'true'
         run: bash .github/scripts/aliyun-oidc-login.sh
 
-      # Runs on the fast path too: when the Sealos leg patched this tag first,
-      # its own upload went to the Sealos bucket only.
+      # Runs on the fast path too: a tag patched by the former Sealos leg had
+      # its static uploaded to the Sealos bucket only.
       - name: Upload patched static assets to the OSS public bucket (append-only)
         if: steps.existing.outputs.exists == 'true' || steps.patch.outputs.patched == 'true'
         env:
