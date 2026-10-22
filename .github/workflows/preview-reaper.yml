@@ -2,9 +2,10 @@ name: Preview Reaper
 
 # Frees the CN test cluster (namespace teable-preview) from previews nobody uses.
 # A preview is reaped when its pull request is no longer open, or when it has gone
-# PREVIEW_MAX_IDLE_DAYS (default 3) without a deploy. preview-ack.yml stamps
-# teable.io/deployed-at on every deploy, so every push resets the clock; PR comments
-# and label edits do not.
+# PREVIEW_MAX_IDLE_DAYS (default 3) without a deploy. The check runs every 6 hours,
+# so an idle preview goes 3 days to 3 days 6 hours after its last deploy.
+# preview-ack.yml stamps teable.io/deployed-at on every deploy, so every push resets
+# the clock; PR comments and label edits do not.
 #
 # An idle preview of an open PR also loses its preview-<edition> label, so the label
 # keeps meaning "this PR has a preview", and the PR gets a comment on how to bring it
@@ -13,7 +14,7 @@ name: Preview Reaper
 
 on:
   schedule:
-    - cron: '23 * * * *'
+    - cron: '23 */6 * * *'
   workflow_dispatch:
     inputs:
       max_age_days:
