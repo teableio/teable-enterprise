@@ -35,15 +35,29 @@ jobs:
   reap:
     name: Delete expired preview environments
     runs-on: ubuntu-latest
+    # CN test cluster (ACK teable-cn-test). Sealos, where previews used to live, is gone.
+    permissions:
+      contents: read
+      id-token: write
     env:
-      KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-      NAMESPACE: ns-38puz7wo
+      NAMESPACE: teable-preview
       MAX_AGE_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_age_days || '7' }}
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
       TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.target || 'all' }}
-      PREVIEW_LABEL: cloud.sealos.io/deploy-on-sealos
+      PREVIEW_LABEL: teable.io/preview-instance
       GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+      ALIYUN_ROLE_ARN: ${{ vars.CN_TEST_DEPLOY_ROLE_ARN || 'acs:ram::1145786521954482:role/teable-cn-test-github-deploy' }}
+      ALIYUN_OIDC_PROVIDER_ARN: ${{ vars.CN_TEST_OIDC_PROVIDER_ARN || 'acs:ram::1145786521954482:oidc-provider/github-actions' }}
     steps:
+      - name: Checkout cluster access scripts
+        uses: actions/checkout@v4
+
+      - name: Get Aliyun STS credentials via OIDC
+        run: bash .github/scripts/aliyun-oidc-login.sh
+
+      - name: Fetch cluster kubeconfig
+        run: bash .github/scripts/cn-test-kubeconfig.sh
+
       - name: Reap expired previews
         run: |
           set -euo pipefail
@@ -65,10 +79,6 @@ jobs:
               exit 1
               ;;
           esac
-
-          mkdir -p ~/.kube
-          echo "${KUBE_CONFIG}" | base64 -d > ~/.kube/config
-          trap 'rm -f ~/.kube/config' EXIT
 
           cutoff_epoch="$(
             python3 - "${MAX_AGE_DAYS}" <<'PY'
@@ -215,25 +225,18 @@ jobs:
 
           kubectl api-resources --namespaced=true --verbs=list,delete -o name > "${resource_names_file}"
 
+          # What a preview is made of (teable-ee preview-template.ack.yaml), all of which
+          # the CI role (teable-ci-deployer) may delete. PVCs go last: the StatefulSet
+          # deletes its own, this catches leftovers.
           resources=(
-            apps.app.sealos.io
-            instances.app.sealos.io
-            clusters.apps.kubeblocks.io
-            objectstoragebuckets.objectstorage.sealos.io
             deployments.apps
             statefulsets.apps
-            daemonsets.apps
-            replicasets.apps
             pods
             services
             ingresses.networking.k8s.io
             jobs.batch
-            cronjobs.batch
             secrets
             configmaps
-            serviceaccounts
-            roles.rbac.authorization.k8s.io
-            rolebindings.rbac.authorization.k8s.io
             persistentvolumeclaims
           )
 

@@ -1,0 +1,85 @@
+name: Cleanup Preview PR (CN test cluster)
+
+# Deletes a PR preview from the CN test cluster (namespace teable-preview). Every object
+# of a preview carries teable.io/preview-instance=teable-<instance>, so this deletes by
+# that label; the disk goes with its PVC (StorageClass reclaimPolicy Delete).
+# Replaces preview-cleanup-{cloud,ee}.yml.
+#
+# Trigger: workflow_dispatch while the CN test lane is being rehearsed; the teable-ee
+# events (cleanup on PR close, cleanup-cloud / cleanup-ee on label removal) move here
+# together with the deploy events.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: teable-ee pull request number
+        required: true
+        type: string
+      edition:
+        description: Which preview of that PR to delete
+        required: true
+        type: choice
+        options: [all, cloud, ee]
+        default: all
+
+permissions: {}
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PR_NUMBER: ${{ inputs.pr_number || github.event.client_payload.pr_number }}
+      # cleanup (PR closed) removes both editions; cleanup-cloud / cleanup-ee only one.
+      KINDS: ${{ inputs.edition == 'cloud' && 'cloud' || inputs.edition == 'ee' && 'ee' || github.event.action == 'cleanup-cloud' && 'cloud' || github.event.action == 'cleanup-ee' && 'ee' || 'cloud ee' }}
+      MERGED: ${{ github.event.client_payload.merged }}
+      ALIYUN_ROLE_ARN: ${{ vars.CN_TEST_DEPLOY_ROLE_ARN || 'acs:ram::1145786521954482:role/teable-cn-test-github-deploy' }}
+      ALIYUN_OIDC_PROVIDER_ARN: ${{ vars.CN_TEST_OIDC_PROVIDER_ARN || 'acs:ram::1145786521954482:oidc-provider/github-actions' }}
+    steps:
+      - name: Checkout cluster access scripts
+        uses: actions/checkout@v4
+
+      - name: Get Aliyun STS credentials via OIDC
+        run: bash .github/scripts/aliyun-oidc-login.sh
+
+      - name: Fetch cluster kubeconfig
+        run: bash .github/scripts/cn-test-kubeconfig.sh
+
+      - name: Delete preview resources
+        id: delete
+        run: |
+          set -euo pipefail
+          [[ "${PR_NUMBER}" =~ ^[0-9]+$ ]] || { echo "::error::invalid pr_number"; exit 1; }
+          deleted=""
+          for kind in ${KINDS}; do
+            instance="teable-pr-${kind}-${PR_NUMBER}"
+            selector="teable.io/preview-instance=${instance}"
+            if [ -z "$(kubectl get deployment,statefulset -l "${selector}" -o name)" ]; then
+              echo "no ${kind} preview for PR #${PR_NUMBER}"
+              continue
+            fi
+            echo "deleting ${instance}"
+            kubectl delete deployment,statefulset,service,ingress,secret,job -l "${selector}" --ignore-not-found --wait=true --timeout=180s
+            # The StatefulSet deletes its PVC (whenDeleted: Delete); this catches leftovers.
+            kubectl delete pvc -l "${selector}" --ignore-not-found --wait=false
+            deleted="${deleted} ${kind}"
+          done
+          echo "deleted=${deleted# }" >> "$GITHUB_OUTPUT"
+
+      - name: Comment on the PR
+        if: steps.delete.outputs.deleted != ''
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          DELETED: ${{ steps.delete.outputs.deleted }}
+        run: |
+          case "${MERGED}" in
+            true) why="merged" ;;
+            false) why="closed or unlabeled" ;;
+            *) why="cleaned up manually" ;;
+          esac
+          gh api "repos/teableio/teable-ee/issues/${PR_NUMBER}/comments" \
+            -f body="🧹 Preview environment cleanup: PR #${PR_NUMBER} ${why}; deleted the ${DELETED} preview(s) on the CN test cluster at $(date -u '+%Y-%m-%dT%H:%M:%SZ')."
