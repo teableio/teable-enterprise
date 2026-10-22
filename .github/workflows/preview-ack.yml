@@ -195,6 +195,7 @@ jobs:
       INSTANCE_NAME: pr-${{ inputs.edition || (startsWith(github.event.action, 'preview-ee') && 'ee' || 'cloud') }}-${{ inputs.pr_number || github.event.client_payload.pr_number }}
       IMAGE_TAG: ${{ needs.build-push.outputs.sha }}
       PREVIEW_DOMAIN_BASE: ${{ vars.PREVIEW_DOMAIN_BASE || 'preview.teable.cn' }}
+      PREVIEW_MAX_IDLE_DAYS: ${{ vars.PREVIEW_MAX_IDLE_DAYS || '3' }}
       ALIYUN_ROLE_ARN: ${{ vars.CN_TEST_DEPLOY_ROLE_ARN || 'acs:ram::1145786521954482:role/teable-cn-test-github-deploy' }}
       ALIYUN_OIDC_PROVIDER_ARN: ${{ vars.CN_TEST_OIDC_PROVIDER_ARN || 'acs:ram::1145786521954482:oidc-provider/github-actions' }}
     steps:
@@ -288,6 +289,10 @@ jobs:
           # The rendered manifest holds Secrets: write it to the runner, never print it.
           bash tooling/.github/scripts/render-preview-ack.sh > "${RUNNER_TEMP}/preview.yaml"
           kubectl apply -f "${RUNNER_TEMP}/preview.yaml"
+          # The reaper removes previews idle for PREVIEW_MAX_IDLE_DAYS since this stamp.
+          # Deployment metadata only, so it does not roll the pods.
+          kubectl annotate deployment "teable-${INSTANCE_NAME}" --overwrite \
+            "teable.io/deployed-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           if [ "${ENABLE_TRACING}" != "true" ]; then
             kubectl delete deployment,service,ingress "teable-${INSTANCE_NAME}-jaeger" --ignore-not-found
           fi
@@ -337,6 +342,7 @@ jobs:
             if [ "${TRACING_ENABLED}" = "true" ]; then
               body="${body} 🔎 Jaeger URL: https://jaeger-${INSTANCE_NAME}.${PREVIEW_DOMAIN_BASE}"
             fi
+            body="${body}"$'\n'"⏳ Removed after ${PREVIEW_MAX_IDLE_DAYS} days without a deploy; pushing a commit redeploys and resets the clock."
             if [ "${ADMIN_STATUS}" = "created" ]; then
               body="${body}"$'\n'"🔐 Admin: \`${ADMIN_EMAIL}\` / \`${ADMIN_PASSWORD}\`"$'\n'"🔑 Instance API token: \`${ADMIN_TOKEN}\`"
             fi

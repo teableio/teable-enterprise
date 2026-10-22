@@ -1,14 +1,25 @@
 name: Preview Reaper
 
+# Frees the CN test cluster (namespace teable-preview) from previews nobody uses.
+# A preview is reaped when its pull request is no longer open, or when it has gone
+# PREVIEW_MAX_IDLE_DAYS (default 3) without a deploy. preview-ack.yml stamps
+# teable.io/deployed-at on every deploy, so every push resets the clock; PR comments
+# and label edits do not.
+#
+# An idle preview of an open PR also loses its preview-<edition> label, so the label
+# keeps meaning "this PR has a preview", and the PR gets a comment on how to bring it
+# back. Removing the label sends teable-ee's cleanup-<edition> event, which finds
+# nothing left to delete.
+
 on:
   schedule:
-    - cron: '23 */6 * * *'
+    - cron: '23 * * * *'
   workflow_dispatch:
     inputs:
       max_age_days:
-        description: 'Delete preview environments older than this many days'
+        description: 'Delete previews whose last deploy is older than this many days'
         required: true
-        default: '7'
+        default: '3'
       dry_run:
         description: 'Only list candidates without deleting resources'
         required: true
@@ -35,16 +46,14 @@ jobs:
   reap:
     name: Delete expired preview environments
     runs-on: ubuntu-latest
-    # CN test cluster (ACK teable-cn-test). Sealos, where previews used to live, is gone.
+    timeout-minutes: 30
     permissions:
       contents: read
       id-token: write
     env:
-      NAMESPACE: teable-preview
-      MAX_AGE_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_age_days || '7' }}
+      MAX_AGE_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_age_days || vars.PREVIEW_MAX_IDLE_DAYS || '3' }}
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
       TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.target || 'all' }}
-      PREVIEW_LABEL: teable.io/preview-instance
       GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
       ALIYUN_ROLE_ARN: ${{ vars.CN_TEST_DEPLOY_ROLE_ARN || 'acs:ram::1145786521954482:role/teable-cn-test-github-deploy' }}
       ALIYUN_OIDC_PROVIDER_ARN: ${{ vars.CN_TEST_OIDC_PROVIDER_ARN || 'acs:ram::1145786521954482:oidc-provider/github-actions' }}
@@ -62,244 +71,103 @@ jobs:
         run: |
           set -euo pipefail
 
-          if ! printf '%s' "${MAX_AGE_DAYS}" | grep -Eq '^[1-9][0-9]*$'; then
-            echo "::error::max_age_days must be a positive integer"
-            exit 1
-          fi
+          [[ "${MAX_AGE_DAYS}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::max_age_days must be a positive integer"; exit 1; }
+          case "${DRY_RUN}" in true | false) ;; *) echo "::error::dry_run must be true or false"; exit 1 ;; esac
+          case "${TARGET}" in all | cloud | ee) ;; *) echo "::error::target must be all, cloud, or ee"; exit 1 ;; esac
 
-          if [ "${DRY_RUN}" != "true" ] && [ "${DRY_RUN}" != "false" ]; then
-            echo "::error::dry_run must be true or false"
-            exit 1
-          fi
-
-          case "${TARGET}" in
-            all|cloud|ee) ;;
-            *)
-              echo "::error::target must be all, cloud, or ee"
-              exit 1
-              ;;
-          esac
-
-          cutoff_epoch="$(
-            python3 - "${MAX_AGE_DAYS}" <<'PY'
-          import datetime
-          import sys
-
-          max_age_days = int(sys.argv[1])
-          cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=max_age_days)
-          print(int(cutoff.timestamp()))
-          PY
-          )"
           now_epoch="$(date -u +%s)"
-          now_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-          previews_file="$(mktemp)"
-          candidates_file="$(mktemp)"
-          resource_names_file="$(mktemp)"
+          cutoff_epoch=$(( now_epoch - MAX_AGE_DAYS * 86400 ))
 
-          iso_epoch() {
-            python3 - "$1" <<'PY'
-          import datetime
-          import sys
-
-          value = sys.argv[1].replace("Z", "+00:00")
-          print(int(datetime.datetime.fromisoformat(value).timestamp()))
-          PY
-          }
-
-          kubectl -n "${NAMESPACE}" get deployments \
-            -l "${PREVIEW_LABEL}" \
-            -o json |
-            jq -r \
-              --arg target "${TARGET}" \
-              --arg previewLabel "${PREVIEW_LABEL}" '
+          # One line per preview: instance, kind, PR number, last deploy (the
+          # deployed-at stamp; creation time for previews deployed before the stamp).
+          previews="$(
+            kubectl get deployments -l teable.io/preview-role=app -o json |
+              jq -r --arg target "${TARGET}" '
                 .items[]
-                | .metadata as $metadata
-                | ($metadata.labels[$previewLabel] // "") as $instance
+                | (.metadata.labels["teable.io/preview-instance"] // "") as $instance
                 | select($instance | test("^teable-pr-(cloud|ee)-[0-9]+$"))
-                | select($metadata.name == $instance)
-                | ($instance | capture("^teable-pr-(?<kind>cloud|ee)-(?<pr>[0-9]+)$")) as $preview
-                | select($target == "all" or $target == $preview.kind)
-                | [
-                    $instance,
-                    $preview.kind,
-                    $preview.pr,
-                    $metadata.creationTimestamp
-                  ]
-                | @tsv
-              ' > "${previews_file}"
+                | ($instance | capture("^teable-pr-(?<kind>cloud|ee)-(?<pr>[0-9]+)$")) as $p
+                | select($target == "all" or $target == $p.kind)
+                | [$instance, $p.kind, $p.pr,
+                   (.metadata.annotations["teable.io/deployed-at"] // .metadata.creationTimestamp)]
+                | @tsv'
+          )"
 
           {
             echo "### Preview Reaper"
             echo ""
-            echo "- Namespace: \`${NAMESPACE}\`"
-            echo "- Max inactive age: \`${MAX_AGE_DAYS}\` days"
-            echo "- Target: \`${TARGET}\`"
-            echo "- Dry run: \`${DRY_RUN}\`"
-            echo "- Checked at: \`${now_utc}\`"
+            echo "- Max idle: \`${MAX_AGE_DAYS}\` days since the last deploy · target \`${TARGET}\` · dry run \`${DRY_RUN}\`"
             echo ""
           } >> "${GITHUB_STEP_SUMMARY}"
 
-          if [ ! -s "${previews_file}" ]; then
-            echo "No preview environments found."
-            echo "No preview environments found." >> "${GITHUB_STEP_SUMMARY}"
+          if [ -z "${previews}" ]; then
+            echo "No preview environments found." | tee -a "${GITHUB_STEP_SUMMARY}"
             exit 0
           fi
 
-          echo "Found preview environments:"
-          printf '%-28s %-7s %-8s %-25s\n' "instance" "type" "pr" "env_created_at"
-          while IFS=$'\t' read -r instance kind pr_number env_created_at; do
-            printf '%-28s %-7s %-8s %-25s\n' "${instance}" "${kind}" "#${pr_number}" "${env_created_at}"
-          done < "${previews_file}"
-
-          while IFS=$'\t' read -r instance kind pr_number env_created_at; do
-            pr_json="$(gh api "repos/teableio/teable-ee/pulls/${pr_number}" 2>/tmp/preview-reaper-gh-error || true)"
-
-            if [ -z "${pr_json}" ]; then
-              echo "::warning::skipping ${instance}: failed to fetch teable-ee PR #${pr_number}: $(cat /tmp/preview-reaper-gh-error)"
+          candidates=""
+          while IFS=$'\t' read -r instance kind pr_number deployed_at; do
+            deployed_epoch="$(date -u -d "${deployed_at}" +%s)"
+            idle_days=$(( (now_epoch - deployed_epoch) / 86400 ))
+            if ! pr_state="$(gh api "repos/teableio/teable-ee/pulls/${pr_number}" --jq .state </dev/null 2>/tmp/reaper-gh-error)"; then
+              echo "::warning::skipping ${instance}: failed to fetch teable-ee PR #${pr_number}: $(cat /tmp/reaper-gh-error)"
               continue
             fi
-
-            pr_state="$(printf '%s' "${pr_json}" | jq -r '.state')"
-            pr_created_at="$(printf '%s' "${pr_json}" | jq -r '.created_at')"
-            pr_updated_at="$(printf '%s' "${pr_json}" | jq -r '.updated_at')"
-            pr_url="$(printf '%s' "${pr_json}" | jq -r '.html_url')"
-            pr_title="$(printf '%s' "${pr_json}" | jq -r '.title')"
-
-            updated_epoch="$(iso_epoch "${pr_updated_at}")"
-            inactive_days="$(( (now_epoch - updated_epoch) / 86400 ))"
             reason=""
-
             if [ "${pr_state}" != "open" ]; then
               reason="pr_${pr_state}"
-            elif [ "${updated_epoch}" -le "${cutoff_epoch}" ]; then
-              reason="open_pr_inactive_${inactive_days}d"
+            elif [ "${deployed_epoch}" -le "${cutoff_epoch}" ]; then
+              reason="idle_${idle_days}d"
             fi
-
-            if [ -z "${reason}" ]; then
-              echo "Keeping ${instance}: PR #${pr_number} is open and active (updated_at=${pr_updated_at}, inactive_days=${inactive_days})"
-              continue
+            echo "${instance}: PR #${pr_number} ${pr_state}, last deploy ${deployed_at} (${idle_days}d) -> ${reason:-keep}"
+            if [ -n "${reason}" ]; then
+              candidates+="${instance}"$'\t'"${kind}"$'\t'"${pr_number}"$'\t'"${deployed_at}"$'\t'"${reason}"$'\n'
             fi
+          done <<<"${previews}"
 
-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-              "${instance}" \
-              "${kind}" \
-              "${pr_number}" \
-              "${env_created_at}" \
-              "${pr_state}" \
-              "${pr_created_at}" \
-              "${pr_updated_at}" \
-              "${inactive_days}" \
-              "${reason}" >> "${candidates_file}"
-
-            echo "Candidate ${instance}: PR #${pr_number} (${pr_state}) ${reason} - ${pr_title} (${pr_url})"
-          done < "${previews_file}"
-
-          if [ ! -s "${candidates_file}" ]; then
-            echo "No expired preview environments found."
-            echo "No expired preview environments found." >> "${GITHUB_STEP_SUMMARY}"
+          if [ -z "${candidates}" ]; then
+            echo "No expired preview environments found." | tee -a "${GITHUB_STEP_SUMMARY}"
             exit 0
           fi
 
-          echo "Expired preview environments:"
-          printf '%-28s %-7s %-8s %-8s %-25s %-25s %-14s %s\n' "instance" "type" "pr" "state" "env_created_at" "pr_updated_at" "inactive_days" "reason"
-          while IFS=$'\t' read -r instance kind pr_number env_created_at pr_state pr_created_at pr_updated_at inactive_days reason; do
-            printf '%-28s %-7s %-8s %-8s %-25s %-25s %-14s %s\n' \
-              "${instance}" \
-              "${kind}" \
-              "#${pr_number}" \
-              "${pr_state}" \
-              "${env_created_at}" \
-              "${pr_updated_at}" \
-              "${inactive_days}" \
-              "${reason}"
-          done < "${candidates_file}"
-
           {
-            echo "| Instance | Type | PR | State | Env created at | PR updated at | Inactive days | Reason |"
-            echo "| --- | --- | --- | --- | --- | --- | ---: | --- |"
-            while IFS=$'\t' read -r instance kind pr_number env_created_at pr_state pr_created_at pr_updated_at inactive_days reason; do
-              echo "| \`${instance}\` | ${kind} | #${pr_number} | ${pr_state} | \`${env_created_at}\` | \`${pr_updated_at}\` | ${inactive_days} | ${reason} |"
-            done < "${candidates_file}"
+            echo "| Instance | PR | Last deploy | Reason |"
+            echo "| --- | --- | --- | --- |"
+            while IFS=$'\t' read -r instance kind pr_number deployed_at reason; do
+              [ -n "${instance}" ] && echo "| \`${instance}\` | #${pr_number} | \`${deployed_at}\` | ${reason} |"
+            done <<<"${candidates}"
             echo ""
           } >> "${GITHUB_STEP_SUMMARY}"
 
-          kubectl api-resources --namespaced=true --verbs=list,delete -o name > "${resource_names_file}"
-
-          # What a preview is made of (teable-ee preview-template.ack.yaml), all of which
-          # the CI role (teable-ci-deployer) may delete. PVCs go last: the StatefulSet
-          # deletes its own, this catches leftovers.
-          resources=(
-            deployments.apps
-            statefulsets.apps
-            pods
-            services
-            ingresses.networking.k8s.io
-            jobs.batch
-            secrets
-            configmaps
-            persistentvolumeclaims
-          )
-
-          available_resources=()
-          for resource in "${resources[@]}"; do
-            if grep -Fxq "${resource}" "${resource_names_file}"; then
-              available_resources+=("${resource}")
-            else
-              echo "Skipping unavailable resource type: ${resource}"
-            fi
-          done
-
-          delete_failures=0
-          while IFS=$'\t' read -r instance kind pr_number env_created_at pr_state pr_created_at pr_updated_at inactive_days reason; do
-            selector="${PREVIEW_LABEL}=${instance}"
-            echo ""
-            echo "Processing ${instance} (type=${kind}, pr=#${pr_number}, state=${pr_state}, inactive_days=${inactive_days}, reason=${reason})"
-
-            for resource in "${available_resources[@]}"; do
-              matches="$(kubectl -n "${NAMESPACE}" get "${resource}" -l "${selector}" -o name --ignore-not-found 2>/dev/null || true)"
-              if [ -z "${matches}" ]; then
-                continue
-              fi
-
-              echo "${resource}:"
-              echo "${matches}"
-
-              if [ "${DRY_RUN}" = "true" ]; then
-                continue
-              fi
-
-              if ! kubectl -n "${NAMESPACE}" delete "${resource}" -l "${selector}" --ignore-not-found --wait=false; then
-                echo "::warning::failed to delete ${resource} for ${instance}"
-                delete_failures=$((delete_failures + 1))
-              fi
-            done
-
-            if [ "${DRY_RUN}" = "false" ]; then
-              echo "Waiting for main deployment ${instance} to disappear..."
-              for attempt in $(seq 1 30); do
-                remaining="$(kubectl -n "${NAMESPACE}" get deployment "${instance}" -o name --ignore-not-found 2>/dev/null || true)"
-                if [ -z "${remaining}" ]; then
-                  echo "Main deployment ${instance} deleted."
-                  break
-                fi
-                if [ "${attempt}" = "30" ]; then
-                  echo "::warning::main deployment ${instance} still exists after waiting"
-                  delete_failures=$((delete_failures + 1))
-                  break
-                fi
-                sleep 2
-              done
-            fi
-          done < "${candidates_file}"
-
           if [ "${DRY_RUN}" = "true" ]; then
-            echo "Dry run complete. No resources were deleted."
-            echo "Dry run complete. No resources were deleted." >> "${GITHUB_STEP_SUMMARY}"
-          else
-            echo "Deletion complete. delete_failures=${delete_failures}"
-            echo "Deletion complete. delete_failures=${delete_failures}" >> "${GITHUB_STEP_SUMMARY}"
+            echo "Dry run complete. No resources were deleted." | tee -a "${GITHUB_STEP_SUMMARY}"
+            exit 0
           fi
 
-          if [ "${delete_failures}" -gt 0 ]; then
-            exit 1
-          fi
+          failures=0
+          while IFS=$'\t' read -r instance kind pr_number deployed_at reason; do
+            [ -n "${instance}" ] || continue
+            selector="teable.io/preview-instance=${instance}"
+            echo "Deleting ${instance} (${reason})"
+            if ! kubectl delete deployment,statefulset,service,ingress,secret,job,configmap -l "${selector}" \
+              --ignore-not-found --wait=true --timeout=180s </dev/null; then
+              echo "::warning::failed to delete ${instance}"
+              failures=$((failures + 1))
+              continue
+            fi
+            # The StatefulSet deletes its own PVC (whenDeleted: Delete); this catches leftovers.
+            kubectl delete pvc -l "${selector}" --ignore-not-found --wait=false </dev/null || true
+
+            # Idle preview of an open PR: drop the label and say how to get it back.
+            case "${reason}" in idle_*)
+              gh api -X DELETE "repos/teableio/teable-ee/issues/${pr_number}/labels/preview-${kind}" </dev/null >/dev/null 2>&1 \
+                || echo "::warning::could not remove preview-${kind} from PR #${pr_number} (already gone?)"
+              gh api "repos/teableio/teable-ee/issues/${pr_number}/comments" \
+                -f body="🧹 The ${kind} preview had no deploy for ${MAX_AGE_DAYS} days and was removed from the CN test cluster to free capacity. The \`preview-${kind}\` label was removed too; add it again to rebuild the preview (its data is not kept)." </dev/null >/dev/null \
+                || echo "::warning::could not comment on PR #${pr_number}"
+              ;;
+            esac
+          done <<<"${candidates}"
+
+          echo "Deletion complete. failures=${failures}" | tee -a "${GITHUB_STEP_SUMMARY}"
+          [ "${failures}" -eq 0 ]
