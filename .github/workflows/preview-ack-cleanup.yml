@@ -5,11 +5,13 @@ name: Cleanup Preview PR (CN test cluster)
 # that label; the disk goes with its PVC (StorageClass reclaimPolicy Delete).
 # Replaces preview-cleanup-{cloud,ee}.yml.
 #
-# Trigger: workflow_dispatch while the CN test lane is being rehearsed; the teable-ee
-# events (cleanup on PR close, cleanup-cloud / cleanup-ee on label removal) move here
-# together with the deploy events.
+# Triggers: teable-ee's cleanup-trigger.yml (cleanup, when a PR closes: both editions)
+# and preview-trigger.yml (cleanup-cloud / cleanup-ee, when the label is removed), plus
+# workflow_dispatch.
 
 on:
+  repository_dispatch:
+    types: [cleanup, cleanup-cloud, cleanup-ee]
   workflow_dispatch:
     inputs:
       pr_number:

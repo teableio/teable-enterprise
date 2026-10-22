@@ -14,11 +14,13 @@ name: Preview PR (CN test cluster)
 # Cluster access: GitHub OIDC -> RAM role teable-cn-test-github-deploy (trusts this
 # repository's main only) -> short-lived kubeconfig limited to the preview namespace.
 #
-# Trigger: workflow_dispatch while this lane is being rehearsed; the label events from
-# teable-ee's preview-trigger.yml (preview-cloud / preview-ee / *-update) move here once
-# it is proven.
+# Triggers: the label events from teable-ee's preview-trigger.yml (preview-cloud /
+# preview-ee when the label is added, *-update on every push and on the tracing label;
+# preview-*-build sends skip_deploy) and workflow_dispatch for manual (re)deploys.
 
 on:
+  repository_dispatch:
+    types: [preview-cloud, preview-cloud-update, preview-ee, preview-ee-update]
   workflow_dispatch:
     inputs:
       pr_number:
