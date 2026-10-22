@@ -140,6 +140,9 @@ env:
   ACK_CN_APP_CLUSTER_ID: ${{ vars.ACK_CN_APP_CLUSTER_ID || 'c8200c68711e1417a885670b094a80988' }}
   ACK_CN_APP_REGION: ${{ vars.ACK_CN_APP_REGION || 'cn-hangzhou' }}
   ACK_CN_APP_NAMESPACE: teable-app
+  # The API server has only a private endpoint: CI reaches it through this machine bastion
+  # (teable-bastion-cn-k8s, terraform/deployments/aliyun-bastion in teable-infra).
+  ACK_CN_APP_BASTION: ${{ vars.ACK_CN_APP_BASTION || 'i-bp11l83r5m3vqmbimu1o' }}
   ALIYUN_ROLE_ARN: ${{ vars.ACK_CN_APP_DEPLOY_ROLE_ARN || 'acs:ram::1145786521954482:role/teable-cn-app-github-deploy' }}
   ALIYUN_OIDC_PROVIDER_ARN: ${{ vars.ACK_CN_APP_OIDC_PROVIDER_ARN || 'acs:ram::1145786521954482:oidc-provider/github-actions' }}
 
@@ -478,17 +481,13 @@ jobs:
       - name: Get Aliyun STS credentials via OIDC
         run: bash .github/scripts/aliyun-oidc-login.sh
 
-      - name: Fetch cluster kubeconfig
+      - name: Fetch cluster kubeconfig through the bastion
         run: |
           set -euo pipefail
-          aliyun cs GET "/k8s/${ACK_CN_APP_CLUSTER_ID}/user_config" \
-            --mode StsToken \
-            --access-key-id "${ALIBABA_CLOUD_ACCESS_KEY_ID}" \
-            --access-key-secret "${ALIBABA_CLOUD_ACCESS_KEY_SECRET}" \
-            --sts-token "${ALIBABA_CLOUD_SECURITY_TOKEN}" \
-            --region "${ACK_CN_APP_REGION}" | jq -r '.config' > "${RUNNER_TEMP}/kubeconfig"
-          test -s "${RUNNER_TEMP}/kubeconfig"
-          chmod 600 "${RUNNER_TEMP}/kubeconfig"
+          # Private-endpoint kubeconfig + Session Manager port forward via the machine bastion;
+          # the forward keeps running for the rest of the job.
+          bash .github/scripts/aliyun-kube-tunnel.sh "${ACK_CN_APP_CLUSTER_ID}" "${ACK_CN_APP_BASTION}" \
+            "${ACK_CN_APP_REGION}" "${RUNNER_TEMP}/kubeconfig"
           echo "KUBECONFIG=${RUNNER_TEMP}/kubeconfig" >> "${GITHUB_ENV}"
           # GITHUB_ENV only applies to later steps.
           KUBECONFIG="${RUNNER_TEMP}/kubeconfig" kubectl -n "${ACK_CN_APP_NAMESPACE}" get deploy teable-cloud teable-sandbox-cloud
