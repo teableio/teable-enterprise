@@ -36,7 +36,11 @@ curl -fsSL -o "${cli}" https://aliyun-client-assist.oss-accelerate.aliyuncs.com/
 echo "b3fda8ee05f6dbd8fc6016e873e92c932212e5b8f6cd6c30fe51b23f6c179521  ${cli}" | sha256sum -c -
 chmod +x "${cli}"
 
-aliyun cs GET "/k8s/${cluster}/user_config" --PrivateIpAddress true --region "${region}" "${auth[@]}" \
+# Ask for a short-lived certificate: without TemporaryDurationMinutes ACK returns the identity's
+# long-lived (3-year) one, and revoking it only makes the next call issue a new one. 120 minutes
+# covers a deploy; the tunnel itself only lives as long as the 1-hour STS credentials.
+aliyun cs GET "/k8s/${cluster}/user_config" --PrivateIpAddress true --TemporaryDurationMinutes 120 \
+  --region "${region}" "${auth[@]}" \
   | jq -r '.config' > "${out}"
 chmod 600 "${out}"
 endpoint="$(KUBECONFIG="${out}" kubectl config view -o jsonpath='{.clusters[0].cluster.server}')"
