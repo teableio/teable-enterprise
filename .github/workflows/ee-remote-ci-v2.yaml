@@ -172,14 +172,26 @@ jobs:
           - label: '@teable/v2-adapter-repository-postgres'
             name: '@teable/v2-adapter-repository-postgres'
             gate: v2_adapter_repository_postgres
-          - label: '@teable/v2-adapter-table-repository-postgres Shard 1/2'
+          - label: '@teable/v2-adapter-table-repository-postgres Shard 1/4'
             name: '@teable/v2-adapter-table-repository-postgres'
             gate: v2_adapter_table_repository_postgres
-            shard: 1/2
-          - label: '@teable/v2-adapter-table-repository-postgres Shard 2/2'
+            shard: 1/4
+            workers: 2
+          - label: '@teable/v2-adapter-table-repository-postgres Shard 2/4'
             name: '@teable/v2-adapter-table-repository-postgres'
             gate: v2_adapter_table_repository_postgres
-            shard: 2/2
+            shard: 2/4
+            workers: 2
+          - label: '@teable/v2-adapter-table-repository-postgres Shard 3/4'
+            name: '@teable/v2-adapter-table-repository-postgres'
+            gate: v2_adapter_table_repository_postgres
+            shard: 3/4
+            workers: 2
+          - label: '@teable/v2-adapter-table-repository-postgres Shard 4/4'
+            name: '@teable/v2-adapter-table-repository-postgres'
+            gate: v2_adapter_table_repository_postgres
+            shard: 4/4
+            workers: 2
           - label: '@teable/v2-adapter-table-query-ops-postgres'
             name: '@teable/v2-adapter-table-query-ops-postgres'
             gate: v2_adapter_table_query_ops_postgres
@@ -189,10 +201,12 @@ jobs:
             name: '@teable/v2-core'
             gate: v2_core
             shard: 1/2
+            workers: 2
           - label: '@teable/v2-core Shard 2/2'
             name: '@teable/v2-core'
             gate: v2_core
             shard: 2/2
+            workers: 2
           - label: '@teable/v2-formula-sql-pg'
             name: '@teable/v2-formula-sql-pg'
             gate: v2_formula_sql_pg
@@ -290,7 +304,11 @@ jobs:
           echo "SLUG=$SLUG" >> "$GITHUB_ENV"
           status=0
           {
-            echo "=== ${{ matrix.pkg.label }} test-unit-cover ==="
+            echo "=== ${{ matrix.pkg.label }} test-unit ==="
+            WORKERS_ARGS=()
+            if [ "${{ matrix.pkg.workers }}" = "2" ]; then
+              WORKERS_ARGS=(--fileParallelism --maxWorkers=2)
+            fi
             if [ "${{ matrix.pkg.queryCli }}" = "true" ]; then
               pnpm --fail-if-no-match -F @teable/cli build &&
                 pnpm --fail-if-no-match -F @teable/cli typecheck &&
@@ -298,14 +316,14 @@ jobs:
             elif [ "${{ matrix.pkg.gate }}" = "v2_data_query" ]; then
               pnpm --fail-if-no-match -F "${{ matrix.pkg.name }}" typecheck &&
                 if [ "${{ matrix.pkg.queryTests }}" != "true" ] || [ "$DATA_QUERY_PRESENT" = "true" ]; then
-                  pnpm --fail-if-no-match -F "${{ matrix.pkg.name }}" test-unit-cover
+                  pnpm --fail-if-no-match -F "${{ matrix.pkg.name }}" test-unit
                 else
                   echo "query protocol specs absent before feature — typecheck completed"
                 fi
             elif [ -n "${{ matrix.pkg.shard }}" ]; then
-              pnpm -F "${{ matrix.pkg.name }}" test-unit-cover --shard=${{ matrix.pkg.shard }}
+              pnpm -F "${{ matrix.pkg.name }}" test-unit --shard=${{ matrix.pkg.shard }} "${WORKERS_ARGS[@]}"
             else
-              pnpm -F "${{ matrix.pkg.name }}" --if-present test-unit-cover
+              pnpm -F "${{ matrix.pkg.name }}" --if-present test-unit "${WORKERS_ARGS[@]}"
             fi
           } >> "$LOG_DIR/v2-unit-$SLUG.log" 2>&1 || status=$?
           echo "v2 unit exit=$status ($(wc -l < "$LOG_DIR/v2-unit-$SLUG.log") log lines)"
@@ -483,7 +501,7 @@ jobs:
           status=0
           {
             echo "=== v2 e2e shard ${{ matrix.shard }} ==="
-            pnpm -C community/packages/v2/e2e exec vitest run --silent --bail 1 --exclude src/field-conversion-deadlock.e2e.spec.ts --exclude src/computed-json-formula-cascade.e2e.spec.ts --shard=${{ matrix.shard }}
+            pnpm -C community/packages/v2/e2e exec vitest run --silent --bail 1 --exclude src/field-conversion-deadlock.e2e.spec.ts --exclude src/computed-json-formula-cascade.e2e.spec.ts --shard=${{ matrix.shard }} --fileParallelism --maxWorkers=2
           } >> "$LOG_DIR/v2-e2e-$SLUG.log" 2>&1 || status=$?
           echo "v2 e2e exit=$status ($(wc -l < "$LOG_DIR/v2-e2e-$SLUG.log") log lines)"
           exit $status
