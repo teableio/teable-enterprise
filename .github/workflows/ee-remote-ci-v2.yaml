@@ -355,7 +355,15 @@ jobs:
       (contains(fromJson(github.event.client_payload.filters), 'v2_shared') ||
        contains(fromJson(github.event.client_payload.filters), 'v2_data_query'))
     runs-on: ubuntu-latest
-    name: V2 Inline Query Host (CLOUD and EE, enabled and disabled)
+    strategy:
+      fail-fast: false
+      matrix:
+        edition:
+          - label: CLOUD
+            script: test-e2e
+          - label: EE
+            script: test-e2e:ee
+    name: V2 Inline Query Host (${{ matrix.edition.label }})
     timeout-minutes: 25
     env:
       CI: 1
@@ -410,6 +418,7 @@ jobs:
         id: host-query-tests
         run: |
           mkdir -p "$LOG_DIR"
+          LOG_FILE="$LOG_DIR/v2-host-query-${{ matrix.edition.label }}.log"
           set +e
           (
             set -euo pipefail
@@ -419,20 +428,20 @@ jobs:
             (cd community/packages/db-data-prisma && pnpm prisma-generate)
             (cd packages/db-main-prisma && pnpm prisma-migrate deploy --schema ./prisma/postgres/schema.prisma)
             (cd community/packages/db-data-prisma && pnpm prisma-migrate deploy --schema ./prisma/schema.prisma)
-            echo "=== inline query: PGlite and PostgreSQL executor ==="
-            TEABLE_V2_RUN_PG_INTEGRATION=1 pnpm --fail-if-no-match -F @teable/v2-adapter-table-repository-postgres exec vitest run src/record/data-query/PostgresDataQueryExecutor.pglite.spec.ts src/record/data-query/PostgresDataQueryExecutor.pg.integration.spec.ts --passWithNoTests=false
-            echo "=== inline query: failure trace privacy and host boundaries ==="
-            TEABLE_V2_RUN_PG_INTEGRATION=1 pnpm --fail-if-no-match -F @teable/backend exec vitest run src/tracing-pg.integration.spec.ts src/tracing-db-context.spec.ts src/configs/env.validation.schema.spec.ts src/filter/global-exception.filter.spec.ts --passWithNoTests=false
-            for script in test-e2e test-e2e:ee; do
-              echo "=== $script: inline query enabled ==="
-              V2_DATA_QUERY_ENABLED=1 pnpm --fail-if-no-match -F @teable/backend-ee "$script" test/data-query.e2e-spec-edition.ts --passWithNoTests=false
-              echo "=== $script: inline query disabled ==="
-              V2_DATA_QUERY_ENABLED=false pnpm --fail-if-no-match -F @teable/backend-ee "$script" test/data-query-disabled.e2e-spec-edition.ts --passWithNoTests=false
-            done
-          ) >> "$LOG_DIR/v2-host-query.log" 2>&1
+            if [ "${{ matrix.edition.label }}" = "CLOUD" ]; then
+              echo "=== inline query: PGlite and PostgreSQL executor ==="
+              TEABLE_V2_RUN_PG_INTEGRATION=1 pnpm --fail-if-no-match -F @teable/v2-adapter-table-repository-postgres exec vitest run src/record/data-query/PostgresDataQueryExecutor.pglite.spec.ts src/record/data-query/PostgresDataQueryExecutor.pg.integration.spec.ts --passWithNoTests=false
+              echo "=== inline query: failure trace privacy and host boundaries ==="
+              TEABLE_V2_RUN_PG_INTEGRATION=1 pnpm --fail-if-no-match -F @teable/backend exec vitest run src/tracing-pg.integration.spec.ts src/tracing-db-context.spec.ts src/configs/env.validation.schema.spec.ts src/filter/global-exception.filter.spec.ts --passWithNoTests=false
+            fi
+            echo "=== ${{ matrix.edition.script }}: inline query enabled ==="
+            V2_DATA_QUERY_ENABLED=1 pnpm --fail-if-no-match -F @teable/backend-ee "${{ matrix.edition.script }}" test/data-query.e2e-spec-edition.ts --passWithNoTests=false
+            echo "=== ${{ matrix.edition.script }}: inline query disabled ==="
+            V2_DATA_QUERY_ENABLED=false pnpm --fail-if-no-match -F @teable/backend-ee "${{ matrix.edition.script }}" test/data-query-disabled.e2e-spec-edition.ts --passWithNoTests=false
+          ) >> "$LOG_FILE" 2>&1
           status=$?
           set -e
-          echo "inline query host exit=$status ($(wc -l < "$LOG_DIR/v2-host-query.log") log lines)"
+          echo "inline query host ${{ matrix.edition.label }} exit=$status ($(wc -l < "$LOG_FILE") log lines)"
           exit "$status"
 
       - name: Ship host check log
@@ -442,12 +451,13 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           mkdir -p "$LOG_DIR"
-          [ -f "$LOG_DIR/v2-host-query.log" ] || echo "(host checks failed before their first logged step)" > "$LOG_DIR/v2-host-query.log"
+          LOG_FILE="$LOG_DIR/v2-host-query-${{ matrix.edition.label }}.log"
+          [ -f "$LOG_FILE" ] || echo "(host checks failed before their first logged step)" > "$LOG_FILE"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/v2-host-query.log" -R "$LOGS_REPO" --clobber
+          gh release upload "$LOG_TAG" "$LOG_FILE" -R "$LOGS_REPO" --clobber
           if [ "$JOB_STATUS" != "success" ]; then
-            echo failed > "$LOG_DIR/v2-host-query.failed"
-            gh release upload "$LOG_TAG" "$LOG_DIR/v2-host-query.failed" -R "$LOGS_REPO" --clobber
+            echo failed > "$LOG_FILE.failed"
+            gh release upload "$LOG_TAG" "$LOG_FILE.failed" -R "$LOGS_REPO" --clobber
           fi
 
   e2e:
