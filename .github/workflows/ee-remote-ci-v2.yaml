@@ -501,7 +501,7 @@ jobs:
           status=0
           {
             echo "=== v2 e2e shard ${{ matrix.shard }} ==="
-            pnpm -C community/packages/v2/e2e exec vitest run --silent --bail 1 --exclude src/field-conversion-deadlock.e2e.spec.ts --exclude src/computed-json-formula-cascade.e2e.spec.ts --exclude src/importMemory.e2e.spec.ts --shard=${{ matrix.shard }} --fileParallelism --maxWorkers=2
+            pnpm -C community/packages/v2/e2e exec vitest run --silent --bail 1 --exclude src/field-conversion-deadlock.e2e.spec.ts --exclude src/computed-json-formula-cascade.e2e.spec.ts --exclude src/importMemory.e2e.spec.ts --exclude src/list-records-cursor.e2e.spec.ts --shard=${{ matrix.shard }} --fileParallelism --maxWorkers=2
           } >> "$LOG_DIR/v2-e2e-$SLUG.log" 2>&1 || status=$?
           echo "v2 e2e exit=$status ($(wc -l < "$LOG_DIR/v2-e2e-$SLUG.log") log lines)"
           exit $status
@@ -524,12 +524,12 @@ jobs:
             gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-$SLUG.failed" -R "$LOGS_REPO" --clobber
           fi
 
-  e2e-import-memory:
+  e2e-sensitive:
     needs: [e2e-deps]
     if: >-
       !cancelled() && needs.e2e-deps.result == 'success'
     runs-on: ubuntu-latest
-    name: V2 E2E Tests (Import Memory)
+    name: V2 E2E Tests (Sensitive)
     timeout-minutes: 15
     env:
       CI: 1
@@ -555,15 +555,15 @@ jobs:
         with:
           name: v2-e2e-deps-${{ github.run_id }}
 
-      - name: 🧪 Run import memory regression
+      - name: 🧪 Run memory and latency-sensitive regressions
         run: |
           mkdir -p "$LOG_DIR"
           status=0
           {
-            echo "=== v2 e2e import memory regression ==="
-            pnpm -C community/packages/v2/e2e exec vitest run --silent --bail 1 src/importMemory.e2e.spec.ts
-          } >> "$LOG_DIR/v2-e2e-import-memory.log" 2>&1 || status=$?
-          echo "v2 e2e import memory exit=$status ($(wc -l < "$LOG_DIR/v2-e2e-import-memory.log") log lines)"
+            echo "=== v2 e2e memory and latency-sensitive regressions ==="
+            pnpm -C community/packages/v2/e2e exec vitest run --silent --bail 1 src/importMemory.e2e.spec.ts src/list-records-cursor.e2e.spec.ts
+          } >> "$LOG_DIR/v2-e2e-sensitive.log" 2>&1 || status=$?
+          echo "v2 e2e sensitive exit=$status ($(wc -l < "$LOG_DIR/v2-e2e-sensitive.log") log lines)"
           exit $status
 
       - name: 📤 Ship log
@@ -573,12 +573,12 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           mkdir -p "$LOG_DIR"
-          [ -f "$LOG_DIR/v2-e2e-import-memory.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-e2e-import-memory.log"
+          [ -f "$LOG_DIR/v2-e2e-sensitive.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-e2e-sensitive.log"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-import-memory.log" -R "$LOGS_REPO" --clobber
+          gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-sensitive.log" -R "$LOGS_REPO" --clobber
           if [ "$JOB_STATUS" != "success" ]; then
-            echo failed > "$LOG_DIR/v2-e2e-import-memory.failed"
-            gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-import-memory.failed" -R "$LOGS_REPO" --clobber
+            echo failed > "$LOG_DIR/v2-e2e-sensitive.failed"
+            gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-sensitive.failed" -R "$LOGS_REPO" --clobber
           fi
 
   e2e-json-formula-cascade:
@@ -698,7 +698,7 @@ jobs:
           fi
 
   verdict:
-    needs: [unit-deps, e2e-deps, unit, host-query, e2e, e2e-import-memory, e2e-json-formula-cascade, e2e-postgres-only]
+    needs: [unit-deps, e2e-deps, unit, host-query, e2e, e2e-sensitive, e2e-json-formula-cascade, e2e-postgres-only]
     if: always()
     runs-on: ubuntu-latest
     name: V2 verdict
@@ -727,7 +727,7 @@ jobs:
         uses: ./.github/actions/remote-ci-conclude
         with:
           suite: v2
-          results: 'unit-deps=${{ needs.unit-deps.result }} e2e-deps=${{ needs.e2e-deps.result }} unit=${{ needs.unit.result }} host-query=${{ needs.host-query.result }} e2e=${{ needs.e2e.result }} import-memory=${{ needs.e2e-import-memory.result }} json-formula-cascade=${{ needs.e2e-json-formula-cascade.result }} postgres-only=${{ needs.e2e-postgres-only.result }}'
+          results: 'unit-deps=${{ needs.unit-deps.result }} e2e-deps=${{ needs.e2e-deps.result }} unit=${{ needs.unit.result }} host-query=${{ needs.host-query.result }} e2e=${{ needs.e2e.result }} sensitive=${{ needs.e2e-sensitive.result }} json-formula-cascade=${{ needs.e2e-json-formula-cascade.result }} postgres-only=${{ needs.e2e-postgres-only.result }}'
           app-token: ${{ steps.app.outputs.token }}
           logs-token: ${{ secrets.PACKAGES_KEY }}
 
@@ -744,4 +744,4 @@ jobs:
             -f "client_payload[log_tag]=${LOG_TAG}" \
             -f "client_payload[remote_run_url]=${RUN_URL}" \
             -f "client_payload[check_run_id]=${{ github.event.client_payload.check_run_id }}" \
-            -f "client_payload[results]=unit-deps=${{ needs.unit-deps.result }} e2e-deps=${{ needs.e2e-deps.result }} unit=${{ needs.unit.result }} host-query=${{ needs.host-query.result }} e2e=${{ needs.e2e.result }} import-memory=${{ needs.e2e-import-memory.result }} json-formula-cascade=${{ needs.e2e-json-formula-cascade.result }} postgres-only=${{ needs.e2e-postgres-only.result }}"
+            -f "client_payload[results]=unit-deps=${{ needs.unit-deps.result }} e2e-deps=${{ needs.e2e-deps.result }} unit=${{ needs.unit.result }} host-query=${{ needs.host-query.result }} e2e=${{ needs.e2e.result }} sensitive=${{ needs.e2e-sensitive.result }} json-formula-cascade=${{ needs.e2e-json-formula-cascade.result }} postgres-only=${{ needs.e2e-postgres-only.result }}"
