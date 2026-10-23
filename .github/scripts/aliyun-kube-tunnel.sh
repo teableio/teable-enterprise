@@ -56,5 +56,12 @@ grep -q "Waiting for connections" "${log}" || { cat "${log}" >&2; exit 1; }
 
 KUBECONFIG="${out}" kubectl config set-cluster "$(KUBECONFIG="${out}" kubectl config view -o jsonpath='{.clusters[0].name}')" \
   --server="https://127.0.0.1:${port}" --tls-server-name=kubernetes >/dev/null
-KUBECONFIG="${out}" kubectl version --request-timeout=30s >/dev/null
+# GitHub runners are in the US; the hop to the Hangzhou Session Manager is cross-border and a
+# single connection is occasionally reset (about 2% in testing), so retry the self-check.
+for attempt in 1 2 3; do
+  KUBECONFIG="${out}" kubectl version --request-timeout=30s >/dev/null && break
+  [[ "${attempt}" == 3 ]] && { cat "${log}" >&2; exit 1; }
+  echo "kubectl through the tunnel failed (attempt ${attempt}), retrying" >&2
+  sleep 5
+done
 echo "tunnel ready: KUBECONFIG=${out}"
