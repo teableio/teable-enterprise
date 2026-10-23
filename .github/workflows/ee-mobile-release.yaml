@@ -170,7 +170,11 @@ jobs:
       MOBILE_BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
     name: iOS · App Store Connect
     if: ${{ contains(fromJSON('["both","ios"]'), github.event.inputs.platforms || github.event.client_payload.platforms || 'both') }}
-    runs-on: macos-26
+    # iPhone Duo treats an app as adapted to its two displays only when it is built with the
+    # iOS 27.1 SDK or later; built with the iOS 26 SDK (macos-26's Xcode) it runs letterboxed
+    # and the App Store lists it as not made for the device. The xcode-27 image (macOS 27,
+    # arm64) carries Xcode 27; the step below pins 27.1 or later.
+    runs-on: xcode-27
     timeout-minutes: 90
     outputs:
       build_number: ${{ steps.meta.outputs.build_number }}
@@ -192,6 +196,27 @@ jobs:
           token: ${{ secrets.PACKAGES_KEY }}
           ref: ${{ env.EE_SHA }}
           fetch-depth: 1
+
+      - name: Select Xcode 27.1 or later
+        run: |
+          # The newest installed non-beta Xcode at 27.1 or above; fail rather than ship an older
+          # SDK. A beta reports the same version number, but App Store Connect rejects what it
+          # builds: the image names it Xcode_<v>_beta*.app, and most beta build numbers end in a
+          # letter (27B5038j) where a release or RC's do not (27B48).
+          BEST=; BEST_V=
+          for X in /Applications/Xcode*.app; do
+            OUT=$("$X/Contents/Developer/usr/bin/xcodebuild" -version 2>/dev/null)
+            V=$(printf '%s\n' "$OUT" | sed -n 's/^Xcode //p'); B=$(printf '%s\n' "$OUT" | sed -n 's/^Build version //p')
+            [ -n "$V" ] || continue
+            echo "$X: $V ($B)"
+            case "$X" in *[Bb]eta*) echo "  skipped: beta"; continue ;; esac
+            printf '%s' "$B" | grep -Eq '^[0-9]+[A-Z][0-9]+$' || { echo "  skipped: beta"; continue; }
+            if printf '%s\n%s\n' 27.1 "$V" | sort -V -C && { [ -z "$BEST_V" ] || printf '%s\n%s\n' "$BEST_V" "$V" | sort -V -C; }; then BEST=$X; BEST_V=$V; fi
+          done
+          [ -n "$BEST" ] || { echo "no release Xcode 27.1 or later on this image"; exit 1; }
+          sudo xcode-select -s "$BEST"
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i iphoneos
 
       - uses: pnpm/action-setup@v4
 
