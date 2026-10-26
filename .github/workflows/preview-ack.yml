@@ -271,6 +271,7 @@ jobs:
           EOF
 
       - name: Render and apply
+        id: render
         env:
           EDITION: ${{ env.EDITION }}
           MAIN_IMAGE: ${{ env.ACR }}/teable-${{ env.EDITION }}-preview:${{ env.IMAGE_TAG }}
@@ -286,6 +287,12 @@ jobs:
           PREVIEW_PRESET_ENV: ${{ secrets.PREVIEW_PRESET_ENV }}
         run: |
           set -euo pipefail
+          # A StatefulSet's volume claim template cannot change: an existing preview keeps
+          # the storage class its data volume was created with (new ones get the
+          # renderer's default).
+          PREVIEW_DATA_STORAGE_CLASS=$(kubectl get statefulset "teable-${INSTANCE_NAME}-data" \
+            --ignore-not-found -o jsonpath='{.spec.volumeClaimTemplates[0].spec.storageClassName}')
+          export PREVIEW_DATA_STORAGE_CLASS
           # The rendered manifest holds Secrets: write it to the runner, never print it.
           bash tooling/.github/scripts/render-preview-ack.sh > "${RUNNER_TEMP}/preview.yaml"
           kubectl apply -f "${RUNNER_TEMP}/preview.yaml"
@@ -324,6 +331,43 @@ jobs:
         continue-on-error: true
         run: bash tooling/.github/scripts/preview-bootstrap-admin.sh
 
+      # A failed rollout only says "timed out waiting for the condition". Print what the
+      # preview's pods are stuck on, and pass the first reason to the PR comment.
+      - name: Diagnose failed deploy
+        id: diagnose
+        if: failure() && steps.render.outcome == 'success'
+        run: |
+          set -uo pipefail
+          sel="teable.io/preview-instance=teable-${INSTANCE_NAME}"
+          kubectl get pods,pvc -l "${sel}" -o wide
+          # Per pod that is not Ready: why it is not scheduled, else the first container
+          # that is waiting on something other than its turn, else its last crash.
+          reasons=$(kubectl get pods -l "${sel}" -o json | jq -r '
+            .items[]
+            | select([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length == 0)
+            | .metadata.name as $pod
+            | [(.status.initContainerStatuses // [])[], (.status.containerStatuses // [])[]] as $cs
+            | ([.status.conditions[]? | select(.type == "PodScheduled" and .status == "False")
+                | "unschedulable: \(.message)"]
+              + [$cs[] | select(.state.waiting.reason // "" | test("^(|PodInitializing|ContainerCreating)$") | not)
+                | "\(.name) \(.state.waiting.reason)\(if .state.waiting.message then ": \(.state.waiting.message)" else "" end)"]
+              + [$cs[] | select(.lastState.terminated.reason)
+                | "\(.name) last exited \(.lastState.terminated.reason) (code \(.lastState.terminated.exitCode))"]
+              ) as $r
+            | "\($pod): \($r[0] // "not ready (\(.status.phase))")"')
+          printf 'Not ready:\n%s\n' "${reasons:-(none)}"
+          # Events expire after an hour; the recent warnings for this preview's objects.
+          kubectl get events --field-selector type=Warning -o json | jq -r --arg p "teable-${INSTANCE_NAME}" '
+            .items
+            | map(select(.involvedObject.name | test("^(data-)?" + $p + "(-|$)")))
+            | sort_by(.lastTimestamp // .eventTime) | .[-20:][]
+            | "\(.lastTimestamp // .eventTime) \(.involvedObject.kind)/\(.involvedObject.name) \(.reason): \(.message)"'
+          # Prefer a pod with a concrete reason: an app pod waiting for its database
+          # sorts first and only says "not ready".
+          reason=$( { printf '%s\n' "${reasons}" | grep -v ': not ready (' ; printf '%s\n' "${reasons}"; } \
+            | head -n1 | tr -d '`\r' | cut -c1-300)
+          echo "reason=${reason}" >> "$GITHUB_OUTPUT"
+
       - name: Create deployment status comment
         if: always()
         env:
@@ -335,6 +379,7 @@ jobs:
           ADMIN_PASSWORD: ${{ steps.preview_admin.outputs.admin_password }}
           ADMIN_TOKEN: ${{ steps.preview_admin.outputs.admin_token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          FAILURE_REASON: ${{ steps.diagnose.outputs.reason }}
         run: |
           url="https://${INSTANCE_NAME}.${PREVIEW_DOMAIN_BASE}"
           if [ "${SUCCESS}" = "true" ]; then
@@ -348,5 +393,8 @@ jobs:
             fi
           else
             body="**Deployment Status: ❌ Failed** [Run](${RUN_URL})"
+            if [ -n "${FAILURE_REASON}" ]; then
+              body="${body}"$'\n'"Stuck on: \`${FAILURE_REASON}\`"
+            fi
           fi
           gh api "repos/teableio/teable-ee/issues/${PR_NUMBER}/comments" -f body="${body}"
