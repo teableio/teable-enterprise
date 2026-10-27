@@ -310,7 +310,9 @@ jobs:
           ENABLE_TRACING: ${{ steps.labels.outputs.enable_tracing }}
         run: |
           set -euo pipefail
-          kubectl rollout status "statefulset/teable-${INSTANCE_NAME}-data" --timeout=300s
+          # When the base node is full, the data pod waits for the elastic node: create,
+          # join and pull images take a few minutes.
+          kubectl rollout status "statefulset/teable-${INSTANCE_NAME}-data" --timeout=600s
           kubectl rollout status "deployment/teable-${INSTANCE_NAME}-sandbox" --timeout=300s
           # First deploy runs the database migrations in an init container.
           kubectl rollout status "deployment/teable-${INSTANCE_NAME}" --timeout=600s
