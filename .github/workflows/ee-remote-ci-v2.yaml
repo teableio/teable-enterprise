@@ -312,7 +312,7 @@ jobs:
             if [ "${{ matrix.pkg.queryCli }}" = "true" ]; then
               pnpm --fail-if-no-match -F @teable/cli build &&
                 pnpm --fail-if-no-match -F @teable/cli typecheck &&
-                node --test packages/ai-tools-cli/test/query-commands.test.js
+                node --test packages/ai-tools-cli/test/query-commands.test.js packages/ai-tools-cli/test/managed-query-tool.test.js
             elif [ "${{ matrix.pkg.gate }}" = "v2_data_query" ]; then
               pnpm --fail-if-no-match -F "${{ matrix.pkg.name }}" typecheck &&
                 if [ "${{ matrix.pkg.queryTests }}" != "true" ] || [ "$DATA_QUERY_PRESENT" = "true" ]; then
