@@ -3,15 +3,24 @@
 # case or operation exceeds its checked-in p95 budget. The generated summary and
 # raw per-case receipts are uploaded with the private CI log.
 
-name: EE Remote CI (bench) — PR4215 diagnostic
+name: PR4215 Full-rule Headless Benchmark
 
-run-name: "PR4215 headless benchmark 9f02d831b — diagnostic ${{ github.run_id }}"
+run-name: "PR4215 full-rule benchmark — ${{ inputs.mode }} — ${{ github.run_id }}"
 
 on:
   workflow_dispatch:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      mode:
+        required: true
+        type: choice
+        options: [calibrate, gate, reject-probe]
+        default: gate
 
 concurrency:
-  group: pr4215-headless-diagnostic-${{ github.ref }}
+  group: pr4215-full-rule-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -19,8 +28,8 @@ permissions:
   actions: read
 
 env:
-  EE_SHA: 9f02d831bd7fd116911ebf04731baf431afb4258
-  LOG_TAG: pr4215-headless-${{ github.run_id }}-a${{ github.run_attempt }}
+  EE_SHA: ${{ inputs.source_sha }}
+  LOG_TAG: pr4215-rules-${{ github.run_id }}-a${{ github.run_attempt }}
   PR_NUMBER: "4215"
   RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
   LOG_DIR: /tmp/ci-logs
@@ -30,8 +39,8 @@ jobs:
   bench:
     runs-on: ubuntu-latest
     name: V2 Benchmarks (${{ matrix.family }})
-    # One leg per behavior family; each runs its family representative with 20 fresh-runtime
-    # samples, so the legs finish in parallel instead of a ~40-minute single job.
+    # Each behavior-family leg runs one bounded case per registered rule in that family.
+    # Full-size stress scenarios remain opt-in; bounded counterparts have separate identities.
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -64,13 +73,16 @@ jobs:
       TEABLE_BENCH_OUT_DIR: /tmp/teable-headless-bench
       TEABLE_BENCH_SAMPLES: 20
       TEABLE_BENCH_FAMILIES: ${{ matrix.family }}
+      TEABLE_BENCH_CALIBRATE: ${{ inputs.mode == 'calibrate' && '2' || '' }}
+      TEABLE_BENCH_CALIBRATE_SOURCE: "GitHub ubuntu-latest, Node 24.19.0, PostgreSQL 16, source ${{ inputs.source_sha }}, run ${{ github.run_id }}"
+      TEABLE_BENCH_BUDGETS: /tmp/teable-headless-bench/calibrated.budgets.json
 
     steps:
       - name: 📦 Checkout teable-ee
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
-          ref: 9f02d831bd7fd116911ebf04731baf431afb4258
+          ref: ${{ inputs.source_sha }}
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
@@ -90,13 +102,20 @@ jobs:
         run: |
           mkdir -p "$LOG_DIR" "$TEABLE_BENCH_OUT_DIR"
           status=0
-          {
+          (
+            set -euo pipefail
             echo "=== v2 headless benchmark catalogue ==="
-            pnpm -r --filter @teable/v2-headless-bench... build
-            pnpm --filter @teable/v2-headless-bench bench:ci
-            echo "=== summary ==="
-            cat "$TEABLE_BENCH_OUT_DIR/summary.json"
-          } >> "$LOG_DIR/bench.log" 2>&1 || status=$?
+            if [ "${{ inputs.mode }}" != "calibrate" ]; then
+              cp community/packages/v2/headless-bench/budgets/catalogue.budgets.json "$TEABLE_BENCH_BUDGETS"
+            fi
+            if [ "${{ inputs.mode }}" = "reject-probe" ]; then
+              node -e 'const fs=require("fs"); const p=process.env.TEABLE_BENCH_BUDGETS; const b=JSON.parse(fs.readFileSync(p)); for(const c of Object.values(b.cases)){c.maxP95Ms=0.000001;for(const o of Object.values(c.operations))o.maxP95Ms=0.000001;}fs.writeFileSync(p,JSON.stringify(b));'
+            fi
+            pnpm -r --filter @teable/v2-headless-bench... build &&
+              pnpm --filter @teable/v2-headless-bench bench:ci &&
+              echo "=== summary ===" &&
+              cat "$TEABLE_BENCH_OUT_DIR/summary.json"
+          ) >> "$LOG_DIR/bench.log" 2>&1 || status=$?
           echo "bench exit=$status family=${{ matrix.family }} ($(wc -l < "$LOG_DIR/bench.log") log lines)"
           exit $status
 
