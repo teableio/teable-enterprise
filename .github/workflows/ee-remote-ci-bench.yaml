@@ -1,19 +1,17 @@
-# EE Remote CI — bench suite (was teable-ee's "V2 Benchmarks"). One workflow per suite so
-# partial reruns produce clean run pages. SOURCE OF TRUTH lives in teable-ee
-# .github/enterprise-ci/ and is synced here. The benchmarks assert nothing about timings; the
-# suite fails only if a benchmark does, and its numbers are in the private log. They read
-# higher here than on teable-ee's 2-core runners — compare runs within this suite only.
+# EE Remote CI — deterministic v2 headless benchmark gate. It runs the bounded
+# catalogue on PostgreSQL, verifies every correctness oracle, and fails when a
+# case or operation exceeds its checked-in p95 budget. The generated summary and
+# raw per-case receipts are uploaded with the private CI log.
 
-name: EE Remote CI (bench)
+name: EE Remote CI (bench) — PR4215 diagnostic
 
-run-name: 'EE Remote CI bench — PR #${{ github.event.client_payload.pr_number }} ${{ github.event.client_payload.log_tag }}'
+run-name: "PR4215 headless benchmark 9f02d831b — diagnostic ${{ github.run_id }}"
 
 on:
-  repository_dispatch:
-    types: [ee-remote-ci-bench]
+  workflow_dispatch:
 
 concurrency:
-  group: ee-remote-ci-bench-${{ github.event.client_payload.pr_number || github.event.client_payload.ee_ref }}
+  group: pr4215-headless-diagnostic-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -21,9 +19,9 @@ permissions:
   actions: read
 
 env:
-  EE_SHA: ${{ github.event.client_payload.ee_sha }}
-  LOG_TAG: ${{ github.event.client_payload.log_tag }}
-  PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+  EE_SHA: 9f02d831bd7fd116911ebf04731baf431afb4258
+  LOG_TAG: pr4215-headless-${{ github.run_id }}-a${{ github.run_attempt }}
+  PR_NUMBER: "4215"
   RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
   LOG_DIR: /tmp/ci-logs
   LOGS_REPO: teableio/teable-ci-logs
@@ -31,19 +29,48 @@ env:
 jobs:
   bench:
     runs-on: ubuntu-latest
-    name: V2 Benchmarks
+    name: V2 Benchmarks (${{ matrix.family }})
+    # One leg per behavior family; each runs its family representative with 20 fresh-runtime
+    # samples, so the legs finish in parallel instead of a ~40-minute single job.
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        family:
+          - storage-query
+          - write
+          - formula
+          - lookup
+          - rollup
+          - conditional-link
+          - propagation
+          - api-limit
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: teable_bench
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d teable_bench"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
     env:
       CI: 1
-      TESTCONTAINERS_REUSE_ENABLE: 'false'
-      TESTCONTAINERS_RYUK_DISABLED: 'true'
+      PRISMA_DATABASE_URL: postgres://postgres@127.0.0.1:5432/teable_bench
+      TEABLE_BENCH_OUT_DIR: /tmp/teable-headless-bench
+      TEABLE_BENCH_SAMPLES: 20
+      TEABLE_BENCH_FAMILIES: ${{ matrix.family }}
 
     steps:
       - name: 📦 Checkout teable-ee
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
-          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          ref: 9f02d831bd7fd116911ebf04731baf431afb4258
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
@@ -52,22 +79,25 @@ jobs:
         with:
           node-version: 24.19.0
 
-      - name: 📥 Monorepo install
+      - name: 📥 Install headless benchmark dependencies
         uses: ./.github/actions/pnpm-install
         with:
           install-args: |
             --filter
-            @teable/v2-benchmark-node...
+            @teable/v2-headless-bench...
 
-      - name: 🧪 Run v2 benchmarks
+      - name: 🧪 Run bounded PostgreSQL benchmark catalogue
         run: |
-          mkdir -p "$LOG_DIR"
+          mkdir -p "$LOG_DIR" "$TEABLE_BENCH_OUT_DIR"
           status=0
           {
-            echo "=== v2 benchmarks ==="
-            pnpm -C community/packages/v2/benchmark-node bench
+            echo "=== v2 headless benchmark catalogue ==="
+            pnpm -r --filter @teable/v2-headless-bench... build
+            pnpm --filter @teable/v2-headless-bench bench:ci
+            echo "=== summary ==="
+            cat "$TEABLE_BENCH_OUT_DIR/summary.json"
           } >> "$LOG_DIR/bench.log" 2>&1 || status=$?
-          echo "bench exit=$status ($(wc -l < "$LOG_DIR/bench.log") log lines)"
+          echo "bench exit=$status family=${{ matrix.family }} ($(wc -l < "$LOG_DIR/bench.log") log lines)"
           exit $status
 
       - name: 📤 Ship log
@@ -77,59 +107,17 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           mkdir -p "$LOG_DIR"
+          LOG_FILE="$LOG_DIR/bench-${{ matrix.family }}.log"
           [ -f "$LOG_DIR/bench.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/bench.log"
+          mv "$LOG_DIR/bench.log" "$LOG_FILE"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/bench.log" -R "$LOGS_REPO" --clobber
+          gh release upload "$LOG_TAG" "$LOG_FILE" -R "$LOGS_REPO" --clobber
+          if [ -d "$TEABLE_BENCH_OUT_DIR" ]; then
+            tar -C "$TEABLE_BENCH_OUT_DIR" -czf "$LOG_DIR/headless-bench-${{ matrix.family }}.tgz" .
+            gh release upload "$LOG_TAG" "$LOG_DIR/headless-bench-${{ matrix.family }}.tgz" -R "$LOGS_REPO" --clobber
+          fi
           if [ "$JOB_STATUS" != "success" ]; then
-            echo failed > "$LOG_DIR/bench.failed"
-            gh release upload "$LOG_TAG" "$LOG_DIR/bench.failed" -R "$LOGS_REPO" --clobber
+            echo failed > "$LOG_DIR/bench-${{ matrix.family }}.failed"
+            gh release upload "$LOG_TAG" "$LOG_DIR/bench-${{ matrix.family }}.failed" -R "$LOGS_REPO" --clobber
           fi
 
-  verdict:
-    needs: [bench]
-    if: always()
-    runs-on: ubuntu-latest
-    name: Bench verdict
-    timeout-minutes: 5
-    steps:
-      - name: 📦 Checkout teable-ee (.github only)
-        uses: actions/checkout@v4
-        with:
-          repository: teableio/teable-ee
-          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
-          token: ${{ secrets.PACKAGES_KEY }}
-          persist-credentials: false
-          sparse-checkout: |
-            .github
-
-      - name: 🎫 Mint App token
-        id: app
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.RCI_APP_ID }}
-          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
-          owner: teableio
-          repositories: teable-ee
-
-      - name: 🧾 Conclude check run
-        uses: ./.github/actions/remote-ci-conclude
-        with:
-          suite: bench
-          results: 'bench=${{ needs.bench.result }}'
-          app-token: ${{ steps.app.outputs.token }}
-          logs-token: ${{ secrets.PACKAGES_KEY }}
-
-      - name: 📨 Dispatch ee-remote-ci-done
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-        run: |
-          gh api repos/teableio/teable-ee/dispatches \
-            -f event_type=ee-remote-ci-done \
-            -f "client_payload[suite]=bench" \
-            -f "client_payload[pr_number]=${PR_NUMBER}" \
-            -f "client_payload[ee_sha]=${EE_SHA}" \
-            -f "client_payload[log_tag]=${LOG_TAG}" \
-            -f "client_payload[remote_run_url]=${RUN_URL}" \
-            -f "client_payload[check_run_id]=${{ github.event.client_payload.check_run_id }}" \
-            -f "client_payload[results]=bench=${{ needs.bench.result }}"
