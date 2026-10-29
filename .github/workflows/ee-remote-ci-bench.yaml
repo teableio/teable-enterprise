@@ -1,59 +1,32 @@
-# EE Remote CI — deterministic v2 headless benchmark gate. It runs the bounded
-# catalogue on PostgreSQL, verifies every correctness oracle, and fails when a
-# case or operation exceeds its checked-in p95 budget. The generated summary and
-# raw per-case receipts are uploaded with the private CI log.
-
-name: PR4215 Full-rule Headless Benchmark
-
-run-name: "PR4215 full-rule benchmark — ${{ inputs.mode }} — ${{ github.run_id }}"
-
+name: PR4215 headless HTTP diagnostic
+run-name: "PR4215 headless HTTP ${{ inputs.mode }} — ${{ github.run_id }}"
 on:
   workflow_dispatch:
     inputs:
       source_sha:
-        required: true
         type: string
-      mode:
         required: true
+      mode:
         type: choice
-        options: [calibrate, gate, reject-probe]
-        default: gate
-
-concurrency:
-  group: pr4215-full-rule-${{ github.ref }}
-  cancel-in-progress: true
-
+        required: true
+        options: [calibrate, gate]
 permissions:
   contents: read
   actions: read
-
 env:
   EE_SHA: ${{ inputs.source_sha }}
-  LOG_TAG: pr4215-rules-${{ github.run_id }}-a${{ github.run_attempt }}
+  LOG_TAG: pr4215-http-${{ github.run_id }}-a${{ github.run_attempt }}
   PR_NUMBER: "4215"
   RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
   LOG_DIR: /tmp/ci-logs
   LOGS_REPO: teableio/teable-ci-logs
-
 jobs:
   bench:
     runs-on: ubuntu-latest
-    name: V2 Benchmarks (${{ matrix.family }})
+    name: V2 headless HTTP benchmark
     # Each behavior-family leg runs one bounded case per registered rule in that family.
     # Full-size stress scenarios remain opt-in; bounded counterparts have separate identities.
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        family:
-          - storage-query
-          - write
-          - formula
-          - lookup
-          - rollup
-          - conditional-link
-          - propagation
-          - api-limit
     services:
       postgres:
         image: postgres:16-alpine
@@ -72,10 +45,10 @@ jobs:
       PRISMA_DATABASE_URL: postgres://postgres@127.0.0.1:5432/teable_bench
       TEABLE_BENCH_OUT_DIR: /tmp/teable-headless-bench
       TEABLE_BENCH_SAMPLES: 20
-      TEABLE_BENCH_FAMILIES: ${{ matrix.family }}
-      TEABLE_BENCH_CALIBRATE: ${{ inputs.mode == 'calibrate' && '2' || '' }}
-      TEABLE_BENCH_CALIBRATE_SOURCE: "GitHub ubuntu-latest, Node 24.19.0, PostgreSQL 16, source ${{ inputs.source_sha }}, run ${{ github.run_id }}"
-      TEABLE_BENCH_BUDGETS: /tmp/teable-headless-bench/calibrated.budgets.json
+      TEABLE_BENCH_FAMILIES: headless-http
+      TEABLE_BENCH_CALIBRATE: ${{ inputs.mode == 'calibrate' && '3' || '' }}
+      TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.19.0 PostgreSQL 16; PR4215 ${{ inputs.source_sha }}; run ${{ github.run_id }}
+      TEABLE_BENCH_HTTP_BUDGETS: /tmp/teable-headless-bench/http.budgets.json
 
     steps:
       - name: 📦 Checkout teable-ee
@@ -105,18 +78,21 @@ jobs:
           (
             set -euo pipefail
             echo "=== v2 headless benchmark catalogue ==="
-            if [ "${{ inputs.mode }}" != "calibrate" ]; then
-              cp community/packages/v2/headless-bench/budgets/catalogue.budgets.json "$TEABLE_BENCH_BUDGETS"
-            fi
-            if [ "${{ inputs.mode }}" = "reject-probe" ]; then
-              node -e 'const fs=require("fs"); const p=process.env.TEABLE_BENCH_BUDGETS; const b=JSON.parse(fs.readFileSync(p)); for(const c of Object.values(b.cases)){c.maxP95Ms=0.000001;for(const o of Object.values(c.operations))o.maxP95Ms=0.000001;}fs.writeFileSync(p,JSON.stringify(b));'
+            if [ "${{ inputs.mode }}" = 'gate' ]; then
+              cp community/packages/v2/headless-bench/budgets/http.budgets.json "$TEABLE_BENCH_HTTP_BUDGETS"
             fi
             pnpm -r --filter @teable/v2-headless-bench... build &&
-              pnpm --filter @teable/v2-headless-bench bench:ci &&
-              echo "=== summary ===" &&
-              cat "$TEABLE_BENCH_OUT_DIR/summary.json"
+              if [ "$TEABLE_BENCH_FAMILIES" = 'headless-http' ]; then
+                pnpm --filter @teable/v2-headless-bench bench:http-ci
+              else
+                pnpm --filter @teable/v2-headless-bench bench:ci
+              fi &&
+              echo "=== summary ===" && cat "$TEABLE_BENCH_OUT_DIR/summary.json"
           ) >> "$LOG_DIR/bench.log" 2>&1 || status=$?
-          echo "bench exit=$status family=${{ matrix.family }} ($(wc -l < "$LOG_DIR/bench.log") log lines)"
+          if [ -f "$TEABLE_BENCH_OUT_DIR/summary.md" ]; then
+            cat "$TEABLE_BENCH_OUT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "bench exit=$status family=headless-http ($(wc -l < "$LOG_DIR/bench.log") log lines)"
           exit $status
 
       - name: 📤 Ship log
@@ -126,17 +102,17 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           mkdir -p "$LOG_DIR"
-          LOG_FILE="$LOG_DIR/bench-${{ matrix.family }}.log"
+          LOG_FILE="$LOG_DIR/bench-headless-http.log"
           [ -f "$LOG_DIR/bench.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/bench.log"
           mv "$LOG_DIR/bench.log" "$LOG_FILE"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
           gh release upload "$LOG_TAG" "$LOG_FILE" -R "$LOGS_REPO" --clobber
           if [ -d "$TEABLE_BENCH_OUT_DIR" ]; then
-            tar -C "$TEABLE_BENCH_OUT_DIR" -czf "$LOG_DIR/headless-bench-${{ matrix.family }}.tgz" .
-            gh release upload "$LOG_TAG" "$LOG_DIR/headless-bench-${{ matrix.family }}.tgz" -R "$LOGS_REPO" --clobber
+            tar -C "$TEABLE_BENCH_OUT_DIR" -czf "$LOG_DIR/headless-bench-headless-http.tgz" .
+            gh release upload "$LOG_TAG" "$LOG_DIR/headless-bench-headless-http.tgz" -R "$LOGS_REPO" --clobber
           fi
           if [ "$JOB_STATUS" != "success" ]; then
-            echo failed > "$LOG_DIR/bench-${{ matrix.family }}.failed"
-            gh release upload "$LOG_TAG" "$LOG_DIR/bench-${{ matrix.family }}.failed" -R "$LOGS_REPO" --clobber
+            echo failed > "$LOG_DIR/bench-headless-http.failed"
+            gh release upload "$LOG_TAG" "$LOG_DIR/bench-headless-http.failed" -R "$LOGS_REPO" --clobber
           fi
 
