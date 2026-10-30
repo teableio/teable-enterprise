@@ -1,5 +1,5 @@
-name: PR4215 complexity benchmark gate
-run-name: "PR4215 complexity gate — ${{ github.run_id }}"
+name: PR4215 unified benchmark report
+run-name: "PR4215 unified benchmark — ${{ github.run_id }}"
 on:
   workflow_dispatch:
     inputs:
@@ -8,11 +8,40 @@ on:
         required: true
 permissions:
   contents: read
+  actions: read
+env:
+  EE_SHA: ${{ inputs.source_sha }}
+  LOG_TAG: pr4215-unified-${{ github.run_id }}-a${{ github.run_attempt }}
+  PR_NUMBER: "4215"
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  LOG_DIR: /tmp/ci-logs
+  LOGS_REPO: teableio/teable-ci-logs
 jobs:
-  calibrate:
-    name: Complexity budget gate
+  bench:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    name: V2 Benchmarks (${{ matrix.family }})
+    # Each behavior-family leg runs one bounded case per registered rule in that family.
+    # Full-size stress scenarios remain opt-in; bounded counterparts have separate identities.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        family:
+          - storage-query
+          - write
+          - formula
+          - lookup
+          - rollup
+          - conditional-link
+          - propagation
+          - api-limit
+          - headless-http
+          - core-operations
+          - core-extra
+          - core-scale
+          - core-transitions
+          - core-views
+          - complexity-score
     services:
       postgres:
         image: postgres:16-alpine
@@ -28,42 +57,106 @@ jobs:
           --health-retries 20
     env:
       CI: 1
-      DATABASE_URL: postgres://postgres@127.0.0.1:5432/teable_bench
-      OUT_DIR: /tmp/teable-complexity
-      LOG_TAG: pr4215-complexity-gate-${{ github.run_id }}-a${{ github.run_attempt }}
+      PRISMA_DATABASE_URL: postgres://postgres@127.0.0.1:5432/teable_bench
+      TEABLE_BENCH_OUT_DIR: /tmp/teable-headless-bench
+      TEABLE_BENCH_SAMPLES: 20
+      TEABLE_BENCH_FAMILIES: ${{ matrix.family }}
+
     steps:
-      - name: Checkout Teable EE
+      - name: 📦 Checkout teable-ee
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
           ref: ${{ inputs.source_sha }}
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
-      - name: Use Node.js
+
+      - name: 🟢 Use Node.js 24.19.0
         uses: actions/setup-node@v4
         with:
           node-version: 24.19.0
-      - name: Install dependencies
+
+      - name: 📥 Install headless benchmark dependencies
         uses: ./.github/actions/pnpm-install
         with:
           install-args: |
             --filter
             @teable/v2-headless-bench...
-      - name: Run independent-holdout gate
+
+      - name: 🧪 Run bounded PostgreSQL benchmark catalogue
         run: |
-          mkdir -p "$OUT_DIR"
-          pnpm -r --filter @teable/v2-headless-bench... build > "$OUT_DIR/build.log" 2>&1
-          pnpm --filter @teable/v2-headless-bench bench:complexity-ci gate --out-dir "$OUT_DIR" --runner "github-ubuntu-latest-node24-postgres16" --calibration budgets/complexity.calibration.json --calibration-sha256 602c17100438a9299a1d75081f182fa0d85603b18b9ffbf28f3ba0c296024b86 > "$OUT_DIR/gate.log" 2>&1
-      - name: Render gate report
+          mkdir -p "$LOG_DIR" "$TEABLE_BENCH_OUT_DIR"
+          status=0
+          (
+            set -euo pipefail
+            echo "=== v2 headless benchmark catalogue ==="
+            pnpm -r --filter @teable/v2-headless-bench... build &&
+              case "$TEABLE_BENCH_FAMILIES" in
+                headless-http) pnpm --filter @teable/v2-headless-bench bench:http-ci ;;
+                complexity-score) DATABASE_URL="$PRISMA_DATABASE_URL" pnpm --filter @teable/v2-headless-bench bench:complexity-ci gate --out-dir "$TEABLE_BENCH_OUT_DIR" --runner github-ubuntu-latest-node24-postgres16 --calibration budgets/complexity.calibration.json --calibration-sha256 602c17100438a9299a1d75081f182fa0d85603b18b9ffbf28f3ba0c296024b86 --json "$TEABLE_BENCH_OUT_DIR/summary.json" --markdown "$TEABLE_BENCH_OUT_DIR/summary.md" ;;
+                core-*) TEABLE_BENCH_TRACK="$TEABLE_BENCH_FAMILIES" pnpm --filter @teable/v2-headless-bench bench:core-ci ;;
+                *) pnpm --filter @teable/v2-headless-bench bench:ci ;;
+              esac &&
+              echo "=== summary ===" && cat "$TEABLE_BENCH_OUT_DIR/summary.json"
+          ) >> "$LOG_DIR/bench.log" 2>&1 || status=$?
+          echo "bench exit=$status family=${{ matrix.family }} ($(wc -l < "$LOG_DIR/bench.log") log lines)"
+          exit $status
+
+      - name: 📤 Ship log
         if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
         run: |
-          if [ -f "$OUT_DIR/gate.md" ]; then cat "$OUT_DIR/gate.md" >> "$GITHUB_STEP_SUMMARY"; fi
-      - name: Ship private benchmark evidence
+          mkdir -p "$LOG_DIR"
+          LOG_FILE="$LOG_DIR/bench-${{ matrix.family }}.log"
+          [ -f "$LOG_DIR/bench.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/bench.log"
+          mv "$LOG_DIR/bench.log" "$LOG_FILE"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_FILE" -R "$LOGS_REPO" --clobber
+          if [ -d "$TEABLE_BENCH_OUT_DIR" ]; then
+            tar -C "$TEABLE_BENCH_OUT_DIR" -czf "$LOG_DIR/headless-bench-${{ matrix.family }}.tgz" .
+            gh release upload "$LOG_TAG" "$LOG_DIR/headless-bench-${{ matrix.family }}.tgz" -R "$LOGS_REPO" --clobber
+          fi
+          if [ "$JOB_STATUS" != "success" ]; then
+            echo failed > "$LOG_DIR/bench-${{ matrix.family }}.failed"
+            gh release upload "$LOG_TAG" "$LOG_DIR/bench-${{ matrix.family }}.failed" -R "$LOGS_REPO" --clobber
+          fi
+
+  verdict:
+    needs: [bench]
+    if: always()
+    runs-on: ubuntu-latest
+    name: Bench verdict
+    timeout-minutes: 5
+    steps:
+      - name: 📦 Checkout teable-ee (.github only)
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ inputs.source_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github
+            community/.github/scripts
+
+      - name: 🧮 Consolidate benchmark report
+        id: report
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
         run: |
-          mkdir -p "$OUT_DIR"
-          gh release create "$LOG_TAG" -R teableio/teable-ci-logs --title "PR4215 complexity gate ${{ github.run_id }}" --notes "source=${{ inputs.source_sha }} run=${{ github.run_id }}" 2>/dev/null || true
-          tar -C "$OUT_DIR" -czf /tmp/complexity-gate.tgz .
-          gh release upload "$LOG_TAG" /tmp/complexity-gate.tgz -R teableio/teable-ci-logs --clobber
+          mkdir -p bench-evidence
+          gh release download "$LOG_TAG" -R "$LOGS_REPO" -D bench-evidence --pattern 'headless-bench-*.tgz' --clobber || true
+          for archive in bench-evidence/headless-bench-*.tgz; do
+            [ -f "$archive" ] || continue
+            dir="bench-evidence/$(basename "$archive" .tgz)"
+            mkdir -p "$dir"
+            tar -xzf "$archive" -C "$dir" || true
+          done
+          status=0
+          node community/.github/scripts/benchmark-unified-report.mjs --root bench-evidence --families 'storage-query,write,formula,lookup,rollup,conditional-link,propagation,api-limit,headless-http,core-operations,core-extra,core-scale,core-transitions,core-views,complexity-score' --output bench-evidence/bench-unified.md || status=$?
+          gh release upload "$LOG_TAG" bench-evidence/bench-unified.md -R "$LOGS_REPO" --clobber
+          exit "$status"
+
