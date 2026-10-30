@@ -1,5 +1,5 @@
-name: PR4215 structure-scale core case gate
-run-name: "PR4215 structure-scale core gate — ${{ github.run_id }}"
+name: PR4215 rollup optimization calibration
+run-name: "PR4215 rollup optimization calibration — ${{ github.run_id }}"
 on:
   workflow_dispatch:
     inputs:
@@ -10,13 +10,13 @@ permissions:
   contents: read
 jobs:
   calibrate:
-    name: Core case gate (${{ matrix.track }})
+    name: Core case calibration (${{ matrix.track }})
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        track: [core-relation-cases, core-field-transitions, core-fanout-deletion, core-volume-cases]
+        track: [rollup]
     services:
       postgres:
         image: postgres:16-alpine
@@ -35,8 +35,11 @@ jobs:
       PRISMA_DATABASE_URL: postgres://postgres@127.0.0.1:5432/teable_bench
       TEABLE_BENCH_OUT_DIR: /tmp/teable-headless-bench
       TEABLE_BENCH_SAMPLES: 20
-      TEABLE_BENCH_TRACK: ${{ matrix.track }}
-      LOG_TAG: pr4215-structure-scale-gate-${{ github.run_id }}-a${{ github.run_attempt }}
+      TEABLE_BENCH_FAMILIES: rollup
+      TEABLE_TSDOWN_DISABLE_DTS: '1'
+      TEABLE_BENCH_CALIBRATE: 3
+      TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.19.0 PostgreSQL 16 PR4215 ${{ inputs.source_sha }} run ${{ github.run_id }}
+      LOG_TAG: pr4215-rollup-optimization-${{ github.run_id }}-a${{ github.run_attempt }}
     steps:
       - name: Checkout Teable EE
         uses: actions/checkout@v4
@@ -55,17 +58,17 @@ jobs:
           install-args: |
             --filter
             @teable/v2-headless-bench...
-      - name: Run PostgreSQL case gate
+      - name: Run PostgreSQL case calibration
         run: |
           mkdir -p "$TEABLE_BENCH_OUT_DIR"
           pnpm -r --filter @teable/v2-headless-bench... build > "$TEABLE_BENCH_OUT_DIR/build.log" 2>&1
-          pnpm --filter @teable/v2-headless-bench bench:core-ci > "$TEABLE_BENCH_OUT_DIR/gate.log" 2>&1
+          TEABLE_BENCH_BUDGETS="$TEABLE_BENCH_OUT_DIR/catalogue.budgets.json" pnpm --filter @teable/v2-headless-bench bench:ci > "$TEABLE_BENCH_OUT_DIR/calibration.log" 2>&1
       - name: Ship private evidence
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
         run: |
           mkdir -p "$TEABLE_BENCH_OUT_DIR"
-          gh release create "$LOG_TAG" -R teableio/teable-ci-logs --title "PR4215 structure-scale case gate ${{ github.run_id }}" --notes "source=${{ inputs.source_sha }}" 2>/dev/null || true
-          tar -C "$TEABLE_BENCH_OUT_DIR" -czf "/tmp/structure-scale-${TEABLE_BENCH_TRACK}.tgz" .
-          gh release upload "$LOG_TAG" "/tmp/structure-scale-${TEABLE_BENCH_TRACK}.tgz" -R teableio/teable-ci-logs --clobber
+          gh release create "$LOG_TAG" -R teableio/teable-ci-logs --title "PR4215 expanded case calibration ${{ github.run_id }}" --notes "source=${{ inputs.source_sha }}" 2>/dev/null || true
+          tar -C "$TEABLE_BENCH_OUT_DIR" -czf "/tmp/rollup-optimization.tgz" .
+          gh release upload "$LOG_TAG" "/tmp/rollup-optimization.tgz" -R teableio/teable-ci-logs --clobber
