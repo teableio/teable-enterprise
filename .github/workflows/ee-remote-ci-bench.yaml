@@ -37,9 +37,7 @@ jobs:
       TEABLE_BENCH_SAMPLES: 20
       TEABLE_BENCH_FAMILIES: ${{ matrix.track }}
       TEABLE_TSDOWN_DISABLE_DTS: '1'
-      TEABLE_BENCH_CALIBRATE: 3
-      TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.19.0 PostgreSQL 16 PR4215 ${{ inputs.source_sha }} run ${{ github.run_id }}
-      LOG_TAG: pr4215-family-optimization-${{ github.run_id }}-a${{ github.run_attempt }}
+      LOG_TAG: pr4215-family-gate-${{ github.run_id }}-a${{ github.run_attempt }}
     steps:
       - name: Checkout Teable EE
         uses: actions/checkout@v4
@@ -62,7 +60,7 @@ jobs:
         run: |
           mkdir -p "$TEABLE_BENCH_OUT_DIR"
           pnpm -r --filter @teable/v2-headless-bench... build > "$TEABLE_BENCH_OUT_DIR/build.log" 2>&1
-          TEABLE_BENCH_BUDGETS="$TEABLE_BENCH_OUT_DIR/catalogue.budgets.json" pnpm --filter @teable/v2-headless-bench bench:ci > "$TEABLE_BENCH_OUT_DIR/calibration.log" 2>&1
+          pnpm --filter @teable/v2-headless-bench bench:ci > "$TEABLE_BENCH_OUT_DIR/calibration.log" 2>&1
       - name: Ship private evidence
         if: always()
         env:
