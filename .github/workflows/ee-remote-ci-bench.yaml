@@ -71,4 +71,4 @@ jobs:
           mkdir -p "$TEABLE_BENCH_OUT_DIR"
           gh release create "$LOG_TAG" -R teableio/teable-ci-logs --title "PR4215 expanded case calibration ${{ github.run_id }}" --notes "source=${{ inputs.source_sha }}" 2>/dev/null || true
           tar -C "$TEABLE_BENCH_OUT_DIR" -czf "/tmp/optimized-${{ matrix.track }}.tgz" .
-          gh release upload "$LOG_TAG" "/tmp/rollup-optimization.tgz" -R teableio/teable-ci-logs --clobber
+          gh release upload "$LOG_TAG" "/tmp/optimized-${{ matrix.track }}.tgz" -R teableio/teable-ci-logs --clobber
