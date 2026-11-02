@@ -64,10 +64,10 @@ jobs:
           echo "runtime_tag=ee-bench-runtime-v1-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
           echo "runtime_asset=ee-bench-runtime-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.zst" >> "$GITHUB_OUTPUT"
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 📥 Install headless benchmark dependencies
         uses: ./.github/actions/pnpm-install
@@ -119,7 +119,7 @@ jobs:
               done < "$stale_releases" &&
               gh release create "$RUNTIME_RELEASE_TAG" -R "$LOGS_REPO" --prerelease \
                 --title "Temporary EE benchmark runtime ${{ github.run_id }}.${{ github.run_attempt }}" \
-                --notes "checkout=${{ steps.source.outputs.sha }} node=24.19.0 run=$RUN_URL cleanup=next-producer-after-24h" &&
+                --notes "checkout=${{ steps.source.outputs.sha }} node=24.22.2 run=$RUN_URL cleanup=next-producer-after-24h" &&
               gh release upload "$RUNTIME_RELEASE_TAG" "/tmp/$RUNTIME_ASSET" -R "$LOGS_REPO"
           } >> "$log" 2>&1 || status=$?
           echo "runtime publish exit=$status ($(wc -l < "$log") log lines)"
@@ -264,10 +264,10 @@ jobs:
           echo "::add-mask::$PRISMA_DATABASE_URL"
           echo "::add-mask::$GH_TOKEN"
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 🔐 Restore private benchmark runtime
         env:
@@ -298,7 +298,7 @@ jobs:
       - name: 🧪 Calibrate
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-          TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.19.0 PostgreSQL 16 calibration run ${{ github.run_id }} fixed leg ${{ matrix.track }}
+          TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.22.2 PostgreSQL 16 calibration run ${{ github.run_id }} fixed leg ${{ matrix.track }}
         run: |
           set -uo pipefail
           mkdir -p "$LOG_DIR" "$TEABLE_BENCH_OUT_DIR" /tmp/calibration
@@ -396,10 +396,10 @@ jobs:
           echo "::add-mask::$PRISMA_DATABASE_URL"
           echo "::add-mask::$GH_TOKEN"
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 🔐 Restore private benchmark runtime
         env:
@@ -430,7 +430,7 @@ jobs:
       - name: 🧪 Calibrate
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-          TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.19.0 PostgreSQL 16 calibration run ${{ github.run_id }} catalogue leg ${{ matrix.family }}
+          TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.22.2 PostgreSQL 16 calibration run ${{ github.run_id }} catalogue leg ${{ matrix.family }}
         run: |
           set -uo pipefail
           mkdir -p "$LOG_DIR" "$TEABLE_BENCH_OUT_DIR" /tmp/calibration
@@ -515,10 +515,10 @@ jobs:
           echo "::add-mask::$PRISMA_DATABASE_URL"
           echo "::add-mask::$GH_TOKEN"
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 🔐 Restore private benchmark runtime
         env:
@@ -549,7 +549,7 @@ jobs:
       - name: 🧪 Calibrate
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
-          TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.19.0 PostgreSQL 16 calibration run ${{ github.run_id }} HTTP leg
+          TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.22.2 PostgreSQL 16 calibration run ${{ github.run_id }} HTTP leg
         run: |
           set -uo pipefail
           mkdir -p "$LOG_DIR" "$TEABLE_BENCH_OUT_DIR" /tmp/calibration
@@ -631,10 +631,10 @@ jobs:
           echo "::add-mask::$PRISMA_DATABASE_URL"
           echo "::add-mask::$GH_TOKEN"
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 🔐 Restore private benchmark runtime
         env:
@@ -679,7 +679,7 @@ jobs:
               --out-dir /tmp/bench-output \
               --samples 100 \
               --headroom 3 \
-              --source "GitHub ubuntu-latest Node 24.19.0 PostgreSQL 16 calibration run ${{ github.run_id }} complexity leg" \
+              --source "GitHub ubuntu-latest Node 24.22.2 PostgreSQL 16 calibration run ${{ github.run_id }} complexity leg" \
               --runner github-ubuntu-latest-node24-postgres16 \
               --json /tmp/calibration/complexity.calibration.json \
               --markdown /tmp/calibration/complexity.calibration.md &&
