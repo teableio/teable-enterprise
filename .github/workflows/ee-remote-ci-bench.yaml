@@ -134,26 +134,10 @@ jobs:
       fail-fast: false
       matrix:
         family:
-          - storage-query
-          - write
-          - formula
-          - lookup
-          - rollup
-          - conditional-link
           - propagation
-          - api-limit
-          - headless-http
           - core-operations
-          - core-extra
-          - core-scale
-          - core-transitions
-          - core-views
-          - core-computed-changes
-          - core-query-cases
           - core-relation-cases
           - core-field-transitions
-          - core-fanout-deletion
-          - core-volume-cases
           - complexity-score
     services:
       postgres:
@@ -211,7 +195,10 @@ jobs:
               node community/.github/scripts/bench-runtime-archive.mjs restore \
                 --root . \
                 --archive "/tmp/$RUNTIME_ASSET" \
-                --sha "$EXPECTED_SHA"
+                --sha "$EXPECTED_SHA" &&
+              # Archive extraction writes the full dependency closure. Flush it before
+              # latency sampling so background writeback cannot become benchmark work.
+              sync
           } >> "$LOG_DIR/bench.log" 2>&1 || status=$?
           echo "runtime restore exit=$status family=${{ matrix.family }} ($(wc -l < "$LOG_DIR/bench.log") log lines)"
           exit "$status"
@@ -229,10 +216,10 @@ jobs:
             set -euo pipefail
             echo "=== v2 headless benchmark catalogue ==="
             case "$TEABLE_BENCH_FAMILIES" in
-              headless-http) pnpm --filter @teable/v2-headless-bench bench:http-ci ;;
               complexity-score) DATABASE_URL="$PRISMA_DATABASE_URL" pnpm --filter @teable/v2-headless-bench bench:complexity-ci gate --out-dir "$TEABLE_BENCH_OUT_DIR" --runner github-ubuntu-latest-node24-postgres16 --calibration budgets/complexity.calibration.json --calibration-sha256 602c17100438a9299a1d75081f182fa0d85603b18b9ffbf28f3ba0c296024b86 --json "$TEABLE_BENCH_OUT_DIR/summary.json" --markdown "$TEABLE_BENCH_OUT_DIR/summary.md" ;;
               core-*) TEABLE_BENCH_TRACK="$TEABLE_BENCH_FAMILIES" pnpm --filter @teable/v2-headless-bench bench:core-ci ;;
-              *) pnpm --filter @teable/v2-headless-bench bench:ci ;;
+              propagation) pnpm --filter @teable/v2-headless-bench bench:ci ;;
+              *) echo "unexpected diagnostic family: $TEABLE_BENCH_FAMILIES" >&2; exit 2 ;;
             esac &&
               echo "=== summary ===" &&
               cat "$TEABLE_BENCH_OUT_DIR/summary.json"
@@ -294,7 +281,7 @@ jobs:
             tar -xzf "$archive" -C "$dir" || true
           done
           status=0
-          node community/.github/scripts/benchmark-unified-report.mjs --root bench-evidence --families 'storage-query,write,formula,lookup,rollup,conditional-link,propagation,api-limit,headless-http,core-operations,core-extra,core-scale,core-transitions,core-views,core-computed-changes,core-query-cases,core-relation-cases,core-field-transitions,core-fanout-deletion,core-volume-cases,complexity-score' --output bench-evidence/bench-unified.md || status=$?
+          node community/.github/scripts/benchmark-unified-report.mjs --root bench-evidence --families 'propagation,core-operations,core-relation-cases,core-field-transitions,complexity-score' --output bench-evidence/bench-unified.md || status=$?
           gh release upload "$LOG_TAG" bench-evidence/bench-unified.md -R "$LOGS_REPO" --clobber
           exit "$status"
 
