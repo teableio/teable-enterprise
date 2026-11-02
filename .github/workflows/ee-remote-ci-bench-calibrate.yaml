@@ -33,6 +33,7 @@ jobs:
     env:
       CI: 1
       TEABLE_TSDOWN_DISABLE_DTS: '1'
+      EVIDENCE_PREFIX: runtime-${{ github.run_attempt }}
     steps:
       - name: 📦 Checkout teable-ee
         uses: actions/checkout@v4
@@ -41,6 +42,12 @@ jobs:
           ref: ${{ inputs.source_sha }}
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
+
+      - name: 🙈 Mask private values
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          echo "::add-mask::$GH_TOKEN"
 
       - name: 🔒 Resolve exact checkout
         id: source
@@ -57,10 +64,10 @@ jobs:
           echo "runtime_tag=ee-bench-runtime-v1-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
           echo "runtime_asset=ee-bench-runtime-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.zst" >> "$GITHUB_OUTPUT"
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 📥 Install headless benchmark dependencies
         uses: ./.github/actions/pnpm-install
@@ -73,7 +80,9 @@ jobs:
         env:
           RUNTIME_ASSET: ${{ steps.source.outputs.runtime_asset }}
         run: |
+          set -uo pipefail
           mkdir -p "$LOG_DIR"
+          log="$LOG_DIR/$EVIDENCE_PREFIX.log"
           status=0
           {
             echo "=== build shared benchmark runtime ==="
@@ -82,8 +91,8 @@ jobs:
                 --root . \
                 --archive "/tmp/$RUNTIME_ASSET" \
                 --sha "${{ steps.source.outputs.sha }}"
-          } >> "$LOG_DIR/bench-runtime.log" 2>&1 || status=$?
-          echo "runtime build exit=$status ($(wc -l < "$LOG_DIR/bench-runtime.log") log lines)"
+          } >> "$log" 2>&1 || status=$?
+          echo "runtime build exit=$status ($(wc -l < "$log") log lines)"
           exit "$status"
 
       - name: 🔐 Publish private run-scoped runtime
@@ -92,6 +101,9 @@ jobs:
           RUNTIME_ASSET: ${{ steps.source.outputs.runtime_asset }}
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
         run: |
+          set -uo pipefail
+          log="$LOG_DIR/$EVIDENCE_PREFIX.log"
+          echo "::add-mask::$GH_TOKEN"
           status=0
           {
             cutoff=$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ')
@@ -107,40 +119,93 @@ jobs:
               done < "$stale_releases" &&
               gh release create "$RUNTIME_RELEASE_TAG" -R "$LOGS_REPO" --prerelease \
                 --title "Temporary EE benchmark runtime ${{ github.run_id }}.${{ github.run_attempt }}" \
-                --notes "checkout=${{ steps.source.outputs.sha }} node=24.19.0 run=$RUN_URL cleanup=next-producer-after-24h" &&
+                --notes "checkout=${{ steps.source.outputs.sha }} node=24.22.2 run=$RUN_URL cleanup=next-producer-after-24h" &&
               gh release upload "$RUNTIME_RELEASE_TAG" "/tmp/$RUNTIME_ASSET" -R "$LOGS_REPO"
-          } >> "$LOG_DIR/bench-runtime.log" 2>&1 || status=$?
-          echo "runtime publish exit=$status ($(wc -l < "$LOG_DIR/bench-runtime.log") log lines)"
+          } >> "$log" 2>&1 || status=$?
+          echo "runtime publish exit=$status ($(wc -l < "$log") log lines)"
           exit "$status"
 
-      - name: 📤 Ship runtime producer log
+      - name: 📤 Ship runtime producer evidence
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
           JOB_STATUS: ${{ job.status }}
         run: |
-          mkdir -p "$LOG_DIR"
-          [ -f "$LOG_DIR/bench-runtime.log" ] || echo "(runtime producer failed before its first logged step)" > "$LOG_DIR/bench-runtime.log"
-          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE bench calibration $LOG_TAG" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/bench-runtime.log" -R "$LOGS_REPO" --clobber
+          set -uo pipefail
+          mkdir -p "$LOG_DIR" /tmp/evidence
+          echo "::add-mask::$GH_TOKEN"
+          log="$LOG_DIR/$EVIDENCE_PREFIX.log"
+          archive="/tmp/evidence/$EVIDENCE_PREFIX-evidence.tar.gz"
+          [ -f "$log" ] || echo "(runtime producer failed before its first logged step)" > "$log"
+          printf 'job.status=%s\n' "$JOB_STATUS" >> "$log"
+          status=0
+          tar -czf "$archive" -C /tmp ci-logs || status=$?
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE bench calibration $LOG_TAG" --notes "ee_sha=$EE_SHA run=$RUN_URL" >> "$log" 2>&1 || true
+          gh release upload "$LOG_TAG" "$log" -R "$LOGS_REPO" --clobber || status=$?
+          gh release upload "$LOG_TAG" "$archive" -R "$LOGS_REPO" --clobber || status=$?
           if [ "$JOB_STATUS" != "success" ]; then
-            echo failed > "$LOG_DIR/bench-runtime.failed"
-            gh release upload "$LOG_TAG" "$LOG_DIR/bench-runtime.failed" -R "$LOGS_REPO" --clobber
+            printf 'job.status=%s\n' "$JOB_STATUS" > "/tmp/evidence/$EVIDENCE_PREFIX.failed"
+            gh release upload "$LOG_TAG" "/tmp/evidence/$EVIDENCE_PREFIX.failed" -R "$LOGS_REPO" --clobber || status=$?
           fi
+          echo "runtime ship exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
 
   prepare:
     needs: [runtime]
     runs-on: ubuntu-latest
     name: Prepare calibration release
     timeout-minutes: 5
+    env:
+      EVIDENCE_PREFIX: prepare-${{ github.run_attempt }}
     steps:
+      - name: 🙈 Mask private values
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          echo "::add-mask::$GH_TOKEN"
+
       - name: 🗂️ Create private calibration release
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
         run: |
-          gh release create "$CAL_TAG" -R "$LOGS_REPO" --prerelease \
-            --title "Benchmark calibration ${{ github.run_id }}" \
-            --notes "ee_sha=$EE_SHA run=$RUN_URL samples=100"
+          set -uo pipefail
+          mkdir -p "$LOG_DIR"
+          log="$LOG_DIR/$EVIDENCE_PREFIX.log"
+          status=0
+          {
+            echo "=== create private calibration releases ==="
+            gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE bench calibration $LOG_TAG" --notes "ee_sha=$EE_SHA run=$RUN_URL" >> "$log" 2>&1 || true
+            gh release create "$CAL_TAG" -R "$LOGS_REPO" --prerelease \
+              --title "Benchmark calibration ${{ github.run_id }}" \
+              --notes "ee_sha=$EE_SHA run=$RUN_URL samples=100"
+          } >> "$log" 2>&1 || status=$?
+          echo "prepare exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
+
+      - name: 📤 Ship prepare evidence
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$LOG_DIR" /tmp/evidence
+          echo "::add-mask::$GH_TOKEN"
+          log="$LOG_DIR/$EVIDENCE_PREFIX.log"
+          archive="/tmp/evidence/$EVIDENCE_PREFIX-evidence.tar.gz"
+          [ -f "$log" ] || echo "(prepare failed before its first logged step)" > "$log"
+          printf 'job.status=%s\n' "$JOB_STATUS" >> "$log"
+          status=0
+          tar -czf "$archive" -C /tmp ci-logs || status=$?
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE bench calibration $LOG_TAG" --notes "ee_sha=$EE_SHA run=$RUN_URL" >> "$log" 2>&1 || true
+          gh release upload "$LOG_TAG" "$log" -R "$LOGS_REPO" --clobber || status=$?
+          gh release upload "$LOG_TAG" "$archive" -R "$LOGS_REPO" --clobber || status=$?
+          if [ "$JOB_STATUS" != "success" ]; then
+            printf 'job.status=%s\n' "$JOB_STATUS" > "/tmp/evidence/$EVIDENCE_PREFIX.failed"
+            gh release upload "$LOG_TAG" "/tmp/evidence/$EVIDENCE_PREFIX.failed" -R "$LOGS_REPO" --clobber || status=$?
+          fi
+          echo "prepare ship exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
 
   fixed:
     needs: [runtime, prepare]
@@ -182,6 +247,7 @@ jobs:
       TEABLE_BENCH_BUDGETS: /tmp/calibration/${{ matrix.track }}.budgets.json
       TEABLE_BENCH_TRACK: ${{ matrix.track }}
       TEABLE_BENCH_CALIBRATE: '3'
+      EVIDENCE_PREFIX: fixed-${{ matrix.track }}-${{ github.run_attempt }}
     steps:
       - name: 📦 Checkout teable-ee
         uses: actions/checkout@v4
@@ -191,36 +257,90 @@ jobs:
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🙈 Mask private connection and auth values
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          echo "::add-mask::$PRISMA_DATABASE_URL"
+          echo "::add-mask::$GH_TOKEN"
+
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 🔐 Restore private benchmark runtime
-        run: |
-          mkdir -p "$LOG_DIR" /tmp/calibration
-          corepack enable
-          gh release download "$RUNTIME_RELEASE_TAG" -R "$LOGS_REPO" \
-            -D /tmp --pattern "$RUNTIME_ASSET" --clobber
-          node community/.github/scripts/bench-runtime-archive.mjs restore \
-            --root . \
-            --archive "/tmp/$RUNTIME_ASSET" \
-            --sha "$EXPECTED_SHA"
-          sync
         env:
           EXPECTED_SHA: ${{ needs.runtime.outputs.checkout_sha }}
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
           RUNTIME_RELEASE_TAG: ${{ needs.runtime.outputs.runtime_tag }}
           RUNTIME_ASSET: ${{ needs.runtime.outputs.runtime_asset }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$LOG_DIR" /tmp/calibration
+          log="$LOG_DIR/restore-$EVIDENCE_PREFIX.log"
+          echo "::add-mask::$GH_TOKEN"
+          status=0
+          {
+            echo "=== restore private benchmark runtime $RUNTIME_ASSET ==="
+            corepack enable &&
+              gh release download "$RUNTIME_RELEASE_TAG" -R "$LOGS_REPO" \
+                -D /tmp --pattern "$RUNTIME_ASSET" --clobber &&
+              node community/.github/scripts/bench-runtime-archive.mjs restore \
+                --root . \
+                --archive "/tmp/$RUNTIME_ASSET" \
+                --sha "$EXPECTED_SHA" &&
+              sync
+          } >> "$log" 2>&1 || status=$?
+          echo "restore fixed $TEABLE_BENCH_TRACK exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
 
       - name: 🧪 Calibrate
         env:
-          TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.19.0 PostgreSQL 16 calibration run ${{ github.run_id }} fixed leg ${{ matrix.track }}
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.22.2 PostgreSQL 16 calibration run ${{ github.run_id }} fixed leg ${{ matrix.track }}
         run: |
+          set -uo pipefail
           mkdir -p "$LOG_DIR" "$TEABLE_BENCH_OUT_DIR" /tmp/calibration
-          pnpm --filter @teable/v2-headless-bench bench:core-ci
-          test -s "$TEABLE_BENCH_BUDGETS"
-          gh release upload "$CAL_TAG" "$TEABLE_BENCH_BUDGETS" -R "$LOGS_REPO" --clobber
+          log="$LOG_DIR/$EVIDENCE_PREFIX.log"
+          echo "::add-mask::$PRISMA_DATABASE_URL"
+          echo "::add-mask::$GH_TOKEN"
+          status=0
+          {
+            echo "=== calibrate fixed leg $TEABLE_BENCH_TRACK ==="
+            pnpm --filter @teable/v2-headless-bench bench:core-ci &&
+              test -s "$TEABLE_BENCH_BUDGETS" &&
+              node -e 'const fs = require("node:fs"); const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`calibration JSON is not an object: ${process.argv[1]}`);' "$TEABLE_BENCH_BUDGETS" &&
+              gh release upload "$CAL_TAG" "$TEABLE_BENCH_BUDGETS" -R "$LOGS_REPO" --clobber
+          } >> "$log" 2>&1 || status=$?
+          echo "fixed $TEABLE_BENCH_TRACK calibration exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
+
+      - name: 📤 Ship private calibration evidence
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$LOG_DIR" /tmp/evidence /tmp/bench-output /tmp/calibration
+          echo "::add-mask::$PRISMA_DATABASE_URL"
+          echo "::add-mask::$GH_TOKEN"
+          log="$LOG_DIR/$EVIDENCE_PREFIX.log"
+          archive="/tmp/evidence/$EVIDENCE_PREFIX-evidence.tar.gz"
+          [ -f "$log" ] || echo "(calibration produced no log: leg failed before its first logged step)" > "$log"
+          printf 'job.status=%s\n' "$JOB_STATUS" >> "$log"
+          status=0
+          tar -czf "$archive" -C /tmp bench-output calibration ci-logs || status=$?
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE bench calibration $LOG_TAG" --notes "ee_sha=$EE_SHA run=$RUN_URL" >> "$log" 2>&1 || true
+          gh release upload "$LOG_TAG" "$log" -R "$LOGS_REPO" --clobber || status=$?
+          gh release upload "$LOG_TAG" "$archive" -R "$LOGS_REPO" --clobber || status=$?
+          if [ "$JOB_STATUS" != "success" ]; then
+            printf 'job.status=%s\n' "$JOB_STATUS" > "/tmp/evidence/$EVIDENCE_PREFIX.failed"
+            gh release upload "$LOG_TAG" "/tmp/evidence/$EVIDENCE_PREFIX.failed" -R "$LOGS_REPO" --clobber || status=$?
+          fi
+          echo "fixed $TEABLE_BENCH_TRACK ship exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
 
   catalogue:
     needs: [runtime, prepare]
@@ -259,6 +379,7 @@ jobs:
       TEABLE_BENCH_BUDGETS: /tmp/calibration/catalogue-${{ matrix.family }}.json
       TEABLE_BENCH_FAMILIES: ${{ matrix.family }}
       TEABLE_BENCH_CALIBRATE: '3'
+      EVIDENCE_PREFIX: catalogue-${{ matrix.family }}-${{ github.run_attempt }}
     steps:
       - name: 📦 Checkout teable-ee
         uses: actions/checkout@v4
@@ -268,36 +389,90 @@ jobs:
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🙈 Mask private connection and auth values
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          echo "::add-mask::$PRISMA_DATABASE_URL"
+          echo "::add-mask::$GH_TOKEN"
+
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 🔐 Restore private benchmark runtime
-        run: |
-          mkdir -p "$LOG_DIR" /tmp/calibration
-          corepack enable
-          gh release download "$RUNTIME_RELEASE_TAG" -R "$LOGS_REPO" \
-            -D /tmp --pattern "$RUNTIME_ASSET" --clobber
-          node community/.github/scripts/bench-runtime-archive.mjs restore \
-            --root . \
-            --archive "/tmp/$RUNTIME_ASSET" \
-            --sha "$EXPECTED_SHA"
-          sync
         env:
           EXPECTED_SHA: ${{ needs.runtime.outputs.checkout_sha }}
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
           RUNTIME_RELEASE_TAG: ${{ needs.runtime.outputs.runtime_tag }}
           RUNTIME_ASSET: ${{ needs.runtime.outputs.runtime_asset }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$LOG_DIR" /tmp/calibration
+          log="$LOG_DIR/restore-$EVIDENCE_PREFIX.log"
+          echo "::add-mask::$GH_TOKEN"
+          status=0
+          {
+            echo "=== restore private benchmark runtime $RUNTIME_ASSET ==="
+            corepack enable &&
+              gh release download "$RUNTIME_RELEASE_TAG" -R "$LOGS_REPO" \
+                -D /tmp --pattern "$RUNTIME_ASSET" --clobber &&
+              node community/.github/scripts/bench-runtime-archive.mjs restore \
+                --root . \
+                --archive "/tmp/$RUNTIME_ASSET" \
+                --sha "$EXPECTED_SHA" &&
+              sync
+          } >> "$log" 2>&1 || status=$?
+          echo "restore catalogue $TEABLE_BENCH_FAMILIES exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
 
       - name: 🧪 Calibrate
         env:
-          TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.19.0 PostgreSQL 16 calibration run ${{ github.run_id }} catalogue leg ${{ matrix.family }}
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.22.2 PostgreSQL 16 calibration run ${{ github.run_id }} catalogue leg ${{ matrix.family }}
         run: |
+          set -uo pipefail
           mkdir -p "$LOG_DIR" "$TEABLE_BENCH_OUT_DIR" /tmp/calibration
-          pnpm --filter @teable/v2-headless-bench bench:ci
-          test -s "$TEABLE_BENCH_BUDGETS"
-          gh release upload "$CAL_TAG" "$TEABLE_BENCH_BUDGETS" -R "$LOGS_REPO" --clobber
+          log="$LOG_DIR/$EVIDENCE_PREFIX.log"
+          echo "::add-mask::$PRISMA_DATABASE_URL"
+          echo "::add-mask::$GH_TOKEN"
+          status=0
+          {
+            echo "=== calibrate catalogue leg $TEABLE_BENCH_FAMILIES ==="
+            pnpm --filter @teable/v2-headless-bench bench:ci &&
+              test -s "$TEABLE_BENCH_BUDGETS" &&
+              node -e 'const fs = require("node:fs"); const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`calibration JSON is not an object: ${process.argv[1]}`);' "$TEABLE_BENCH_BUDGETS" &&
+              gh release upload "$CAL_TAG" "$TEABLE_BENCH_BUDGETS" -R "$LOGS_REPO" --clobber
+          } >> "$log" 2>&1 || status=$?
+          echo "catalogue $TEABLE_BENCH_FAMILIES calibration exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
+
+      - name: 📤 Ship private calibration evidence
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$LOG_DIR" /tmp/evidence /tmp/bench-output /tmp/calibration
+          echo "::add-mask::$PRISMA_DATABASE_URL"
+          echo "::add-mask::$GH_TOKEN"
+          log="$LOG_DIR/$EVIDENCE_PREFIX.log"
+          archive="/tmp/evidence/$EVIDENCE_PREFIX-evidence.tar.gz"
+          [ -f "$log" ] || echo "(calibration produced no log: leg failed before its first logged step)" > "$log"
+          printf 'job.status=%s\n' "$JOB_STATUS" >> "$log"
+          status=0
+          tar -czf "$archive" -C /tmp bench-output calibration ci-logs || status=$?
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE bench calibration $LOG_TAG" --notes "ee_sha=$EE_SHA run=$RUN_URL" >> "$log" 2>&1 || true
+          gh release upload "$LOG_TAG" "$log" -R "$LOGS_REPO" --clobber || status=$?
+          gh release upload "$LOG_TAG" "$archive" -R "$LOGS_REPO" --clobber || status=$?
+          if [ "$JOB_STATUS" != "success" ]; then
+            printf 'job.status=%s\n' "$JOB_STATUS" > "/tmp/evidence/$EVIDENCE_PREFIX.failed"
+            gh release upload "$LOG_TAG" "/tmp/evidence/$EVIDENCE_PREFIX.failed" -R "$LOGS_REPO" --clobber || status=$?
+          fi
+          echo "catalogue $TEABLE_BENCH_FAMILIES ship exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
 
   http:
     needs: [runtime, prepare]
@@ -323,6 +498,7 @@ jobs:
       TEABLE_BENCH_OUT_DIR: /tmp/bench-output
       TEABLE_BENCH_HTTP_BUDGETS: /tmp/calibration/http.budgets.json
       TEABLE_BENCH_CALIBRATE: '3'
+      EVIDENCE_PREFIX: http-${{ github.run_attempt }}
     steps:
       - name: 📦 Checkout teable-ee
         uses: actions/checkout@v4
@@ -332,36 +508,90 @@ jobs:
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🙈 Mask private connection and auth values
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          echo "::add-mask::$PRISMA_DATABASE_URL"
+          echo "::add-mask::$GH_TOKEN"
+
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 🔐 Restore private benchmark runtime
-        run: |
-          mkdir -p "$LOG_DIR" /tmp/calibration
-          corepack enable
-          gh release download "$RUNTIME_RELEASE_TAG" -R "$LOGS_REPO" \
-            -D /tmp --pattern "$RUNTIME_ASSET" --clobber
-          node community/.github/scripts/bench-runtime-archive.mjs restore \
-            --root . \
-            --archive "/tmp/$RUNTIME_ASSET" \
-            --sha "$EXPECTED_SHA"
-          sync
         env:
           EXPECTED_SHA: ${{ needs.runtime.outputs.checkout_sha }}
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
           RUNTIME_RELEASE_TAG: ${{ needs.runtime.outputs.runtime_tag }}
           RUNTIME_ASSET: ${{ needs.runtime.outputs.runtime_asset }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$LOG_DIR" /tmp/calibration
+          log="$LOG_DIR/restore-$EVIDENCE_PREFIX.log"
+          echo "::add-mask::$GH_TOKEN"
+          status=0
+          {
+            echo "=== restore private benchmark runtime $RUNTIME_ASSET ==="
+            corepack enable &&
+              gh release download "$RUNTIME_RELEASE_TAG" -R "$LOGS_REPO" \
+                -D /tmp --pattern "$RUNTIME_ASSET" --clobber &&
+              node community/.github/scripts/bench-runtime-archive.mjs restore \
+                --root . \
+                --archive "/tmp/$RUNTIME_ASSET" \
+                --sha "$EXPECTED_SHA" &&
+              sync
+          } >> "$log" 2>&1 || status=$?
+          echo "restore http exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
 
       - name: 🧪 Calibrate
         env:
-          TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.19.0 PostgreSQL 16 calibration run ${{ github.run_id }} HTTP leg
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.22.2 PostgreSQL 16 calibration run ${{ github.run_id }} HTTP leg
         run: |
+          set -uo pipefail
           mkdir -p "$LOG_DIR" "$TEABLE_BENCH_OUT_DIR" /tmp/calibration
-          pnpm --filter @teable/v2-headless-bench bench:http-ci
-          test -s "$TEABLE_BENCH_HTTP_BUDGETS"
-          gh release upload "$CAL_TAG" "$TEABLE_BENCH_HTTP_BUDGETS" -R "$LOGS_REPO" --clobber
+          log="$LOG_DIR/$EVIDENCE_PREFIX.log"
+          echo "::add-mask::$PRISMA_DATABASE_URL"
+          echo "::add-mask::$GH_TOKEN"
+          status=0
+          {
+            echo "=== calibrate HTTP leg ==="
+            pnpm --filter @teable/v2-headless-bench bench:http-ci &&
+              test -s "$TEABLE_BENCH_HTTP_BUDGETS" &&
+              node -e 'const fs = require("node:fs"); const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`calibration JSON is not an object: ${process.argv[1]}`);' "$TEABLE_BENCH_HTTP_BUDGETS" &&
+              gh release upload "$CAL_TAG" "$TEABLE_BENCH_HTTP_BUDGETS" -R "$LOGS_REPO" --clobber
+          } >> "$log" 2>&1 || status=$?
+          echo "http calibration exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
+
+      - name: 📤 Ship private calibration evidence
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$LOG_DIR" /tmp/evidence /tmp/bench-output /tmp/calibration
+          echo "::add-mask::$PRISMA_DATABASE_URL"
+          echo "::add-mask::$GH_TOKEN"
+          log="$LOG_DIR/$EVIDENCE_PREFIX.log"
+          archive="/tmp/evidence/$EVIDENCE_PREFIX-evidence.tar.gz"
+          [ -f "$log" ] || echo "(calibration produced no log: leg failed before its first logged step)" > "$log"
+          printf 'job.status=%s\n' "$JOB_STATUS" >> "$log"
+          status=0
+          tar -czf "$archive" -C /tmp bench-output calibration ci-logs || status=$?
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE bench calibration $LOG_TAG" --notes "ee_sha=$EE_SHA run=$RUN_URL" >> "$log" 2>&1 || true
+          gh release upload "$LOG_TAG" "$log" -R "$LOGS_REPO" --clobber || status=$?
+          gh release upload "$LOG_TAG" "$archive" -R "$LOGS_REPO" --clobber || status=$?
+          if [ "$JOB_STATUS" != "success" ]; then
+            printf 'job.status=%s\n' "$JOB_STATUS" > "/tmp/evidence/$EVIDENCE_PREFIX.failed"
+            gh release upload "$LOG_TAG" "/tmp/evidence/$EVIDENCE_PREFIX.failed" -R "$LOGS_REPO" --clobber || status=$?
+          fi
+          echo "http ship exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
 
   complexity:
     needs: [runtime, prepare]
@@ -384,6 +614,7 @@ jobs:
     env:
       CI: 1
       PRISMA_DATABASE_URL: postgres://postgres@127.0.0.1:5432/teable_bench
+      EVIDENCE_PREFIX: complexity-${{ github.run_attempt }}
     steps:
       - name: 📦 Checkout teable-ee
         uses: actions/checkout@v4
@@ -393,58 +624,169 @@ jobs:
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🙈 Mask private connection and auth values
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          echo "::add-mask::$PRISMA_DATABASE_URL"
+          echo "::add-mask::$GH_TOKEN"
+
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 🔐 Restore private benchmark runtime
-        run: |
-          mkdir -p "$LOG_DIR" /tmp/calibration
-          corepack enable
-          gh release download "$RUNTIME_RELEASE_TAG" -R "$LOGS_REPO" \
-            -D /tmp --pattern "$RUNTIME_ASSET" --clobber
-          node community/.github/scripts/bench-runtime-archive.mjs restore \
-            --root . \
-            --archive "/tmp/$RUNTIME_ASSET" \
-            --sha "$EXPECTED_SHA"
-          sync
         env:
           EXPECTED_SHA: ${{ needs.runtime.outputs.checkout_sha }}
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
           RUNTIME_RELEASE_TAG: ${{ needs.runtime.outputs.runtime_tag }}
           RUNTIME_ASSET: ${{ needs.runtime.outputs.runtime_asset }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$LOG_DIR" /tmp/calibration
+          log="$LOG_DIR/restore-$EVIDENCE_PREFIX.log"
+          echo "::add-mask::$GH_TOKEN"
+          status=0
+          {
+            echo "=== restore private benchmark runtime $RUNTIME_ASSET ==="
+            corepack enable &&
+              gh release download "$RUNTIME_RELEASE_TAG" -R "$LOGS_REPO" \
+                -D /tmp --pattern "$RUNTIME_ASSET" --clobber &&
+              node community/.github/scripts/bench-runtime-archive.mjs restore \
+                --root . \
+                --archive "/tmp/$RUNTIME_ASSET" \
+                --sha "$EXPECTED_SHA" &&
+              sync
+          } >> "$log" 2>&1 || status=$?
+          echo "restore complexity exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
 
       - name: 🧪 Calibrate
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
         run: |
+          set -uo pipefail
           mkdir -p "$LOG_DIR" /tmp/bench-output /tmp/calibration
-          pnpm --filter @teable/v2-headless-bench bench:complexity-ci calibrate \
-            --connection-string "$PRISMA_DATABASE_URL" \
-            --out-dir /tmp/bench-output \
-            --samples 100 \
-            --headroom 3 \
-            --source "GitHub ubuntu-latest Node 24.19.0 PostgreSQL 16 calibration run ${{ github.run_id }} complexity leg" \
-            --runner github-ubuntu-latest-node24-postgres16 \
-            --json /tmp/calibration/complexity.calibration.json \
-            --markdown /tmp/calibration/complexity.calibration.md
-          test -s /tmp/calibration/complexity.calibration.json
-          gh release upload "$CAL_TAG" /tmp/calibration/complexity.calibration.json /tmp/calibration/complexity.calibration.md -R "$LOGS_REPO" --clobber
+          log="$LOG_DIR/$EVIDENCE_PREFIX.log"
+          echo "::add-mask::$PRISMA_DATABASE_URL"
+          echo "::add-mask::$GH_TOKEN"
+          status=0
+          {
+            echo "=== calibrate complexity leg ==="
+            pnpm --filter @teable/v2-headless-bench bench:complexity-ci calibrate \
+              --connection-string "$PRISMA_DATABASE_URL" \
+              --out-dir /tmp/bench-output \
+              --samples 100 \
+              --headroom 3 \
+              --source "GitHub ubuntu-latest Node 24.22.2 PostgreSQL 16 calibration run ${{ github.run_id }} complexity leg" \
+              --runner github-ubuntu-latest-node24-postgres16 \
+              --json /tmp/calibration/complexity.calibration.json \
+              --markdown /tmp/calibration/complexity.calibration.md &&
+              test -s /tmp/calibration/complexity.calibration.json &&
+              node -e 'const fs = require("node:fs"); const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`calibration JSON is not an object: ${process.argv[1]}`);' /tmp/calibration/complexity.calibration.json &&
+              gh release upload "$CAL_TAG" /tmp/calibration/complexity.calibration.json /tmp/calibration/complexity.calibration.md -R "$LOGS_REPO" --clobber
+          } >> "$log" 2>&1 || status=$?
+          echo "complexity calibration exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
+
+      - name: 📤 Ship private calibration evidence
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$LOG_DIR" /tmp/evidence /tmp/bench-output /tmp/calibration
+          echo "::add-mask::$PRISMA_DATABASE_URL"
+          echo "::add-mask::$GH_TOKEN"
+          log="$LOG_DIR/$EVIDENCE_PREFIX.log"
+          archive="/tmp/evidence/$EVIDENCE_PREFIX-evidence.tar.gz"
+          [ -f "$log" ] || echo "(calibration produced no log: leg failed before its first logged step)" > "$log"
+          printf 'job.status=%s\n' "$JOB_STATUS" >> "$log"
+          status=0
+          tar -czf "$archive" -C /tmp bench-output calibration ci-logs || status=$?
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE bench calibration $LOG_TAG" --notes "ee_sha=$EE_SHA run=$RUN_URL" >> "$log" 2>&1 || true
+          gh release upload "$LOG_TAG" "$log" -R "$LOGS_REPO" --clobber || status=$?
+          gh release upload "$LOG_TAG" "$archive" -R "$LOGS_REPO" --clobber || status=$?
+          if [ "$JOB_STATUS" != "success" ]; then
+            printf 'job.status=%s\n' "$JOB_STATUS" > "/tmp/evidence/$EVIDENCE_PREFIX.failed"
+            gh release upload "$LOG_TAG" "/tmp/evidence/$EVIDENCE_PREFIX.failed" -R "$LOGS_REPO" --clobber || status=$?
+          fi
+          echo "complexity ship exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
 
   collect:
+    if: always()
     needs: [runtime, prepare, fixed, catalogue, http, complexity]
     runs-on: ubuntu-latest
     name: Merge calibration artifacts
     timeout-minutes: 15
+    env:
+      EVIDENCE_PREFIX: collect-${{ github.run_attempt }}
     steps:
+      - name: 🙈 Mask private auth values
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          echo "::add-mask::$GH_TOKEN"
+
       - name: 📥 Download calibration assets
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
         run: |
-          mkdir -p calibration
-          gh release download "$CAL_TAG" -R "$LOGS_REPO" -D calibration --clobber
+          set -uo pipefail
+          mkdir -p calibration "$LOG_DIR"
+          log="$LOG_DIR/$EVIDENCE_PREFIX.log"
+          echo "::add-mask::$GH_TOKEN"
+          status=0
+          {
+            echo "=== download calibration assets from $CAL_TAG ==="
+            gh release download "$CAL_TAG" -R "$LOGS_REPO" -D calibration --clobber
+            download_status=$?
+            missing=0
+            for name in \
+              core-operations.budgets.json \
+              core-extra.budgets.json \
+              core-scale.budgets.json \
+              core-transitions.budgets.json \
+              core-views.budgets.json \
+              core-computed-changes.budgets.json \
+              core-query-cases.budgets.json \
+              core-relation-cases.budgets.json \
+              core-field-transitions.budgets.json \
+              core-fanout-deletion.budgets.json \
+              core-volume-cases.budgets.json \
+              catalogue-storage-query.json \
+              catalogue-write.json \
+              catalogue-formula.json \
+              catalogue-lookup.json \
+              catalogue-rollup.json \
+              catalogue-conditional-link.json \
+              catalogue-propagation.json \
+              catalogue-api-limit.json \
+              http.budgets.json \
+              complexity.calibration.json \
+              complexity.calibration.md
+            do
+              if [ ! -s "calibration/$name" ]; then
+                echo "missing calibration asset: $name"
+                missing=1
+              fi
+            done
+            [ "$download_status" -eq 0 ] && [ "$missing" -eq 0 ]
+          } >> "$log" 2>&1 || status=$?
+          echo "collect download exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
 
       - name: 🧮 Merge catalogue budgets
         run: |
+          set -uo pipefail
+          mkdir -p "$LOG_DIR"
+          log="$LOG_DIR/$EVIDENCE_PREFIX.log"
+          status=0
+          {
+          echo "=== merge catalogue budgets ==="
           node --input-type=module <<'EOF'
           import { readFileSync, writeFileSync, readdirSync, unlinkSync } from 'node:fs';
           import { join } from 'node:path';
@@ -486,14 +828,54 @@ jobs:
           for (const name of files) unlinkSync(join(dir, name));
           console.log(`merged ${pieces.length} catalogue pieces into ${Object.keys(cases).length} cases`);
           EOF
+          } >> "$log" 2>&1 || status=$?
+          echo "collect merge exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
 
       - name: 📤 Publish merged calibration
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
         run: |
-          for file in calibration/*; do
-            [ -f "$file" ] || continue
-            gh release upload "$CAL_TAG" "$file" -R "$LOGS_REPO" --clobber
-          done
-          (cd calibration && sha256sum * | sort) | tee /tmp/calibration-sha256.txt
-          gh release upload "$CAL_TAG" /tmp/calibration-sha256.txt -R "$LOGS_REPO" --clobber
+          set -uo pipefail
+          mkdir -p "$LOG_DIR"
+          log="$LOG_DIR/$EVIDENCE_PREFIX.log"
+          echo "::add-mask::$GH_TOKEN"
+          status=0
+          {
+            echo "=== publish merged calibration ==="
+            test -s calibration/catalogue.budgets.json &&
+              node -e 'const fs = require("node:fs"); const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`calibration JSON is not an object: ${process.argv[1]}`);' calibration/catalogue.budgets.json &&
+              for file in calibration/*; do
+                [ -f "$file" ] || continue
+                gh release upload "$CAL_TAG" "$file" -R "$LOGS_REPO" --clobber || exit
+              done &&
+              (cd calibration && sha256sum * | sort) > /tmp/calibration-sha256.txt &&
+              gh release upload "$CAL_TAG" /tmp/calibration-sha256.txt -R "$LOGS_REPO" --clobber
+          } >> "$log" 2>&1 || status=$?
+          echo "collect publish exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
+
+      - name: 📤 Ship private collect evidence
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$LOG_DIR" /tmp/evidence calibration
+          echo "::add-mask::$GH_TOKEN"
+          log="$LOG_DIR/$EVIDENCE_PREFIX.log"
+          archive="/tmp/evidence/$EVIDENCE_PREFIX-evidence.tar.gz"
+          [ -f "$log" ] || echo "(collect failed before its first logged step)" > "$log"
+          printf 'job.status=%s\n' "$JOB_STATUS" >> "$log"
+          status=0
+          tar -czf "$archive" -C "$GITHUB_WORKSPACE" calibration -C /tmp ci-logs || status=$?
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE bench calibration $LOG_TAG" --notes "ee_sha=$EE_SHA run=$RUN_URL" >> "$log" 2>&1 || true
+          gh release upload "$LOG_TAG" "$log" -R "$LOGS_REPO" --clobber || status=$?
+          gh release upload "$LOG_TAG" "$archive" -R "$LOGS_REPO" --clobber || status=$?
+          if [ "$JOB_STATUS" != "success" ]; then
+            printf 'job.status=%s\n' "$JOB_STATUS" > "/tmp/evidence/$EVIDENCE_PREFIX.failed"
+            gh release upload "$LOG_TAG" "/tmp/evidence/$EVIDENCE_PREFIX.failed" -R "$LOGS_REPO" --clobber || status=$?
+          fi
+          echo "collect ship exit=$status ($(wc -l < "$log") log lines)"
+          exit "$status"
