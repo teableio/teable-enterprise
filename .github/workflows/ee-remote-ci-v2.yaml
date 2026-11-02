@@ -434,10 +434,10 @@ jobs:
               echo "=== inline query: failure trace privacy and host boundaries ==="
               TEABLE_V2_RUN_PG_INTEGRATION=1 pnpm --fail-if-no-match -F @teable/backend exec vitest run src/tracing-pg.integration.spec.ts src/tracing-db-context.spec.ts src/configs/env.validation.schema.spec.ts src/filter/global-exception.filter.spec.ts --passWithNoTests=false
             fi
-            echo "=== ${{ matrix.edition.script }}: inline query enabled ==="
-            V2_DATA_QUERY_ENABLED=1 pnpm --fail-if-no-match -F @teable/backend-ee "${{ matrix.edition.script }}" test/data-query.e2e-spec-edition.ts --passWithNoTests=false
+            echo "=== ${{ matrix.edition.script }}: inline query enabled (including real copied-App query execution) ==="
+            V2_DATA_QUERY_ENABLED=1 V2_DATA_QUERY_EXECUTE_ENABLED=true pnpm --fail-if-no-match -F @teable/backend-ee "${{ matrix.edition.script }}" test/data-query.e2e-spec-edition.ts --passWithNoTests=false
             echo "=== ${{ matrix.edition.script }}: inline query disabled ==="
-            V2_DATA_QUERY_ENABLED=false pnpm --fail-if-no-match -F @teable/backend-ee "${{ matrix.edition.script }}" test/data-query-disabled.e2e-spec-edition.ts --passWithNoTests=false
+            V2_DATA_QUERY_ENABLED=false V2_DATA_QUERY_EXECUTE_ENABLED=false pnpm --fail-if-no-match -F @teable/backend-ee "${{ matrix.edition.script }}" test/data-query-disabled.e2e-spec-edition.ts --passWithNoTests=false
           ) >> "$LOG_FILE" 2>&1
           status=$?
           set -e
