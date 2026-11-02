@@ -21,7 +21,8 @@ jobs:
       status: Building
     secrets:
       TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
-      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+      RCI_APP_ID: ${{ secrets.RCI_APP_ID }}
+      RCI_APP_PRIVATE_KEY: ${{ secrets.RCI_APP_PRIVATE_KEY }}
 
   display-create:
     needs: test-create
@@ -51,7 +52,8 @@ jobs:
       start_time: ${{ needs.test-create.outputs.start_time }}
     secrets:
       TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
-      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+      RCI_APP_ID: ${{ secrets.RCI_APP_ID }}
+      RCI_APP_PRIVATE_KEY: ${{ secrets.RCI_APP_PRIVATE_KEY }}
 
   display-update-success:
     needs: [test-create, test-update-success]
@@ -69,7 +71,8 @@ jobs:
       status: Building
     secrets:
       TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
-      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+      RCI_APP_ID: ${{ secrets.RCI_APP_ID }}
+      RCI_APP_PRIVATE_KEY: ${{ secrets.RCI_APP_PRIVATE_KEY }}
 
   display-create-fail:
     needs: test-create-fail
@@ -97,7 +100,8 @@ jobs:
       start_time: ${{ needs.test-create-fail.outputs.start_time }}
     secrets:
       TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
-      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+      RCI_APP_ID: ${{ secrets.RCI_APP_ID }}
+      RCI_APP_PRIVATE_KEY: ${{ secrets.RCI_APP_PRIVATE_KEY }}
 
   display-update-fail:
     needs: [test-create-fail, test-update-fail]
@@ -115,7 +119,8 @@ jobs:
       status: Building
     secrets:
       TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
-      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+      RCI_APP_ID: ${{ secrets.RCI_APP_ID }}
+      RCI_APP_PRIVATE_KEY: ${{ secrets.RCI_APP_PRIVATE_KEY }}
 
   wait-before-update-cancelled:
     needs: test-create-cancelled
@@ -135,7 +140,8 @@ jobs:
       start_time: ${{ needs.test-create-cancelled.outputs.start_time }}
     secrets:
       TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
-      PACKAGES_KEY: ${{ secrets.PACKAGES_KEY }}
+      RCI_APP_ID: ${{ secrets.RCI_APP_ID }}
+      RCI_APP_PRIVATE_KEY: ${{ secrets.RCI_APP_PRIVATE_KEY }}
 
   display-update-cancelled:
     needs: [test-create-cancelled, test-update-cancelled]

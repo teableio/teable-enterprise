@@ -18,11 +18,23 @@ jobs:
       control_sha: ${{ steps.control.outputs.sha }}
       source_sha: ${{ steps.verify.outputs.source_sha }}
     steps:
+      # teable-ee tokens in this workflow come from the remote-CI app, scoped to
+      # what each job does and revoked when it ends.
+      - name: Mint a teable-ee read token
+        id: ee_token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+          permission-contents: read
+
       - name: Pin protected controller
         id: control
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.PACKAGES_KEY }}
+          github-token: ${{ steps.ee_token.outputs.token }}
           script: |
             const {data: branch} = await github.rest.repos.getBranch({owner:'teableio', repo:'teable-ee', branch:'develop'});
             if (!branch.protected || !/^[a-f0-9]{40}$/.test(branch.commit.sha)) throw new Error('Protected controller unavailable');
@@ -31,13 +43,16 @@ jobs:
         with:
           repository: teableio/teable-ee
           ref: ${{ steps.control.outputs.sha }}
-          token: ${{ secrets.PACKAGES_KEY }}
+          token: ${{ steps.ee_token.outputs.token }}
           path: control
           persist-credentials: false
           sparse-checkout: .github/scripts
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      # Stays on PACKAGES_KEY: the check compares the dispatch sender with the
+      # token's own user (GET /user), which an installation token cannot answer.
+      # Moving it means changing the sender and this check together in teable-ee.
       - name: Authenticate sender and exact source workflow attempt
         id: verify
         env:
@@ -72,12 +87,22 @@ jobs:
           - image: teable-sandbox-agent-cloud-preview
             file: Dockerfile.sandbox-agent
     steps:
+      - name: Mint a teable-ee read token
+        id: ee_token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+          permission-contents: read
+
       - name: Checkout exact source
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
           ref: ${{ needs.verify.outputs.source_sha }}
-          token: ${{ secrets.PACKAGES_KEY }}
+          token: ${{ steps.ee_token.outputs.token }}
           persist-credentials: false
       - name: Login to Ali container registry
         uses: docker/login-action@v3
@@ -143,11 +168,25 @@ jobs:
       INSTANCE_DOMAIN: testing-cn
       DISPLAY_NAME: teable-testing-cn
     steps:
+      # Covers the checkouts, the freshness check and the deployment receipt; the
+      # job's timeout is well inside the token's one-hour lifetime.
+      - name: Mint a teable-ee token
+        id: ee_token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+          permission-contents: read
+          permission-actions: read
+          permission-deployments: write
+
       - uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
           ref: ${{ needs.verify.outputs.control_sha }}
-          token: ${{ secrets.PACKAGES_KEY }}
+          token: ${{ steps.ee_token.outputs.token }}
           path: control
           persist-credentials: false
           sparse-checkout: |
@@ -158,7 +197,7 @@ jobs:
         with:
           repository: teableio/teable-ee
           ref: ${{ needs.verify.outputs.source_sha }}
-          token: ${{ secrets.PACKAGES_KEY }}
+          token: ${{ steps.ee_token.outputs.token }}
           path: source
           persist-credentials: false
           sparse-checkout: |
@@ -210,14 +249,14 @@ jobs:
       - name: Skip obsolete source requests before mutation
         id: freshness
         env:
-          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          GH_TOKEN: ${{ steps.ee_token.outputs.token }}
         run: node control/.github/scripts/testing-cn-deployment.mjs check-current request.json
       - name: Record deployment in private source repository
         if: steps.freshness.outputs.current == 'true'
         id: receipt
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.PACKAGES_KEY }}
+          github-token: ${{ steps.ee_token.outputs.token }}
           script: |
             const {request} = JSON.parse(require('node:fs').readFileSync('request.json', 'utf8'));
             const repo = {owner:'teableio', repo:'teable-ee'};
@@ -271,7 +310,7 @@ jobs:
           DEPLOYMENT_ID: ${{ steps.receipt.outputs.deployment_id }}
           JOB_STATUS: ${{ job.status }}
         with:
-          github-token: ${{ secrets.PACKAGES_KEY }}
+          github-token: ${{ steps.ee_token.outputs.token }}
           script: |
             const {request} = JSON.parse(require('node:fs').readFileSync('request.json', 'utf8'));
             const state = process.env.JOB_STATUS === 'success' ? 'success' : process.env.JOB_STATUS === 'cancelled' ? 'error' : 'failure';
@@ -305,11 +344,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Mint a teable-ee read token
+        id: ee_token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+          permission-contents: read
+          permission-actions: read
+          permission-deployments: read
+          permission-pull-requests: read
+
       - uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
           ref: ${{ needs.verify.outputs.control_sha }}
-          token: ${{ secrets.PACKAGES_KEY }}
+          token: ${{ steps.ee_token.outputs.token }}
           path: control
           persist-credentials: false
           sparse-checkout: .github/scripts
@@ -325,7 +377,7 @@ jobs:
           node-version: 24
       - name: Notify Feishu with changes and PR acceptance instructions
         env:
-          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          GH_TOKEN: ${{ steps.ee_token.outputs.token }}
           LARK_BOT_URL: ${{ secrets.LARK_BOT_URL }}
           TESTING_CN_DATABASE_URL: ${{ secrets.TESTING_CN_DATABASE_URL }}
           DEPLOY_ENABLED: ${{ vars.TESTING_CN_DEPLOY_ENABLED }}
