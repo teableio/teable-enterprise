@@ -166,22 +166,47 @@ jobs:
       tags: "latest,${{ github.event.client_payload.release_id || inputs.release_id }}"
     secrets: inherit
 
+  # Uses a dedicated app installed only on teable-infra with Actions write,
+  # not a personal token and not the remote-CI app: its key reaches only this
+  # job, and the most it can do is start teable-infra workflows. Starts the
+  # workflow directly (workflow_dispatch) because repository_dispatch would
+  # need Contents write.
   notify-infra:
     name: Notify teable-infra platform release
     needs: [promote-latest, sync-aliyun]
     if: needs.promote-latest.result == 'success' && needs.sync-aliyun.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Dispatch teable-stable-promoted to teable-infra
+      - name: Mint an installation token
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.INFRA_DISPATCH_APP_ID }}
+          private-key: ${{ secrets.INFRA_DISPATCH_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-infra
+          permission-actions: write
+
+      - name: Start teable-stable-promoted in teable-infra
         env:
-          DISPATCH_TOKEN: ${{ secrets.TEABLE_INFRA_DISPATCH_TOKEN }}
+          DISPATCH_TOKEN: ${{ steps.app.outputs.token }}
         run: |
+          set -euo pipefail
+
+          if [ -z "${RELEASE_ID}" ]; then
+            echo "::error::No release id to announce."
+            exit 1
+          fi
+
           curl -fsS -X POST \
             -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/teableio/teable-infra/dispatches \
-            -d "{\"event_type\":\"teable-stable-promoted\",\"client_payload\":{\"release_id\":\"${RELEASE_ID}\"}}"
-          echo "dispatched teable-stable-promoted release_id=${RELEASE_ID}"
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/teableio/teable-infra/actions/workflows/teable-stable-promoted.yml/dispatches \
+            -d "{\"ref\":\"main\",\"inputs\":{\"release_id\":\"${RELEASE_ID}\"}}"
+
+          echo "started teable-stable-promoted release_id=${RELEASE_ID}"
 
   # Acceptance for the tag this promotion publishes. Gated like notify-infra:
   # both lanes green means the tag is actually pullable.
