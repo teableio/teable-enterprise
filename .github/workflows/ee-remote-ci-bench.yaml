@@ -253,7 +253,7 @@ jobs:
             echo "=== v2 headless benchmark catalogue ==="
             case "$TEABLE_BENCH_FAMILIES" in
               headless-http) pnpm --filter @teable/v2-headless-bench bench:http-ci ;;
-              complexity-score) DATABASE_URL="$PRISMA_DATABASE_URL" pnpm --filter @teable/v2-headless-bench bench:complexity-ci gate --samples 100 --out-dir "$TEABLE_BENCH_OUT_DIR" --runner github-ubuntu-latest-node24-postgres16 --calibration budgets/complexity.calibration.json --calibration-sha256 409dd0a321abcc9a12ff1161bc2369858566b296d7207f9a1085436e98bfe615 --json "$TEABLE_BENCH_OUT_DIR/summary.json" --markdown "$TEABLE_BENCH_OUT_DIR/summary.md" ;;
+              complexity-score) DATABASE_URL="$PRISMA_DATABASE_URL" pnpm --filter @teable/v2-headless-bench bench:complexity-ci gate --samples 100 --out-dir "$TEABLE_BENCH_OUT_DIR" --runner github-ubuntu-latest-node24-postgres16 --calibration budgets/complexity.calibration.json --calibration-sha256 ec24ef31d3638f2e85b65b2be47c11780f43e1b1eac522eec2a80282ddca0111 --json "$TEABLE_BENCH_OUT_DIR/summary.json" --markdown "$TEABLE_BENCH_OUT_DIR/summary.md" ;;
               core-*) TEABLE_BENCH_TRACK="$TEABLE_BENCH_FAMILIES" pnpm --filter @teable/v2-headless-bench bench:core-ci ;;
               *) pnpm --filter @teable/v2-headless-bench bench:ci ;;
             esac &&
