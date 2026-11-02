@@ -38,12 +38,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # Remote-CI app, scoped to teable-ee: reads app.config.ts, pushes the bump
+      # branch and opens the PR. PRs opened with it still run CI.
+      - name: Mint teable-ee token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+          permission-contents: write
+          permission-pull-requests: write
+
       - name: Propose the next version after an approval
         env:
           ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
           # Same base as the Mobile Releases table the release workflow writes with it.
           TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
           # Read as a string: a boolean false would otherwise vanish in an && / || expression.
