@@ -105,8 +105,6 @@ on:
         description: 'true when a newer run superseded this deploy (nothing was installed)'
         value: ${{ jobs.deploy-eks.outputs.skipped }}
     secrets:
-      PACKAGES_KEY:
-        required: true
       TEABLE_API_TOKEN:
         required: false
       INFRA_TEABLE_AI_PREHEAT_TOKEN:
@@ -166,6 +164,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      packages: write
 
     steps:
       - name: Checkout lock validation script
@@ -186,7 +185,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.PACKAGES_KEY }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -640,6 +639,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      packages: write
 
     steps:
       - name: Checkout lock validation script
@@ -660,7 +660,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.PACKAGES_KEY }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -727,10 +727,10 @@ jobs:
   # With the release stamped and deployed, the accumulated cloud staging
   # versions have served their purpose: reap beta-* keeping a small cushion
   # for staging rollback. The launched version itself only loses its beta-
-  # tag — the image survives, now carrying release.<id>. PACKAGES_KEY has
-  # the needed scopes (delete:packages + write:packages, probed
-  # 2026-07-18). Shares the ghcr-gc concurrency group: the cleanup action
-  # must never run twice against the same package.
+  # tag — the image survives, now carrying release.<id>. GITHUB_TOKEN can
+  # delete because these packages grant this repository the Admin role.
+  # Shares the ghcr-gc concurrency group: the cleanup action must never run
+  # twice against the same package.
   cleanup-beta:
     name: Reap cloud staging versions
     needs: [deploy-eks, promote-latest]
@@ -745,7 +745,7 @@ jobs:
       - name: Delete old beta versions of the cloud packages
         uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
         with:
-          token: ${{ secrets.PACKAGES_KEY }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           owner: teableio
           packages: teable-cloud,teable-sandbox-cloud
           delete-tags: beta-*
