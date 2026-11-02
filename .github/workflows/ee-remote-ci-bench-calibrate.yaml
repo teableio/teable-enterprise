@@ -1,0 +1,499 @@
+name: EE Remote CI (bench calibration)
+run-name: "EE bench calibration — ${{ github.run_id }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  EE_SHA: ${{ inputs.source_sha }}
+  LOG_TAG: ee-bench-calibration-${{ github.run_id }}
+  CAL_TAG: bench-calibration-${{ github.run_id }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  LOG_DIR: /tmp/ci-logs
+  LOGS_REPO: teableio/teable-ci-logs
+  TEABLE_BENCH_SAMPLES: 100
+
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    name: Build benchmark runtime
+    timeout-minutes: 30
+    outputs:
+      checkout_sha: ${{ steps.source.outputs.sha }}
+      runtime_tag: ${{ steps.source.outputs.runtime_tag }}
+      runtime_asset: ${{ steps.source.outputs.runtime_asset }}
+    env:
+      CI: 1
+      TEABLE_TSDOWN_DISABLE_DTS: '1'
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ inputs.source_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🔒 Resolve exact checkout
+        id: source
+        env:
+          EXPECTED_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          actual_sha=$(git rev-parse HEAD)
+          if [ "$actual_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checkout did not resolve to the dispatched commit"
+            exit 1
+          fi
+          echo "sha=$actual_sha" >> "$GITHUB_OUTPUT"
+          echo "runtime_tag=ee-bench-runtime-v1-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          echo "runtime_asset=ee-bench-runtime-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.zst" >> "$GITHUB_OUTPUT"
+
+      - name: 🟢 Use Node.js 24.19.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: 📥 Install headless benchmark dependencies
+        uses: ./.github/actions/pnpm-install
+        with:
+          install-args: |
+            --filter
+            @teable/v2-headless-bench...
+
+      - name: 🏗️ Build and pack benchmark runtime
+        env:
+          RUNTIME_ASSET: ${{ steps.source.outputs.runtime_asset }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          status=0
+          {
+            echo "=== build shared benchmark runtime ==="
+            pnpm -r --filter @teable/v2-headless-bench... build &&
+              node community/.github/scripts/bench-runtime-archive.mjs create \
+                --root . \
+                --archive "/tmp/$RUNTIME_ASSET" \
+                --sha "${{ steps.source.outputs.sha }}"
+          } >> "$LOG_DIR/bench-runtime.log" 2>&1 || status=$?
+          echo "runtime build exit=$status ($(wc -l < "$LOG_DIR/bench-runtime.log") log lines)"
+          exit "$status"
+
+      - name: 🔐 Publish private run-scoped runtime
+        env:
+          RUNTIME_RELEASE_TAG: ${{ steps.source.outputs.runtime_tag }}
+          RUNTIME_ASSET: ${{ steps.source.outputs.runtime_asset }}
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          status=0
+          {
+            cutoff=$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ')
+            stale_releases=$(mktemp)
+            gh api --paginate "repos/$LOGS_REPO/releases?per_page=100" \
+              --jq '.[] | select((.tag_name | startswith("ee-bench-runtime-v1-")) and .published_at != null) | [.tag_name, .published_at] | @tsv' \
+              > "$stale_releases" &&
+              while IFS=$'\t' read -r tag published; do
+                [ -n "$tag" ] || continue
+                if [[ "$published" < "$cutoff" ]]; then
+                  gh release delete "$tag" -R "$LOGS_REPO" --cleanup-tag --yes || exit
+                fi
+              done < "$stale_releases" &&
+              gh release create "$RUNTIME_RELEASE_TAG" -R "$LOGS_REPO" --prerelease \
+                --title "Temporary EE benchmark runtime ${{ github.run_id }}.${{ github.run_attempt }}" \
+                --notes "checkout=${{ steps.source.outputs.sha }} node=24.19.0 run=$RUN_URL cleanup=next-producer-after-24h" &&
+              gh release upload "$RUNTIME_RELEASE_TAG" "/tmp/$RUNTIME_ASSET" -R "$LOGS_REPO"
+          } >> "$LOG_DIR/bench-runtime.log" 2>&1 || status=$?
+          echo "runtime publish exit=$status ($(wc -l < "$LOG_DIR/bench-runtime.log") log lines)"
+          exit "$status"
+
+      - name: 📤 Ship runtime producer log
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          [ -f "$LOG_DIR/bench-runtime.log" ] || echo "(runtime producer failed before its first logged step)" > "$LOG_DIR/bench-runtime.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE bench calibration $LOG_TAG" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          gh release upload "$LOG_TAG" "$LOG_DIR/bench-runtime.log" -R "$LOGS_REPO" --clobber
+          if [ "$JOB_STATUS" != "success" ]; then
+            echo failed > "$LOG_DIR/bench-runtime.failed"
+            gh release upload "$LOG_TAG" "$LOG_DIR/bench-runtime.failed" -R "$LOGS_REPO" --clobber
+          fi
+
+  prepare:
+    needs: [runtime]
+    runs-on: ubuntu-latest
+    name: Prepare calibration release
+    timeout-minutes: 5
+    steps:
+      - name: 🗂️ Create private calibration release
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          gh release create "$CAL_TAG" -R "$LOGS_REPO" --prerelease \
+            --title "Benchmark calibration ${{ github.run_id }}" \
+            --notes "ee_sha=$EE_SHA run=$RUN_URL samples=100"
+
+  fixed:
+    needs: [runtime, prepare]
+    runs-on: ubuntu-latest
+    name: Calibrate fixed (${{ matrix.track }})
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        track:
+          - core-operations
+          - core-extra
+          - core-scale
+          - core-transitions
+          - core-views
+          - core-computed-changes
+          - core-query-cases
+          - core-relation-cases
+          - core-field-transitions
+          - core-fanout-deletion
+          - core-volume-cases
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: teable_bench
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d teable_bench"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      CI: 1
+      PRISMA_DATABASE_URL: postgres://postgres@127.0.0.1:5432/teable_bench
+      TEABLE_BENCH_OUT_DIR: /tmp/bench-output
+      TEABLE_BENCH_BUDGETS: /tmp/calibration/${{ matrix.track }}.budgets.json
+      TEABLE_BENCH_TRACK: ${{ matrix.track }}
+      TEABLE_BENCH_CALIBRATE: '3'
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ needs.runtime.outputs.checkout_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 24.19.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: 🔐 Restore private benchmark runtime
+        run: |
+          mkdir -p "$LOG_DIR" /tmp/calibration
+          corepack enable
+          gh release download "$RUNTIME_RELEASE_TAG" -R "$LOGS_REPO" \
+            -D /tmp --pattern "$RUNTIME_ASSET" --clobber
+          node community/.github/scripts/bench-runtime-archive.mjs restore \
+            --root . \
+            --archive "/tmp/$RUNTIME_ASSET" \
+            --sha "$EXPECTED_SHA"
+          sync
+        env:
+          EXPECTED_SHA: ${{ needs.runtime.outputs.checkout_sha }}
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          RUNTIME_RELEASE_TAG: ${{ needs.runtime.outputs.runtime_tag }}
+          RUNTIME_ASSET: ${{ needs.runtime.outputs.runtime_asset }}
+
+      - name: 🧪 Calibrate
+        env:
+          TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.19.0 PostgreSQL 16 calibration run ${{ github.run_id }} fixed leg ${{ matrix.track }}
+        run: |
+          mkdir -p "$LOG_DIR" "$TEABLE_BENCH_OUT_DIR" /tmp/calibration
+          pnpm --filter @teable/v2-headless-bench bench:core-ci
+          test -s "$TEABLE_BENCH_BUDGETS"
+          gh release upload "$CAL_TAG" "$TEABLE_BENCH_BUDGETS" -R "$LOGS_REPO" --clobber
+
+  catalogue:
+    needs: [runtime, prepare]
+    runs-on: ubuntu-latest
+    name: Calibrate catalogue (${{ matrix.family }})
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        family:
+          - storage-query
+          - write
+          - formula
+          - lookup
+          - rollup
+          - conditional-link
+          - propagation
+          - api-limit
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: teable_bench
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d teable_bench"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      CI: 1
+      PRISMA_DATABASE_URL: postgres://postgres@127.0.0.1:5432/teable_bench
+      TEABLE_BENCH_OUT_DIR: /tmp/bench-output
+      TEABLE_BENCH_BUDGETS: /tmp/calibration/catalogue-${{ matrix.family }}.json
+      TEABLE_BENCH_FAMILIES: ${{ matrix.family }}
+      TEABLE_BENCH_CALIBRATE: '3'
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ needs.runtime.outputs.checkout_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 24.19.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: 🔐 Restore private benchmark runtime
+        run: |
+          mkdir -p "$LOG_DIR" /tmp/calibration
+          corepack enable
+          gh release download "$RUNTIME_RELEASE_TAG" -R "$LOGS_REPO" \
+            -D /tmp --pattern "$RUNTIME_ASSET" --clobber
+          node community/.github/scripts/bench-runtime-archive.mjs restore \
+            --root . \
+            --archive "/tmp/$RUNTIME_ASSET" \
+            --sha "$EXPECTED_SHA"
+          sync
+        env:
+          EXPECTED_SHA: ${{ needs.runtime.outputs.checkout_sha }}
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          RUNTIME_RELEASE_TAG: ${{ needs.runtime.outputs.runtime_tag }}
+          RUNTIME_ASSET: ${{ needs.runtime.outputs.runtime_asset }}
+
+      - name: 🧪 Calibrate
+        env:
+          TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.19.0 PostgreSQL 16 calibration run ${{ github.run_id }} catalogue leg ${{ matrix.family }}
+        run: |
+          mkdir -p "$LOG_DIR" "$TEABLE_BENCH_OUT_DIR" /tmp/calibration
+          pnpm --filter @teable/v2-headless-bench bench:ci
+          test -s "$TEABLE_BENCH_BUDGETS"
+          gh release upload "$CAL_TAG" "$TEABLE_BENCH_BUDGETS" -R "$LOGS_REPO" --clobber
+
+  http:
+    needs: [runtime, prepare]
+    runs-on: ubuntu-latest
+    name: Calibrate HTTP
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: teable_bench
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d teable_bench"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      CI: 1
+      PRISMA_DATABASE_URL: postgres://postgres@127.0.0.1:5432/teable_bench
+      TEABLE_BENCH_OUT_DIR: /tmp/bench-output
+      TEABLE_BENCH_HTTP_BUDGETS: /tmp/calibration/http.budgets.json
+      TEABLE_BENCH_CALIBRATE: '3'
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ needs.runtime.outputs.checkout_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 24.19.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: 🔐 Restore private benchmark runtime
+        run: |
+          mkdir -p "$LOG_DIR" /tmp/calibration
+          corepack enable
+          gh release download "$RUNTIME_RELEASE_TAG" -R "$LOGS_REPO" \
+            -D /tmp --pattern "$RUNTIME_ASSET" --clobber
+          node community/.github/scripts/bench-runtime-archive.mjs restore \
+            --root . \
+            --archive "/tmp/$RUNTIME_ASSET" \
+            --sha "$EXPECTED_SHA"
+          sync
+        env:
+          EXPECTED_SHA: ${{ needs.runtime.outputs.checkout_sha }}
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          RUNTIME_RELEASE_TAG: ${{ needs.runtime.outputs.runtime_tag }}
+          RUNTIME_ASSET: ${{ needs.runtime.outputs.runtime_asset }}
+
+      - name: 🧪 Calibrate
+        env:
+          TEABLE_BENCH_CALIBRATE_SOURCE: GitHub ubuntu-latest Node 24.19.0 PostgreSQL 16 calibration run ${{ github.run_id }} HTTP leg
+        run: |
+          mkdir -p "$LOG_DIR" "$TEABLE_BENCH_OUT_DIR" /tmp/calibration
+          pnpm --filter @teable/v2-headless-bench bench:http-ci
+          test -s "$TEABLE_BENCH_HTTP_BUDGETS"
+          gh release upload "$CAL_TAG" "$TEABLE_BENCH_HTTP_BUDGETS" -R "$LOGS_REPO" --clobber
+
+  complexity:
+    needs: [runtime, prepare]
+    runs-on: ubuntu-latest
+    name: Calibrate complexity
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: teable_bench
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d teable_bench"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      CI: 1
+      PRISMA_DATABASE_URL: postgres://postgres@127.0.0.1:5432/teable_bench
+    steps:
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ needs.runtime.outputs.checkout_sha }}
+          token: ${{ secrets.PACKAGES_KEY }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 24.19.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: 🔐 Restore private benchmark runtime
+        run: |
+          mkdir -p "$LOG_DIR" /tmp/calibration
+          corepack enable
+          gh release download "$RUNTIME_RELEASE_TAG" -R "$LOGS_REPO" \
+            -D /tmp --pattern "$RUNTIME_ASSET" --clobber
+          node community/.github/scripts/bench-runtime-archive.mjs restore \
+            --root . \
+            --archive "/tmp/$RUNTIME_ASSET" \
+            --sha "$EXPECTED_SHA"
+          sync
+        env:
+          EXPECTED_SHA: ${{ needs.runtime.outputs.checkout_sha }}
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          RUNTIME_RELEASE_TAG: ${{ needs.runtime.outputs.runtime_tag }}
+          RUNTIME_ASSET: ${{ needs.runtime.outputs.runtime_asset }}
+
+      - name: 🧪 Calibrate
+        run: |
+          mkdir -p "$LOG_DIR" /tmp/bench-output /tmp/calibration
+          pnpm --filter @teable/v2-headless-bench bench:complexity-ci calibrate \
+            --connection-string "$PRISMA_DATABASE_URL" \
+            --out-dir /tmp/bench-output \
+            --samples 100 \
+            --headroom 3 \
+            --source "GitHub ubuntu-latest Node 24.19.0 PostgreSQL 16 calibration run ${{ github.run_id }} complexity leg" \
+            --runner github-ubuntu-latest-node24-postgres16 \
+            --json /tmp/calibration/complexity.calibration.json \
+            --markdown /tmp/calibration/complexity.calibration.md
+          test -s /tmp/calibration/complexity.calibration.json
+          gh release upload "$CAL_TAG" /tmp/calibration/complexity.calibration.json /tmp/calibration/complexity.calibration.md -R "$LOGS_REPO" --clobber
+
+  collect:
+    needs: [runtime, prepare, fixed, catalogue, http, complexity]
+    runs-on: ubuntu-latest
+    name: Merge calibration artifacts
+    timeout-minutes: 15
+    steps:
+      - name: 📥 Download calibration assets
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          mkdir -p calibration
+          gh release download "$CAL_TAG" -R "$LOGS_REPO" -D calibration --clobber
+
+      - name: 🧮 Merge catalogue budgets
+        run: |
+          node --input-type=module <<'EOF'
+          import { readFileSync, writeFileSync, readdirSync, unlinkSync } from 'node:fs';
+          import { join } from 'node:path';
+          const dir = 'calibration';
+          const files = readdirSync(dir).filter((name) => /^catalogue-.*\.json$/.test(name)).sort();
+          if (files.length === 0) throw new Error('no catalogue calibration pieces');
+          const pieces = files.map((name) => JSON.parse(readFileSync(join(dir, name), 'utf8')));
+          const first = pieces[0];
+          const keys = ['schema', 'headroom', 'floorMs', 'provenance.backend', 'provenance.samples', 'provenance.warmup', 'provenance.repetitions'];
+          const get = (object, key) => key.split('.').reduce((value, part) => value?.[part], object);
+          for (const piece of pieces.slice(1)) {
+            for (const key of keys) {
+              if (get(piece, key) !== get(first, key)) {
+                throw new Error(`catalogue calibration mismatch at ${key}: ${get(piece, key)} != ${get(first, key)}`);
+              }
+            }
+            if (JSON.stringify(piece.provenance.measurementProtocol) !== JSON.stringify(first.provenance.measurementProtocol)) {
+              throw new Error('catalogue calibration measurement protocol mismatch');
+            }
+          }
+          const cases = {};
+          const calibratedAt = pieces
+            .map((piece) => piece.provenance.calibratedAt)
+            .sort()
+            .at(-1);
+          const source = [...new Set(pieces.map((piece) => piece.provenance.source))].join('; ');
+          for (const piece of pieces) {
+            for (const [key, value] of Object.entries(piece.cases)) {
+              if (Object.hasOwn(cases, key)) throw new Error(`duplicate catalogue case ${key}`);
+              cases[key] = value;
+            }
+          }
+          const merged = {
+            ...first,
+            provenance: { ...first.provenance, source, calibratedAt },
+            cases: Object.fromEntries(Object.entries(cases).sort(([left], [right]) => left.localeCompare(right))),
+          };
+          writeFileSync(join(dir, 'catalogue.budgets.json'), `${JSON.stringify(merged, null, 2)}\n`);
+          for (const name of files) unlinkSync(join(dir, name));
+          console.log(`merged ${pieces.length} catalogue pieces into ${Object.keys(cases).length} cases`);
+          EOF
+
+      - name: 📤 Publish merged calibration
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+        run: |
+          for file in calibration/*; do
+            [ -f "$file" ] || continue
+            gh release upload "$CAL_TAG" "$file" -R "$LOGS_REPO" --clobber
+          done
+          (cd calibration && sha256sum * | sort) | tee /tmp/calibration-sha256.txt
+          gh release upload "$CAL_TAG" /tmp/calibration-sha256.txt -R "$LOGS_REPO" --clobber
