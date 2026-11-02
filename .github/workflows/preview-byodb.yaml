@@ -41,13 +41,24 @@ jobs:
       ALIYUN_ROLE_ARN: ${{ vars.CN_TEST_DEPLOY_ROLE_ARN || 'acs:ram::1145786521954482:role/teable-cn-test-github-deploy' }}
       ALIYUN_OIDC_PROVIDER_ARN: ${{ vars.CN_TEST_OIDC_PROVIDER_ARN || 'acs:ram::1145786521954482:oidc-provider/github-actions' }}
     steps:
+      - name: Mint teable-ee read token
+        id: ee-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+          permission-contents: read
+          permission-pull-requests: read
+
       # The label, not the dispatch payload, decides the edition: an EE preview
       # may exist next to a cloud one, and the label is what the operator set.
       - name: Resolve preview labels
         id: labels
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.PACKAGES_KEY }}
+          github-token: ${{ steps.ee-token.outputs.token }}
           script: |
             const prNumber = Number(process.env.PR_NUMBER);
             if (!Number.isSafeInteger(prNumber) || prNumber < 1) {
@@ -75,7 +86,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
-          token: ${{ secrets.PACKAGES_KEY }}
+          token: ${{ steps.ee-token.outputs.token }}
           ref: ${{ github.event.client_payload.ref }}
           path: teable-ee
 
@@ -170,10 +181,22 @@ jobs:
         id: byodb
         run: bash teable-ee/.github/scripts/preview-byodb.sh
 
+      # Minted at the end: waiting for the preview can outlast a one-hour token.
+      - name: Mint PR comment token
+        id: comment-token
+        if: always()
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+          permission-issues: write
+
       - name: Comment the result on the PR
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          GH_TOKEN: ${{ steps.comment-token.outputs.token }}
           KINDS: ${{ steps.labels.outputs.kinds }}
           PR_LABELS: ${{ steps.labels.outputs.labels }}
           PICK_OUTCOME: ${{ steps.pick.outcome }}
