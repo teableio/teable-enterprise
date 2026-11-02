@@ -299,7 +299,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: Prepare generated Docker contexts
         run: node ./scripts/generate-docker-contexts.mjs
@@ -459,7 +459,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: Prepare generated Docker contexts
         if: matrix.file == 'Dockerfile'
@@ -571,7 +571,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: Prepare generated Docker contexts
         if: matrix.file == 'Dockerfile'
