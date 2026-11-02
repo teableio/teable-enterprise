@@ -6,6 +6,10 @@ on:
       source_sha:
         type: string
         required: true
+      settle:
+        type: boolean
+        required: true
+        default: true
 permissions:
   contents: read
   actions: read
@@ -196,14 +200,17 @@ jobs:
                 --root . \
                 --archive "/tmp/$RUNTIME_ASSET" \
                 --sha "$EXPECTED_SHA" &&
-              # Archive extraction writes the full dependency closure. Flush it before
-              # latency sampling so background writeback cannot become benchmark work.
-              sync
+              if [ "$SETTLE" = "true" ]; then
+                # Archive extraction writes the full dependency closure. Flush it before
+                # latency sampling so background writeback cannot become benchmark work.
+                sync
+              fi
           } >> "$LOG_DIR/bench.log" 2>&1 || status=$?
           echo "runtime restore exit=$status family=${{ matrix.family }} ($(wc -l < "$LOG_DIR/bench.log") log lines)"
           exit "$status"
         env:
           EXPECTED_SHA: ${{ needs.runtime.outputs.checkout_sha }}
+          SETTLE: ${{ inputs.settle }}
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
           RUNTIME_RELEASE_TAG: ${{ needs.runtime.outputs.runtime_tag }}
           RUNTIME_ASSET: ${{ needs.runtime.outputs.runtime_asset }}
