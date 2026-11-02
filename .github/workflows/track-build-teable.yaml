@@ -41,7 +41,9 @@ on:
     secrets:
       TEABLE_API_TOKEN:
         required: true
-      PACKAGES_KEY:
+      RCI_APP_ID:
+        required: true
+      RCI_APP_PRIVATE_KEY:
         required: true
 
 jobs:
@@ -57,11 +59,22 @@ jobs:
         id: record_time
         run: echo "start_time=$(date +%s)" >> $GITHUB_OUTPUT
 
+      # Read-only teable-ee token from the remote-CI app, revoked when the job ends.
+      - name: Mint a teable-ee read token
+        id: ee_token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+          permission-contents: read
+
       - name: Checkout private repository
         uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
-          token: ${{ secrets.PACKAGES_KEY }}
+          token: ${{ steps.ee_token.outputs.token }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

@@ -55,7 +55,6 @@ jobs:
       MAX_AGE_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_age_days || vars.PREVIEW_MAX_IDLE_DAYS || '3' }}
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
       TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.target || 'all' }}
-      GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
       ALIYUN_ROLE_ARN: ${{ vars.CN_TEST_DEPLOY_ROLE_ARN || 'acs:ram::1145786521954482:role/teable-cn-test-github-deploy' }}
       ALIYUN_OIDC_PROVIDER_ARN: ${{ vars.CN_TEST_OIDC_PROVIDER_ARN || 'acs:ram::1145786521954482:oidc-provider/github-actions' }}
     steps:
@@ -68,7 +67,22 @@ jobs:
       - name: Fetch cluster kubeconfig
         run: bash .github/scripts/cn-test-kubeconfig.sh
 
+      # Reads PR state, drops labels and comments on teable-ee. Token from the
+      # remote-CI app, revoked when the job ends.
+      - name: Mint a teable-ee token
+        id: ee_token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+          permission-pull-requests: read
+          permission-issues: write
+
       - name: Reap expired previews
+        env:
+          GH_TOKEN: ${{ steps.ee_token.outputs.token }}
         run: |
           set -euo pipefail
 
