@@ -682,10 +682,13 @@ jobs:
               --source "GitHub ubuntu-latest Node 24.22.2 PostgreSQL 16 calibration run ${{ github.run_id }} complexity leg" \
               --runner github-ubuntu-latest-node24-postgres16 \
               --json /tmp/calibration/complexity.calibration.json \
-              --markdown /tmp/calibration/complexity.calibration.md &&
-              test -s /tmp/calibration/complexity.calibration.json &&
-              node -e 'const fs = require("node:fs"); const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`calibration JSON is not an object: ${process.argv[1]}`);' /tmp/calibration/complexity.calibration.json &&
-              gh release upload "$CAL_TAG" /tmp/calibration/complexity.calibration.json /tmp/calibration/complexity.calibration.md -R "$LOGS_REPO" --clobber
+              --markdown /tmp/calibration/complexity.calibration.md
+            status=$?
+            if [ -s /tmp/calibration/complexity.calibration.json ]; then
+              node -e 'const fs = require("node:fs"); const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`calibration JSON is not an object: ${process.argv[1]}`);' /tmp/calibration/complexity.calibration.json || status=$?
+              gh release upload "$CAL_TAG" /tmp/calibration/complexity.calibration.json /tmp/calibration/complexity.calibration.md -R "$LOGS_REPO" --clobber || status=$?
+            fi
+            (exit "$status")
           } >> "$log" 2>&1 || status=$?
           echo "complexity calibration exit=$status ($(wc -l < "$log") log lines)"
           exit "$status"
