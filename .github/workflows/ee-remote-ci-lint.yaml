@@ -13,7 +13,7 @@ on:
     types: [ee-remote-ci-lint]
 
 concurrency:
-  group: ee-remote-ci-lint-${{ github.event.client_payload.pr_number || github.event.client_payload.ee_ref }}
+  group: ee-remote-ci-lint-${{ github.event.client_payload.pr_number || github.event.client_payload.ee_sha }}
   cancel-in-progress: true
 
 permissions:
@@ -32,12 +32,26 @@ env:
 jobs:
   typecheck:
     runs-on: ubuntu-latest
-    name: Typecheck
+    name: Typecheck ${{ matrix.scope.name }}
     timeout-minutes: 25
 
     env:
       NODE_OPTIONS: '--max-old-space-size=8192'
       TEABLE_TSDOWN_DISABLE_DTS: '1'
+
+    # One tsc scope per runner: with all three on one 16GB runner the large
+    # projects overlapped and the runner was killed mid-tsc (exit 143, "runner
+    # has received a shutdown signal") before it could ship its log.
+    strategy:
+      fail-fast: false
+      matrix:
+        scope:
+          - name: ee
+            script: g:typecheck
+          - name: community
+            script: g:typecheck:community
+          - name: community backend
+            script: g:typecheck:community:backend
 
     steps:
       - name: 🎫 Mint checkout token
@@ -70,12 +84,14 @@ jobs:
         working-directory: packages/db-main-prisma
         run: |
           mkdir -p "$LOG_DIR"
+          SLUG=$(echo "${{ matrix.scope.name }}" | tr ' /' '--')
+          echo "SLUG=$SLUG" >> "$GITHUB_ENV"
           status=0
           {
             echo "=== prisma generate ==="
             pnpm -F @teable/db-main-prisma-ee prisma-generate --schema ./prisma/postgres/schema.prisma
-          } >> "$LOG_DIR/lint-typecheck.log" 2>&1 || status=$?
-          echo "prisma generate exit=$status ($(wc -l < "$LOG_DIR/lint-typecheck.log") log lines)"
+          } >> "$LOG_DIR/lint-typecheck-$SLUG.log" 2>&1 || status=$?
+          echo "prisma generate exit=$status ($(wc -l < "$LOG_DIR/lint-typecheck-$SLUG.log") log lines)"
           exit $status
 
       - name: 🏗 Build typecheck dependencies
@@ -85,28 +101,21 @@ jobs:
             echo "=== build typecheck deps ==="
             pnpm -r --filter "./community/packages/**" --sort --workspace-concurrency=4 run build &&
             pnpm -r --filter "./packages/**" --sort --workspace-concurrency=4 run build
-          } >> "$LOG_DIR/lint-typecheck.log" 2>&1 || status=$?
-          echo "deps build exit=$status ($(wc -l < "$LOG_DIR/lint-typecheck.log") log lines)"
+          } >> "$LOG_DIR/lint-typecheck-$SLUG.log" 2>&1 || status=$?
+          echo "deps build exit=$status ($(wc -l < "$LOG_DIR/lint-typecheck-$SLUG.log") log lines)"
           exit $status
 
       - name: 🕵️ Typecheck
         run: |
-          # The three scopes are independent tsc invocations — run them in
-          # parallel (16GB comfortably fits them; heap cap is per-process).
           # Do not prisma-generate here: it rewrites shared @prisma/client
           # while community backend tsc is reading it, which fails as
           # thousands of missing Prisma / PrismaService exports.
-          pnpm g:typecheck > "$LOG_DIR/tc-root.log" 2>&1 & p1=$!
-          pnpm g:typecheck:community > "$LOG_DIR/tc-community.log" 2>&1 & p2=$!
-          pnpm g:typecheck:community:backend > "$LOG_DIR/tc-backend.log" 2>&1 & p3=$!
           status=0
-          wait $p1 || status=1
-          wait $p2 || status=1
-          wait $p3 || status=1
-          for part in root community backend; do
-            { echo "=== typecheck ($part) ==="; cat "$LOG_DIR/tc-$part.log"; } >> "$LOG_DIR/lint-typecheck.log"
-          done
-          echo "typecheck exit=$status ($(wc -l < "$LOG_DIR/lint-typecheck.log") log lines total)"
+          {
+            echo "=== typecheck (${{ matrix.scope.name }}) ==="
+            pnpm ${{ matrix.scope.script }}
+          } >> "$LOG_DIR/lint-typecheck-$SLUG.log" 2>&1 || status=$?
+          echo "typecheck exit=$status ($(wc -l < "$LOG_DIR/lint-typecheck-$SLUG.log") log lines total)"
           exit $status
 
       - name: 🎫 Mint log token
@@ -128,14 +137,15 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           mkdir -p "$LOG_DIR"
-          [ -f "$LOG_DIR/lint-typecheck.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/lint-typecheck.log"
+          SLUG="${SLUG:-$(echo "${{ matrix.scope.name }}" | tr ' /' '--')}"
+          [ -f "$LOG_DIR/lint-typecheck-$SLUG.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/lint-typecheck-$SLUG.log"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/lint-typecheck.log" -R "$LOGS_REPO" --clobber
+          gh release upload "$LOG_TAG" "$LOG_DIR/lint-typecheck-$SLUG.log" -R "$LOGS_REPO" --clobber
           # Failure marker — the conclude step tails only marked logs instead
           # of guessing from log text (which false-positived on ERROR noise).
           if [ "$JOB_STATUS" != "success" ]; then
-            echo failed > "$LOG_DIR/lint-typecheck.failed"
-            gh release upload "$LOG_TAG" "$LOG_DIR/lint-typecheck.failed" -R "$LOGS_REPO" --clobber
+            echo failed > "$LOG_DIR/lint-typecheck-$SLUG.failed"
+            gh release upload "$LOG_TAG" "$LOG_DIR/lint-typecheck-$SLUG.failed" -R "$LOGS_REPO" --clobber
           fi
 
   lint:

@@ -11,7 +11,7 @@ on:
     types: [ee-remote-ci-e2e]
 
 concurrency:
-  group: ee-remote-ci-e2e-${{ github.event.client_payload.pr_number || github.event.client_payload.ee_ref }}
+  group: ee-remote-ci-e2e-${{ github.event.client_payload.pr_number || github.event.client_payload.ee_sha }}
   cancel-in-progress: true
 
 permissions:

@@ -12,7 +12,7 @@ on:
     types: [ee-remote-ci-search]
 
 concurrency:
-  group: ee-remote-ci-search-${{ github.event.client_payload.pr_number || github.event.client_payload.ee_ref }}
+  group: ee-remote-ci-search-${{ github.event.client_payload.pr_number || github.event.client_payload.ee_sha }}
   cancel-in-progress: true
 
 permissions:
