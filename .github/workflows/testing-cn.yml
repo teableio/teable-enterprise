@@ -37,7 +37,7 @@ jobs:
           sparse-checkout: .github/scripts
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24.22.2
       - name: Authenticate sender and exact source workflow attempt
         id: verify
         env:
@@ -94,7 +94,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
       - run: npm install --global zx
       - name: Exact SHA image metadata
         id: meta
@@ -169,7 +169,7 @@ jobs:
           name: testing-cn-request-${{ github.run_id }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24.22.2
       - uses: azure/setup-kubectl@v4
       - name: Install template parser
         run: npm install --prefix "$RUNNER_TEMP/tools" --ignore-scripts --no-audit --no-fund yaml@2.9.0
@@ -322,7 +322,7 @@ jobs:
           name: testing-cn-env-drift-${{ github.run_id }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24.22.2
       - name: Notify Feishu with changes and PR acceptance instructions
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
