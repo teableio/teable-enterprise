@@ -1,21 +1,33 @@
-name: PR4215 final post-merge benchmark
-run-name: "PR4215 final post-merge gate — ${{ github.run_id }}"
+# Manual PR4215 benchmark validation for the current head.
+
+name: PR4215 current benchmark
+
+run-name: "PR4215 benchmark gate — ${{ github.run_id }}"
+
 on:
   workflow_dispatch:
     inputs:
       source_sha:
         type: string
         required: true
+
+concurrency:
+  group: ee-remote-ci-bench-pr4215
+  cancel-in-progress: true
+
 permissions:
   contents: read
   actions: read
+
 env:
   EE_SHA: ${{ inputs.source_sha }}
-  LOG_TAG: pr4215-final-gate-${{ github.run_id }}-a${{ github.run_attempt }}
+  LOG_TAG: pr4215-gate-${{ github.run_id }}-a${{ github.run_attempt }}
   PR_NUMBER: '4215'
   RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
   LOG_DIR: /tmp/ci-logs
   LOGS_REPO: teableio/teable-ci-logs
+  BENCH_REPORT_ASSET: bench-unified-${{ github.run_id }}-${{ github.run_attempt }}.md
+
 jobs:
   runtime:
     runs-on: ubuntu-latest
@@ -52,10 +64,19 @@ jobs:
           echo "runtime_tag=ee-bench-runtime-v1-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
           echo "runtime_asset=ee-bench-runtime-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.zst" >> "$GITHUB_OUTPUT"
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
+
+      - name: 🧪 Test benchmark report behavior
+        run: |
+          mkdir -p "$LOG_DIR"
+          status=0
+          node --test community/.github/scripts/benchmark-unified-report.test.mjs community/.github/scripts/bench-runtime-archive.test.mjs \
+            >> "$LOG_DIR/bench-runtime.log" 2>&1 || status=$?
+          echo "report tests exit=$status ($(wc -l < "$LOG_DIR/bench-runtime.log") private log lines)"
+          exit "$status"
 
       - name: 📥 Install headless benchmark dependencies
         uses: ./.github/actions/pnpm-install
@@ -102,7 +123,7 @@ jobs:
               done < "$stale_releases" &&
               gh release create "$RUNTIME_RELEASE_TAG" -R "$LOGS_REPO" --prerelease \
                 --title "Temporary EE benchmark runtime ${{ github.run_id }}.${{ github.run_attempt }}" \
-                --notes "checkout=${{ steps.source.outputs.sha }} node=24.19.0 run=$RUN_URL cleanup=next-producer-after-24h" &&
+                --notes "checkout=${{ steps.source.outputs.sha }} node=24.22.2 run=$RUN_URL cleanup=next-producer-after-24h" &&
               gh release upload "$RUNTIME_RELEASE_TAG" "/tmp/$RUNTIME_ASSET" -R "$LOGS_REPO"
           } >> "$LOG_DIR/bench-runtime.log" 2>&1 || status=$?
           echo "runtime publish exit=$status ($(wc -l < "$LOG_DIR/bench-runtime.log") log lines)"
@@ -195,10 +216,10 @@ jobs:
             exit 1
           }
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 🔐 Restore private benchmark runtime
         run: |
@@ -232,7 +253,7 @@ jobs:
             echo "=== v2 headless benchmark catalogue ==="
             case "$TEABLE_BENCH_FAMILIES" in
               headless-http) pnpm --filter @teable/v2-headless-bench bench:http-ci ;;
-              complexity-score) DATABASE_URL="$PRISMA_DATABASE_URL" pnpm --filter @teable/v2-headless-bench bench:complexity-ci gate --samples 100 --out-dir "$TEABLE_BENCH_OUT_DIR" --runner github-ubuntu-latest-node24-postgres16 --calibration budgets/complexity.calibration.json --calibration-sha256 efc7ff5fe9c612769ca699d79ea34fcd184d85e06a3f9a21b648098b8ac7cb77 --json "$TEABLE_BENCH_OUT_DIR/summary.json" --markdown "$TEABLE_BENCH_OUT_DIR/summary.md" ;;
+              complexity-score) DATABASE_URL="$PRISMA_DATABASE_URL" pnpm --filter @teable/v2-headless-bench bench:complexity-ci gate --samples 100 --out-dir "$TEABLE_BENCH_OUT_DIR" --runner github-ubuntu-latest-node24-postgres16 --calibration budgets/complexity.calibration.json --calibration-sha256 409dd0a321abcc9a12ff1161bc2369858566b296d7207f9a1085436e98bfe615 --json "$TEABLE_BENCH_OUT_DIR/summary.json" --markdown "$TEABLE_BENCH_OUT_DIR/summary.md" ;;
               core-*) TEABLE_BENCH_TRACK="$TEABLE_BENCH_FAMILIES" pnpm --filter @teable/v2-headless-bench bench:core-ci ;;
               *) pnpm --filter @teable/v2-headless-bench bench:ci ;;
             esac &&
@@ -287,6 +308,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
         run: |
+          set -euo pipefail
           mkdir -p bench-evidence
           gh release download "$LOG_TAG" -R "$LOGS_REPO" -D bench-evidence --pattern 'headless-bench-*.tgz' --clobber || true
           for archive in bench-evidence/headless-bench-*.tgz; do
@@ -296,7 +318,16 @@ jobs:
             tar -xzf "$archive" -C "$dir" || true
           done
           status=0
-          node community/.github/scripts/benchmark-unified-report.mjs --root bench-evidence --families 'storage-query,write,formula,lookup,rollup,conditional-link,propagation,api-limit,headless-http,core-operations,core-extra,core-scale,core-transitions,core-views,core-computed-changes,core-query-cases,core-relation-cases,core-field-transitions,core-fanout-deletion,core-volume-cases,complexity-score' --output bench-evidence/bench-unified.md || status=$?
-          gh release upload "$LOG_TAG" bench-evidence/bench-unified.md -R "$LOGS_REPO" --clobber
+          node community/.github/scripts/benchmark-unified-report.mjs \
+            --root bench-evidence \
+            --families 'storage-query,write,formula,lookup,rollup,conditional-link,propagation,api-limit,headless-http,core-operations,core-extra,core-scale,core-transitions,core-views,core-computed-changes,core-query-cases,core-relation-cases,core-field-transitions,core-fanout-deletion,core-volume-cases,complexity-score' \
+            --runtime-status '${{ needs.runtime.result }}' \
+            --bench-status '${{ needs.bench.result }}' \
+            --output "bench-evidence/$BENCH_REPORT_ASSET" || status=$?
+          if [ "$status" -gt 1 ] || [ ! -s "bench-evidence/$BENCH_REPORT_ASSET" ]; then
+            printf '## Unified benchmark report\n\nOverall verdict: **FAIL**.\n\nThe current report process failed (exit %s) before publishing complete evidence. No performance pass is available for this attempt.\n' "$status" > "bench-evidence/$BENCH_REPORT_ASSET"
+            status=1
+          fi
+          gh release upload "$LOG_TAG" "bench-evidence/$BENCH_REPORT_ASSET" -R "$LOGS_REPO" --clobber
           exit "$status"
 
