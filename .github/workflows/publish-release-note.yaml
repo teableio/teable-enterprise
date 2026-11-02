@@ -119,9 +119,22 @@ jobs:
           echo "── note.md ──"; cat note.md
           echo "── note.txt ──"; cat note.txt
 
+      # Tag + release on the open-source repo need Contents write there and
+      # nothing else; the token is revoked when the job ends.
+      - name: Mint a teable release token
+        id: oss-token
+        if: steps.mode.outputs.dry != 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable
+          permission-contents: write
+
       - name: Upsert GitHub release on the open-source repo
         env:
-          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          GH_TOKEN: ${{ steps.oss-token.outputs.token }}
           DRY: ${{ steps.mode.outputs.dry }}
         run: |
           set -euo pipefail
