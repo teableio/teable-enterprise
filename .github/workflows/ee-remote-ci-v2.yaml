@@ -61,10 +61,10 @@ jobs:
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: Detect optional inline query package
         id: query-package
@@ -133,10 +133,10 @@ jobs:
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 📥 Monorepo install
         uses: ./.github/actions/pnpm-install
@@ -276,11 +276,11 @@ jobs:
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🟢 Use Node.js 24.22.2
         if: steps.gate.outputs.run == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 📥 Restore workspace dependencies
         if: steps.gate.outputs.run == 'true'
@@ -406,10 +406,10 @@ jobs:
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
-      - name: Use Node.js 24.19.0
+      - name: Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: Monorepo install
         uses: ./.github/actions/pnpm-install
@@ -493,10 +493,10 @@ jobs:
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 📥 Restore workspace dependencies
         uses: ./.github/actions/workspace-deps-download
@@ -555,10 +555,10 @@ jobs:
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 📥 Restore workspace dependencies
         uses: ./.github/actions/workspace-deps-download
@@ -612,10 +612,10 @@ jobs:
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 📥 Restore workspace dependencies
         uses: ./.github/actions/workspace-deps-download
@@ -669,10 +669,10 @@ jobs:
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 📥 Restore workspace dependencies
         uses: ./.github/actions/workspace-deps-download
@@ -726,10 +726,10 @@ jobs:
           token: ${{ secrets.PACKAGES_KEY }}
           persist-credentials: false
 
-      - name: 🟢 Use Node.js 24.19.0
+      - name: 🟢 Use Node.js 24.22.2
         uses: actions/setup-node@v4
         with:
-          node-version: 24.19.0
+          node-version: 24.22.2
 
       - name: 📥 Restore workspace dependencies
         uses: ./.github/actions/workspace-deps-download
@@ -765,7 +765,18 @@ jobs:
           fi
 
   verdict:
-    needs: [unit-deps, e2e-deps, unit, host-query, e2e, e2e-sensitive, e2e-computed-heavy, e2e-json-formula-cascade, e2e-postgres-only]
+    needs:
+      [
+        unit-deps,
+        e2e-deps,
+        unit,
+        host-query,
+        e2e,
+        e2e-sensitive,
+        e2e-computed-heavy,
+        e2e-json-formula-cascade,
+        e2e-postgres-only,
+      ]
     if: always()
     runs-on: ubuntu-latest
     name: V2 verdict
