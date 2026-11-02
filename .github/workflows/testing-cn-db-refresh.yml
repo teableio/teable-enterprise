@@ -22,14 +22,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      # Read-only teable-ee token from the teable-ci-bot app for the controller pin
+      # Read-only teable-ee token from the remote-CI app for the controller pin
       # and checkout, revoked when the job ends.
       - name: Mint a teable-ee read token
         id: ee_token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_BOT_APP_ID }}
-          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
           permission-contents: read

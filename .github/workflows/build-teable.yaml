@@ -84,14 +84,14 @@ jobs:
       mode: ${{ steps.release.outputs.mode }}
       beta_tag: ${{ steps.release.outputs.beta_tag }}
     steps:
-      # Read-only teable-ee token from the teable-ci-bot app, revoked when the job
+      # Read-only teable-ee token from the remote-CI app, revoked when the job
       # ends. ghcr still logs in with PACKAGES_KEY: app tokens cannot push packages.
       - name: Mint a teable-ee read token
         id: ee_token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_BOT_APP_ID }}
-          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
           permission-contents: read
@@ -196,8 +196,8 @@ jobs:
       release_id: ${{ needs.prepare-release.outputs.release_id }}
     secrets:
       TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
-      CI_BOT_APP_ID: ${{ secrets.CI_BOT_APP_ID }}
-      CI_BOT_PRIVATE_KEY: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+      RCI_APP_ID: ${{ secrets.RCI_APP_ID }}
+      RCI_APP_PRIVATE_KEY: ${{ secrets.RCI_APP_PRIVATE_KEY }}
 
   track-start-cloud:
     needs: prepare-release
@@ -210,8 +210,8 @@ jobs:
       release_id: ${{ needs.prepare-release.outputs.release_id }}
     secrets:
       TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
-      CI_BOT_APP_ID: ${{ secrets.CI_BOT_APP_ID }}
-      CI_BOT_PRIVATE_KEY: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+      RCI_APP_ID: ${{ secrets.RCI_APP_ID }}
+      RCI_APP_PRIVATE_KEY: ${{ secrets.RCI_APP_PRIVATE_KEY }}
 
   # Build (or skip) the source-independent sandbox agent base image. The tag is
   # the content hash of its inputs, so an existing tag means nothing changed —
@@ -224,8 +224,8 @@ jobs:
         id: ee_token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_BOT_APP_ID }}
-          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
           permission-contents: read
@@ -310,8 +310,8 @@ jobs:
         id: ee_token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_BOT_APP_ID }}
-          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
           permission-contents: read
@@ -376,8 +376,8 @@ jobs:
         id: ee_token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_BOT_APP_ID }}
-          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
           permission-contents: read
@@ -490,8 +490,8 @@ jobs:
         id: ee_token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_BOT_APP_ID }}
-          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
           permission-contents: read
@@ -612,8 +612,8 @@ jobs:
         id: ee_token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_BOT_APP_ID }}
-          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
           permission-contents: read
@@ -966,8 +966,8 @@ jobs:
       start_time: ${{ needs.track-start-ee.outputs.start_time }}
     secrets:
       TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
-      CI_BOT_APP_ID: ${{ secrets.CI_BOT_APP_ID }}
-      CI_BOT_PRIVATE_KEY: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+      RCI_APP_ID: ${{ secrets.RCI_APP_ID }}
+      RCI_APP_PRIVATE_KEY: ${{ secrets.RCI_APP_PRIVATE_KEY }}
 
   track-complete-cloud:
     needs: [prepare-release, track-start-cloud, determine-status]
@@ -981,5 +981,5 @@ jobs:
       start_time: ${{ needs.track-start-cloud.outputs.start_time }}
     secrets:
       TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
-      CI_BOT_APP_ID: ${{ secrets.CI_BOT_APP_ID }}
-      CI_BOT_PRIVATE_KEY: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+      RCI_APP_ID: ${{ secrets.RCI_APP_ID }}
+      RCI_APP_PRIVATE_KEY: ${{ secrets.RCI_APP_PRIVATE_KEY }}

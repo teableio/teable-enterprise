@@ -41,9 +41,9 @@ on:
     secrets:
       TEABLE_API_TOKEN:
         required: true
-      CI_BOT_APP_ID:
+      RCI_APP_ID:
         required: true
-      CI_BOT_PRIVATE_KEY:
+      RCI_APP_PRIVATE_KEY:
         required: true
 
 jobs:
@@ -59,14 +59,13 @@ jobs:
         id: record_time
         run: echo "start_time=$(date +%s)" >> $GITHUB_OUTPUT
 
-      # Read-only teable-ee token from the teable-ci-bot app, revoked when the job
-      # ends.
+      # Read-only teable-ee token from the remote-CI app, revoked when the job ends.
       - name: Mint a teable-ee read token
         id: ee_token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_BOT_APP_ID }}
-          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
           permission-contents: read
