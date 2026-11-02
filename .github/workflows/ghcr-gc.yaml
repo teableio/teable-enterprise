@@ -20,9 +20,10 @@ name: GHCR GC
 # release id> at sandbox spawn, so agent release tags must stay pullable
 # for as long as ANY deployment still runs that app build.
 #
-# Token: PACKAGES_KEY (probed 2026-07-18: classic PAT with
-# delete:packages, repo, write:packages — write matters because untagging
-# a multi-tagged image PUTs a replacement manifest before deleting it).
+# Token: this repository's GITHUB_TOKEN (packages: write). Every package
+# below grants teable-enterprise the Admin role under Manage Actions access:
+# deleting versions needs Admin, and untagging a multi-tagged image PUTs a
+# replacement manifest before deleting it.
 # Note that manual dry_run is NOT fully read-only in the cleanup action
 # (v1.2.2, SHA-pinned below): the untagging PUT for
 # multi-tagged delete-tags matches is not dry-run-gated (verified in
@@ -59,7 +60,7 @@ jobs:
       - name: Clean staging image versions
         uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
         with:
-          token: ${{ secrets.PACKAGES_KEY }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           owner: teableio
           packages: teable-staging,teable-sandbox,teable-sandbox-ee,teable-cloud,teable-sandbox-cloud
           delete-tags: beta-*
@@ -81,7 +82,7 @@ jobs:
       - name: Clean buildcache and agent-base packages
         uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
         with:
-          token: ${{ secrets.PACKAGES_KEY }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           owner: teableio
           packages: teable-buildcache,teable-sandbox-agent-base
           exclude-tags: latest,deps-*,base-*

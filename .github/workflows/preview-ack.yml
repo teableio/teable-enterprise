@@ -87,6 +87,10 @@ jobs:
   # Runs the PR's own build script: no cluster credentials and no id-token here.
   build-push:
     runs-on: ubuntu-latest
+    # The workflow default is no permissions; this job pushes the preview
+    # images to ghcr with GITHUB_TOKEN.
+    permissions:
+      packages: write
     outputs:
       sha: ${{ steps.get_sha.outputs.sha }}
     strategy:
@@ -149,7 +153,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.PACKAGES_KEY }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4

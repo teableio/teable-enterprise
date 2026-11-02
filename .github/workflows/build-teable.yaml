@@ -85,7 +85,7 @@ jobs:
       beta_tag: ${{ steps.release.outputs.beta_tag }}
     steps:
       # Read-only teable-ee token from the remote-CI app, revoked when the job
-      # ends. ghcr still logs in with PACKAGES_KEY: app tokens cannot push packages.
+      # ends. ghcr uses this repository's GITHUB_TOKEN: app tokens cannot push packages.
       - name: Mint a teable-ee read token
         id: ee_token
         uses: actions/create-github-app-token@v3
@@ -242,7 +242,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.PACKAGES_KEY }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check for published base image
         id: check
@@ -328,7 +328,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.PACKAGES_KEY }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
@@ -394,7 +394,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.PACKAGES_KEY }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -438,7 +438,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.PACKAGES_KEY }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -508,7 +508,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.PACKAGES_KEY }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
@@ -630,7 +630,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.PACKAGES_KEY }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
@@ -744,7 +744,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.PACKAGES_KEY }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Dry-run the asset-prefix patch against the app image
         env:
@@ -769,7 +769,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.PACKAGES_KEY }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -836,7 +836,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.PACKAGES_KEY }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -879,6 +879,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      packages: read
     steps:
       - name: Install skopeo
         run: |
@@ -899,7 +900,7 @@ jobs:
       # no multi-arch index for it to clobber.
       - name: Sync images to ECR
         env:
-          SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
+          SRC_CREDS: ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}
           BETA_TAG: ${{ needs.prepare-release.outputs.beta_tag }}
           ECR_REGISTRY: 649941507946.dkr.ecr.us-west-2.amazonaws.com/teable
         run: |

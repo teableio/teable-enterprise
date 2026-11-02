@@ -35,8 +35,6 @@ on:
         type: string
         default: ''
     secrets:
-      PACKAGES_KEY:
-        required: true
       ALI_DOCKER_PASSWORD:
         required: true
       DOCKER_HUB_AK:
@@ -95,7 +93,7 @@ jobs:
 
       - name: Sync images to Aliyun
         env:
-          SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
+          SRC_CREDS: ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}
           DOCKER_HUB_AK: ${{ secrets.DOCKER_HUB_AK }}
           DST_CREDS: ${{ vars.ALI_DOCKER_USERNAME }}:${{ secrets.ALI_DOCKER_PASSWORD }}
         run: |

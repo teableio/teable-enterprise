@@ -123,11 +123,9 @@ on:
         required: false
       LARK_BOT_URL:
         required: false
-      # Used by the ensure-aliyun job (ghcr pull / Aliyun push) — callers
-      # not using `secrets: inherit` must pass these for the self-heal
+      # Used by the ensure-aliyun job (Aliyun push; ghcr uses GITHUB_TOKEN) —
+      # callers not using `secrets: inherit` must pass it for the self-heal
       # copy to work.
-      PACKAGES_KEY:
-        required: false
       ALI_DOCKER_PASSWORD:
         required: false
       # Used by the preheat-sandbox-agent job — same contract as above.
@@ -221,7 +219,7 @@ jobs:
 
       - name: Stamp and copy any missing images
         env:
-          SRC_CREDS: ${{ github.actor }}:${{ secrets.PACKAGES_KEY }}
+          SRC_CREDS: ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}
           DST_CREDS: ${{ vars.ALI_DOCKER_USERNAME }}:${{ secrets.ALI_DOCKER_PASSWORD }}
           SRC_REGISTRY: ghcr.io/teableio
           DST_REGISTRY: registry.cn-shenzhen.aliyuncs.com/teable
