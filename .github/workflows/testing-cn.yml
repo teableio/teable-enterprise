@@ -18,14 +18,14 @@ jobs:
       control_sha: ${{ steps.control.outputs.sha }}
       source_sha: ${{ steps.verify.outputs.source_sha }}
     steps:
-      # teable-ee tokens in this workflow come from the remote-CI app, scoped to
+      # teable-ee tokens in this workflow come from the teable-ci-bot app, scoped to
       # what each job does and revoked when it ends.
       - name: Mint a teable-ee read token
         id: ee_token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.RCI_APP_ID }}
-          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.CI_BOT_APP_ID }}
+          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
           permission-contents: read
@@ -91,8 +91,8 @@ jobs:
         id: ee_token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.RCI_APP_ID }}
-          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.CI_BOT_APP_ID }}
+          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
           permission-contents: read
@@ -174,8 +174,8 @@ jobs:
         id: ee_token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.RCI_APP_ID }}
-          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.CI_BOT_APP_ID }}
+          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
           permission-contents: read
@@ -348,8 +348,8 @@ jobs:
         id: ee_token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.RCI_APP_ID }}
-          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.CI_BOT_APP_ID }}
+          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
           permission-contents: read

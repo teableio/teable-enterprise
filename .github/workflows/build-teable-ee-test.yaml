@@ -48,14 +48,14 @@ jobs:
   bench:
     runs-on: ${{ inputs.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     steps:
-      # Read-only teable-ee token from the remote-CI app, revoked when the job
+      # Read-only teable-ee token from the teable-ci-bot app, revoked when the job
       # ends. ghcr still logs in with PACKAGES_KEY: app tokens cannot push packages.
       - name: Mint a teable-ee read token
         id: ee_token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.RCI_APP_ID }}
-          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.CI_BOT_APP_ID }}
+          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
           permission-contents: read

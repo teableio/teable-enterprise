@@ -68,13 +68,13 @@ jobs:
         run: bash .github/scripts/cn-test-kubeconfig.sh
 
       # Reads PR state, drops labels and comments on teable-ee. Token from the
-      # remote-CI app, revoked when the job ends.
+      # teable-ci-bot app, revoked when the job ends.
       - name: Mint a teable-ee token
         id: ee_token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.RCI_APP_ID }}
-          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.CI_BOT_APP_ID }}
+          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
           permission-pull-requests: read

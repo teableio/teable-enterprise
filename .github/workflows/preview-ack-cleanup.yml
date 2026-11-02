@@ -72,14 +72,15 @@ jobs:
           done
           echo "deleted=${deleted# }" >> "$GITHUB_OUTPUT"
 
-      # Comment token for teable-ee from the remote-CI app, revoked when the job ends.
+      # Comment token for teable-ee from the teable-ci-bot app, revoked when the
+      # job ends.
       - name: Mint a teable-ee comment token
         id: ee_token
         if: steps.delete.outputs.deleted != ''
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.RCI_APP_ID }}
-          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.CI_BOT_APP_ID }}
+          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
           permission-issues: write
