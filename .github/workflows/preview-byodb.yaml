@@ -191,6 +191,7 @@ jobs:
           private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
+          permission-pull-requests: write
           permission-issues: write
 
       - name: Comment the result on the PR
