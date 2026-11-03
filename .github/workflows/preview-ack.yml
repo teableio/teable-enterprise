@@ -72,6 +72,7 @@ jobs:
           private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
+          permission-pull-requests: write
           permission-issues: write
 
       - name: Comment build progress on PR
@@ -209,6 +210,7 @@ jobs:
           private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
           owner: teableio
           repositories: teable-ee
+          permission-pull-requests: write
           permission-issues: write
 
       - name: Comment images pushed on PR
@@ -249,7 +251,7 @@ jobs:
           owner: teableio
           repositories: teable-ee
           permission-contents: read
-          permission-pull-requests: read
+          permission-pull-requests: write
           permission-issues: write
 
       # Template, renderer, bootstrap-admin script and the scope list it reads.
