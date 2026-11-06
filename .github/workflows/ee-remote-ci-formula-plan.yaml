@@ -128,10 +128,22 @@ jobs:
 
       - name: 📤 Ship log & artifacts
         if: always()
+        # Best effort: a log that fails to ship must not fail a passing shard.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.logs-token.outputs.token }}
           JOB_STATUS: ${{ job.status }}
         run: |
+          # Retry with a fresh --clobber run: gh's own 5xx retry gets 422 "already
+          # exists" when the failed attempt had in fact stored the asset.
+          ship() {
+            for n in 1 2 3; do
+              gh release upload "$LOG_TAG" "$1" -R "$LOGS_REPO" --clobber && return 0
+              if [ "$n" -lt 3 ]; then sleep $((n * 10)); fi
+            done
+            echo "::warning::could not ship $(basename "$1") to $LOGS_REPO"
+            return 1
+          }
           mkdir -p "$LOG_DIR"
           [ -f "$LOG_DIR/formula-plan-$SLUG.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/formula-plan-$SLUG.log"
           # SQL, plans and PostgreSQL state must not become public artifacts — bundle them
@@ -140,13 +152,13 @@ jobs:
             tar -czf "$LOG_DIR/formula-plan-artifacts-$SLUG.tar.gz" formula-plan-artifacts || true
           fi
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/formula-plan-$SLUG.log" -R "$LOGS_REPO" --clobber
+          ship "$LOG_DIR/formula-plan-$SLUG.log"
           if [ -f "$LOG_DIR/formula-plan-artifacts-$SLUG.tar.gz" ]; then
-            gh release upload "$LOG_TAG" "$LOG_DIR/formula-plan-artifacts-$SLUG.tar.gz" -R "$LOGS_REPO" --clobber
+            ship "$LOG_DIR/formula-plan-artifacts-$SLUG.tar.gz"
           fi
           if [ "$JOB_STATUS" != "success" ]; then
             echo failed > "$LOG_DIR/formula-plan-$SLUG.failed"
-            gh release upload "$LOG_TAG" "$LOG_DIR/formula-plan-$SLUG.failed" -R "$LOGS_REPO" --clobber
+            ship "$LOG_DIR/formula-plan-$SLUG.failed"
           fi
 
   verdict:

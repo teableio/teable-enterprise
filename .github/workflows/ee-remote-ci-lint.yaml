@@ -42,16 +42,23 @@ jobs:
     # One tsc scope per runner: with all three on one 16GB runner the large
     # projects overlapped and the runner was killed mid-tsc (exit 143, "runner
     # has received a shutdown signal") before it could ship its log.
+    # The two ee rows together are `pnpm g:typecheck`. backend-ee and app-ee
+    # each run tsc with an 8 GiB heap, so they get a runner each instead of
+    # running one after the other on a single runner. The filters are spelled
+    # out here, not as root scripts, because this template also runs against
+    # checkouts that predate it.
     strategy:
       fail-fast: false
       matrix:
         scope:
-          - name: ee
-            script: g:typecheck
+          - name: ee backend
+            args: --fail-if-no-match -F @teable/backend-ee typecheck
+          - name: ee app
+            args: "-r --fail-if-no-match -F '@teable/*-ee' -F '!@teable/backend-ee' --workspace-concurrency=1 typecheck"
           - name: community
-            script: g:typecheck:community
+            args: g:typecheck:community
           - name: community backend
-            script: g:typecheck:community:backend
+            args: g:typecheck:community:backend
 
     steps:
       - name: 🎫 Mint checkout token
@@ -113,7 +120,7 @@ jobs:
           status=0
           {
             echo "=== typecheck (${{ matrix.scope.name }}) ==="
-            pnpm ${{ matrix.scope.script }}
+            pnpm ${{ matrix.scope.args }}
           } >> "$LOG_DIR/lint-typecheck-$SLUG.log" 2>&1 || status=$?
           echo "typecheck exit=$status ($(wc -l < "$LOG_DIR/lint-typecheck-$SLUG.log") log lines total)"
           exit $status
@@ -132,20 +139,32 @@ jobs:
 
       - name: 📤 Ship log
         if: always()
+        # Best effort: a log that fails to ship must not fail a passing shard.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.logs-token.outputs.token }}
           JOB_STATUS: ${{ job.status }}
         run: |
+          # Retry with a fresh --clobber run: gh's own 5xx retry gets 422 "already
+          # exists" when the failed attempt had in fact stored the asset.
+          ship() {
+            for n in 1 2 3; do
+              gh release upload "$LOG_TAG" "$1" -R "$LOGS_REPO" --clobber && return 0
+              if [ "$n" -lt 3 ]; then sleep $((n * 10)); fi
+            done
+            echo "::warning::could not ship $(basename "$1") to $LOGS_REPO"
+            return 1
+          }
           mkdir -p "$LOG_DIR"
           SLUG="${SLUG:-$(echo "${{ matrix.scope.name }}" | tr ' /' '--')}"
           [ -f "$LOG_DIR/lint-typecheck-$SLUG.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/lint-typecheck-$SLUG.log"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/lint-typecheck-$SLUG.log" -R "$LOGS_REPO" --clobber
+          ship "$LOG_DIR/lint-typecheck-$SLUG.log"
           # Failure marker — the conclude step tails only marked logs instead
           # of guessing from log text (which false-positived on ERROR noise).
           if [ "$JOB_STATUS" != "success" ]; then
             echo failed > "$LOG_DIR/lint-typecheck-$SLUG.failed"
-            gh release upload "$LOG_TAG" "$LOG_DIR/lint-typecheck-$SLUG.failed" -R "$LOGS_REPO" --clobber
+            ship "$LOG_DIR/lint-typecheck-$SLUG.failed"
           fi
 
   lint:
@@ -225,19 +244,31 @@ jobs:
 
       - name: 📤 Ship log
         if: always()
+        # Best effort: a log that fails to ship must not fail a passing shard.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.logs-token.outputs.token }}
           JOB_STATUS: ${{ job.status }}
         run: |
+          # Retry with a fresh --clobber run: gh's own 5xx retry gets 422 "already
+          # exists" when the failed attempt had in fact stored the asset.
+          ship() {
+            for n in 1 2 3; do
+              gh release upload "$LOG_TAG" "$1" -R "$LOGS_REPO" --clobber && return 0
+              if [ "$n" -lt 3 ]; then sleep $((n * 10)); fi
+            done
+            echo "::warning::could not ship $(basename "$1") to $LOGS_REPO"
+            return 1
+          }
           mkdir -p "$LOG_DIR"
           [ -f "$LOG_DIR/lint-oxlint.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/lint-oxlint.log"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/lint-oxlint.log" -R "$LOGS_REPO" --clobber
+          ship "$LOG_DIR/lint-oxlint.log"
           # Failure marker — the conclude step tails only marked logs instead
           # of guessing from log text (which false-positived on ERROR noise).
           if [ "$JOB_STATUS" != "success" ]; then
             echo failed > "$LOG_DIR/lint-oxlint.failed"
-            gh release upload "$LOG_TAG" "$LOG_DIR/lint-oxlint.failed" -R "$LOGS_REPO" --clobber
+            ship "$LOG_DIR/lint-oxlint.failed"
           fi
 
   verdict:

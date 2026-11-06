@@ -374,20 +374,32 @@ jobs:
 
       - name: 📤 Ship log
         if: always() && steps.gate.outputs.run == 'true'
+        # Best effort: a log that fails to ship must not fail a passing shard.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.logs-token.outputs.token }}
           JOB_STATUS: ${{ job.status }}
         run: |
+          # Retry with a fresh --clobber run: gh's own 5xx retry gets 422 "already
+          # exists" when the failed attempt had in fact stored the asset.
+          ship() {
+            for n in 1 2 3; do
+              gh release upload "$LOG_TAG" "$1" -R "$LOGS_REPO" --clobber && return 0
+              if [ "$n" -lt 3 ]; then sleep $((n * 10)); fi
+            done
+            echo "::warning::could not ship $(basename "$1") to $LOGS_REPO"
+            return 1
+          }
           mkdir -p "$LOG_DIR"
           SLUG="${SLUG:-$(echo "${{ matrix.pkg.label }}" | tr '@/' '--' | tr ' ' '-')}"
           [ -f "$LOG_DIR/v2-unit-$SLUG.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-unit-$SLUG.log"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/v2-unit-$SLUG.log" -R "$LOGS_REPO" --clobber
+          ship "$LOG_DIR/v2-unit-$SLUG.log"
           # Failure marker — the conclude step tails only marked logs instead
           # of guessing from log text (which false-positived on ERROR noise).
           if [ "$JOB_STATUS" != "success" ]; then
             echo failed > "$LOG_DIR/v2-unit-$SLUG.failed"
-            gh release upload "$LOG_TAG" "$LOG_DIR/v2-unit-$SLUG.failed" -R "$LOGS_REPO" --clobber
+            ship "$LOG_DIR/v2-unit-$SLUG.failed"
           fi
 
   host-query:
@@ -511,18 +523,30 @@ jobs:
 
       - name: Ship host check log
         if: always()
+        # Best effort: a log that fails to ship must not fail a passing shard.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.logs-token.outputs.token }}
           JOB_STATUS: ${{ job.status }}
         run: |
+          # Retry with a fresh --clobber run: gh's own 5xx retry gets 422 "already
+          # exists" when the failed attempt had in fact stored the asset.
+          ship() {
+            for n in 1 2 3; do
+              gh release upload "$LOG_TAG" "$1" -R "$LOGS_REPO" --clobber && return 0
+              if [ "$n" -lt 3 ]; then sleep $((n * 10)); fi
+            done
+            echo "::warning::could not ship $(basename "$1") to $LOGS_REPO"
+            return 1
+          }
           mkdir -p "$LOG_DIR"
           LOG_FILE="$LOG_DIR/v2-host-query-${{ matrix.edition.label }}.log"
           [ -f "$LOG_FILE" ] || echo "(host checks failed before their first logged step)" > "$LOG_FILE"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_FILE" -R "$LOGS_REPO" --clobber
+          ship "$LOG_FILE"
           if [ "$JOB_STATUS" != "success" ]; then
             echo failed > "$LOG_FILE.failed"
-            gh release upload "$LOG_TAG" "$LOG_FILE.failed" -R "$LOGS_REPO" --clobber
+            ship "$LOG_FILE.failed"
           fi
 
   e2e:
@@ -605,20 +629,32 @@ jobs:
 
       - name: 📤 Ship log
         if: always()
+        # Best effort: a log that fails to ship must not fail a passing shard.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.logs-token.outputs.token }}
           JOB_STATUS: ${{ job.status }}
         run: |
+          # Retry with a fresh --clobber run: gh's own 5xx retry gets 422 "already
+          # exists" when the failed attempt had in fact stored the asset.
+          ship() {
+            for n in 1 2 3; do
+              gh release upload "$LOG_TAG" "$1" -R "$LOGS_REPO" --clobber && return 0
+              if [ "$n" -lt 3 ]; then sleep $((n * 10)); fi
+            done
+            echo "::warning::could not ship $(basename "$1") to $LOGS_REPO"
+            return 1
+          }
           mkdir -p "$LOG_DIR"
           SLUG="${SLUG:-$(echo "${{ matrix.shard }}" | tr '/' '-')}"
           [ -f "$LOG_DIR/v2-e2e-$SLUG.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-e2e-$SLUG.log"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-$SLUG.log" -R "$LOGS_REPO" --clobber
+          ship "$LOG_DIR/v2-e2e-$SLUG.log"
           # Failure marker — the conclude step tails only marked logs instead
           # of guessing from log text (which false-positived on ERROR noise).
           if [ "$JOB_STATUS" != "success" ]; then
             echo failed > "$LOG_DIR/v2-e2e-$SLUG.failed"
-            gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-$SLUG.failed" -R "$LOGS_REPO" --clobber
+            ship "$LOG_DIR/v2-e2e-$SLUG.failed"
           fi
 
   e2e-sensitive:
@@ -687,17 +723,29 @@ jobs:
 
       - name: 📤 Ship log
         if: always()
+        # Best effort: a log that fails to ship must not fail a passing shard.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.logs-token.outputs.token }}
           JOB_STATUS: ${{ job.status }}
         run: |
+          # Retry with a fresh --clobber run: gh's own 5xx retry gets 422 "already
+          # exists" when the failed attempt had in fact stored the asset.
+          ship() {
+            for n in 1 2 3; do
+              gh release upload "$LOG_TAG" "$1" -R "$LOGS_REPO" --clobber && return 0
+              if [ "$n" -lt 3 ]; then sleep $((n * 10)); fi
+            done
+            echo "::warning::could not ship $(basename "$1") to $LOGS_REPO"
+            return 1
+          }
           mkdir -p "$LOG_DIR"
           [ -f "$LOG_DIR/v2-e2e-sensitive.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-e2e-sensitive.log"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-sensitive.log" -R "$LOGS_REPO" --clobber
+          ship "$LOG_DIR/v2-e2e-sensitive.log"
           if [ "$JOB_STATUS" != "success" ]; then
             echo failed > "$LOG_DIR/v2-e2e-sensitive.failed"
-            gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-sensitive.failed" -R "$LOGS_REPO" --clobber
+            ship "$LOG_DIR/v2-e2e-sensitive.failed"
           fi
 
   e2e-computed-heavy:
@@ -766,17 +814,29 @@ jobs:
 
       - name: 📤 Ship log
         if: always()
+        # Best effort: a log that fails to ship must not fail a passing shard.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.logs-token.outputs.token }}
           JOB_STATUS: ${{ job.status }}
         run: |
+          # Retry with a fresh --clobber run: gh's own 5xx retry gets 422 "already
+          # exists" when the failed attempt had in fact stored the asset.
+          ship() {
+            for n in 1 2 3; do
+              gh release upload "$LOG_TAG" "$1" -R "$LOGS_REPO" --clobber && return 0
+              if [ "$n" -lt 3 ]; then sleep $((n * 10)); fi
+            done
+            echo "::warning::could not ship $(basename "$1") to $LOGS_REPO"
+            return 1
+          }
           mkdir -p "$LOG_DIR"
           [ -f "$LOG_DIR/v2-e2e-computed-heavy.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-e2e-computed-heavy.log"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-computed-heavy.log" -R "$LOGS_REPO" --clobber
+          ship "$LOG_DIR/v2-e2e-computed-heavy.log"
           if [ "$JOB_STATUS" != "success" ]; then
             echo failed > "$LOG_DIR/v2-e2e-computed-heavy.failed"
-            gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-computed-heavy.failed" -R "$LOGS_REPO" --clobber
+            ship "$LOG_DIR/v2-e2e-computed-heavy.failed"
           fi
 
   e2e-json-formula-cascade:
@@ -845,17 +905,29 @@ jobs:
 
       - name: 📤 Ship log
         if: always()
+        # Best effort: a log that fails to ship must not fail a passing shard.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.logs-token.outputs.token }}
           JOB_STATUS: ${{ job.status }}
         run: |
+          # Retry with a fresh --clobber run: gh's own 5xx retry gets 422 "already
+          # exists" when the failed attempt had in fact stored the asset.
+          ship() {
+            for n in 1 2 3; do
+              gh release upload "$LOG_TAG" "$1" -R "$LOGS_REPO" --clobber && return 0
+              if [ "$n" -lt 3 ]; then sleep $((n * 10)); fi
+            done
+            echo "::warning::could not ship $(basename "$1") to $LOGS_REPO"
+            return 1
+          }
           mkdir -p "$LOG_DIR"
           [ -f "$LOG_DIR/v2-e2e-json-formula-cascade.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-e2e-json-formula-cascade.log"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-json-formula-cascade.log" -R "$LOGS_REPO" --clobber
+          ship "$LOG_DIR/v2-e2e-json-formula-cascade.log"
           if [ "$JOB_STATUS" != "success" ]; then
             echo failed > "$LOG_DIR/v2-e2e-json-formula-cascade.failed"
-            gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-json-formula-cascade.failed" -R "$LOGS_REPO" --clobber
+            ship "$LOG_DIR/v2-e2e-json-formula-cascade.failed"
           fi
 
   e2e-postgres-only:
@@ -924,19 +996,31 @@ jobs:
 
       - name: 📤 Ship log
         if: always()
+        # Best effort: a log that fails to ship must not fail a passing shard.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.logs-token.outputs.token }}
           JOB_STATUS: ${{ job.status }}
         run: |
+          # Retry with a fresh --clobber run: gh's own 5xx retry gets 422 "already
+          # exists" when the failed attempt had in fact stored the asset.
+          ship() {
+            for n in 1 2 3; do
+              gh release upload "$LOG_TAG" "$1" -R "$LOGS_REPO" --clobber && return 0
+              if [ "$n" -lt 3 ]; then sleep $((n * 10)); fi
+            done
+            echo "::warning::could not ship $(basename "$1") to $LOGS_REPO"
+            return 1
+          }
           mkdir -p "$LOG_DIR"
           [ -f "$LOG_DIR/v2-e2e-postgres-only.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/v2-e2e-postgres-only.log"
           gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
-          gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-postgres-only.log" -R "$LOGS_REPO" --clobber
+          ship "$LOG_DIR/v2-e2e-postgres-only.log"
           # Failure marker — the conclude step tails only marked logs instead
           # of guessing from log text (which false-positived on ERROR noise).
           if [ "$JOB_STATUS" != "success" ]; then
             echo failed > "$LOG_DIR/v2-e2e-postgres-only.failed"
-            gh release upload "$LOG_TAG" "$LOG_DIR/v2-e2e-postgres-only.failed" -R "$LOGS_REPO" --clobber
+            ship "$LOG_DIR/v2-e2e-postgres-only.failed"
           fi
 
   verdict:
