@@ -182,17 +182,56 @@ jobs:
       - name: ⚙️ Expose GitHub runtime for Buildx cache
         uses: crazy-max/ghaction-github-runtime@v3
 
+      # The agent Dockerfile defaults to the base's :latest, i.e. the last release's
+      # toolchain. Build on the base this PR's inputs hash to instead, so a package the PR
+      # adds to the base is there in its preview.
+      - name: 🧱 Resolve agent base image
+        id: agent_base
+        if: matrix.component == 'sandbox-agent'
+        run: |
+          tag="$(node scripts/sandbox-agent-base-hash.mjs)"
+          if [[ ! "${tag}" =~ ^base-[0-9a-f]{16}$ ]]; then
+            echo "Unexpected agent base tag: ${tag}" >&2
+            exit 1
+          fi
+          repo=ghcr.io/teableio/teable-sandbox-agent-base
+          for ref in "${repo}:${tag}" "${repo}:preview-${tag}"; do
+            if docker buildx imagetools inspect "${ref}" >/dev/null 2>&1; then
+              echo "Agent base image found: ${ref}"
+              echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "Agent base image missing, will build: ${repo}:preview-${tag}"
+          echo "ref=${repo}:preview-${tag}" >> "$GITHUB_OUTPUT"
+          echo "build=true" >> "$GITHUB_OUTPUT"
+
+      # Never push base-<hash>: a release that finds that tag skips building its own
+      # amd64+arm64 base and would ship this amd64-only one.
+      - name: 🧱 Build and push agent base image
+        if: steps.agent_base.outputs.build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: dockers/teable/Dockerfile.sandbox-agent-base
+          platforms: linux/amd64
+          tags: ${{ steps.agent_base.outputs.ref }}
+          push: true
+          provenance: false
+
       - name: 📦 Build and push
         env:
           PREVIEW_PUSH_REGISTRIES: ${{ env.SKIP_DEPLOY == 'true' && 'registry.cn-shenzhen.aliyuncs.com,ghcr.io' || '' }}
           DOCKERFILE: dockers/teable/${{ matrix.file }}
           TAGS: ${{ steps.meta.outputs.tags }}
           EDITION_ARG: ${{ steps.image.outputs.edition_arg }}
+          AGENT_BASE_IMAGE: ${{ steps.agent_base.outputs.ref }}
         run: |
           zx scripts/build-image.mjs --file="${DOCKERFILE}" \
               --build-arg="ENABLE_CSP=false" \
               --build-arg="SENTRY_ENABLED=false" \
               --build-arg="NEXT_BUILD_ENV_EDITION=${EDITION_ARG}" \
+              ${AGENT_BASE_IMAGE:+--build-arg="SANDBOX_AGENT_BASE_IMAGE=${AGENT_BASE_IMAGE}"} \
               --tag="${TAGS}" \
               --platform="linux/amd64" \
               --push
