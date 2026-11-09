@@ -30,7 +30,9 @@ env:
 
 jobs:
   ai-web:
-    runs-on: ubuntu-latest
+    # Playwright currently supports Ubuntu 24.04; pin so ubuntu-latest moving to 26.04 cannot
+    # break `playwright install --with-deps`.
+    runs-on: ubuntu-24.04
     name: AI E2E Tests
     timeout-minutes: 60
 
