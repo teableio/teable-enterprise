@@ -610,7 +610,7 @@ jobs:
           status=0
           {
             echo "=== v2 e2e shard ${{ matrix.shard }} ==="
-            pnpm -C community/packages/v2/e2e exec vitest run --silent --bail 1 --exclude src/field-conversion-deadlock.e2e.spec.ts --exclude src/computed-json-formula-cascade.e2e.spec.ts --exclude src/importMemory.e2e.spec.ts --exclude src/list-records-cursor.e2e.spec.ts --exclude src/computed-convergence.e2e.spec.ts --exclude src/computed-convergence.property.e2e.spec.ts --exclude src/computed-insert-sibling-propagation.e2e.spec.ts --exclude src/computed-outbox-recovery.e2e.spec.ts --shard=${{ matrix.shard }} --fileParallelism --maxWorkers=2
+            pnpm -C community/packages/v2/e2e exec vitest run --silent --bail 1 --exclude src/field-conversion-deadlock.e2e.spec.ts --exclude src/conditional-delete-parameter-bound.e2e.spec.ts --exclude src/computed-json-formula-cascade.e2e.spec.ts --exclude src/importMemory.e2e.spec.ts --exclude src/list-records-cursor.e2e.spec.ts --exclude src/computed-convergence.e2e.spec.ts --exclude src/computed-convergence.property.e2e.spec.ts --exclude src/computed-insert-sibling-propagation.e2e.spec.ts --exclude src/computed-outbox-recovery.e2e.spec.ts --shard=${{ matrix.shard }} --fileParallelism --maxWorkers=2
           } >> "$LOG_DIR/v2-e2e-$SLUG.log" 2>&1 || status=$?
           echo "v2 e2e exit=$status ($(wc -l < "$LOG_DIR/v2-e2e-$SLUG.log") log lines)"
           exit $status
@@ -977,7 +977,7 @@ jobs:
           status=0
           {
             echo "=== v2 e2e postgres-only ==="
-            pnpm -C community/packages/v2/e2e exec vitest run --silent=true --bail 1 src/field-conversion-deadlock.e2e.spec.ts
+            pnpm -C community/packages/v2/e2e exec vitest run --silent=true --bail 1 src/field-conversion-deadlock.e2e.spec.ts src/conditional-delete-parameter-bound.e2e.spec.ts
           } >> "$LOG_DIR/v2-e2e-postgres-only.log" 2>&1 || status=$?
           echo "v2 e2e postgres-only exit=$status ($(wc -l < "$LOG_DIR/v2-e2e-postgres-only.log") log lines)"
           exit $status

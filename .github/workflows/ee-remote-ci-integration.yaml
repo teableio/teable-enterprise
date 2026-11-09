@@ -39,7 +39,7 @@ env:
 
 jobs:
   integration:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     name: Integration Tests - ${{ matrix.e2e.database-type }} ${{ matrix.e2e.shard }}
     timeout-minutes: 15
 
