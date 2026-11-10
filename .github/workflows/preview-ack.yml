@@ -273,6 +273,7 @@ jobs:
       IMAGE_TAG: ${{ needs.build-push.outputs.sha }}
       PREVIEW_DOMAIN_BASE: ${{ vars.PREVIEW_DOMAIN_BASE || 'preview.teable.cn' }}
       PREVIEW_MAX_IDLE_DAYS: ${{ vars.PREVIEW_MAX_IDLE_DAYS || '3' }}
+      PREVIEW_ADMIN_EMAIL: dev+pr@teable.io
       ALIYUN_ROLE_ARN: ${{ vars.CN_TEST_DEPLOY_ROLE_ARN || 'acs:ram::1145786521954482:role/teable-cn-test-github-deploy' }}
       ALIYUN_OIDC_PROVIDER_ARN: ${{ vars.CN_TEST_OIDC_PROVIDER_ARN || 'acs:ram::1145786521954482:oidc-provider/github-actions' }}
     steps:
@@ -335,18 +336,28 @@ jobs:
             echo "fresh=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # Created once, never rewritten: redeploys must keep the database, Redis and
-      # MinIO credentials the data was written with.
+      # Created once: redeploys must keep the database, Redis and MinIO credentials the
+      # data was written with. The app's signing secrets and the admin password live
+      # here too, random per preview.
       - name: Ensure the data Secret
         run: |
           set -euo pipefail
           name="teable-${INSTANCE_NAME}-data"
+          b64() { printf '%s' "$1" | base64 -w0; }
           if kubectl get secret "${name}" >/dev/null 2>&1; then
             echo "${name} exists"
-            exit 0
-          fi
-          b64() { printf '%s' "$1" | base64 -w0; }
-          kubectl create -f - <<EOF
+            # A preview created before the signing secrets moved here gets them on its
+            # next deploy, which signs its users out once. Its admin password is not
+            # added: the account already exists with the password it was created with.
+            for key in BACKEND_JWT_SECRET BACKEND_SESSION_SECRET; do
+              if [ -z "$(kubectl get secret "${name}" -o jsonpath="{.data.${key}}")" ]; then
+                kubectl patch secret "${name}" --type merge \
+                  -p "{\"data\":{\"${key}\":\"$(b64 "$(openssl rand -hex 32)")\"}}"
+              fi
+            done
+          else
+            # Signup wants a letter and a digit in the password; the prefix has both.
+            kubectl create -f - <<EOF
           apiVersion: v1
           kind: Secret
           metadata:
@@ -359,7 +370,17 @@ jobs:
             REDIS_PASSWORD: $(b64 "$(openssl rand -hex 24)")
             MINIO_ROOT_USER: $(b64 teable)
             MINIO_ROOT_PASSWORD: $(b64 "$(openssl rand -hex 24)")
+            BACKEND_JWT_SECRET: $(b64 "$(openssl rand -hex 32)")
+            BACKEND_SESSION_SECRET: $(b64 "$(openssl rand -hex 32)")
+            PREVIEW_ADMIN_PASSWORD: $(b64 "pv1$(openssl rand -hex 12)")
           EOF
+          fi
+          # Later steps carry the password in their environment, which the log prints.
+          admin_password=$(kubectl get secret "${name}" -o jsonpath='{.data.PREVIEW_ADMIN_PASSWORD}' | base64 -d)
+          if [ -n "${admin_password}" ]; then
+            echo "::add-mask::${admin_password}"
+            echo "PREVIEW_ADMIN_PASSWORD=${admin_password}" >> "$GITHUB_ENV"
+          fi
 
       - name: Render and apply
         id: render
@@ -416,12 +437,15 @@ jobs:
           kubectl exec "deployment/teable-${INSTANCE_NAME}" -- \
             curl -f --retry 30 --retry-delay 5 --retry-connrefused http://localhost:3000/health
 
-      # Fixed preview admin (dev+pr@teable.io) + full-scope instance API token, shown
-      # on the PR by the status comment. Only on the first deploy, like the Sealos lane.
+      # Preview admin (fixed email, this preview's own password) + full-scope instance
+      # API token, shown on the PR by the status comment. Only on the first deploy.
       - name: Bootstrap preview admin
         id: preview_admin
         if: steps.exists.outputs.fresh == 'true'
         continue-on-error: true
+        env:
+          ADMIN_EMAIL: ${{ env.PREVIEW_ADMIN_EMAIL }}
+          ADMIN_PASSWORD: ${{ env.PREVIEW_ADMIN_PASSWORD }}
         run: bash tooling/.github/scripts/preview-bootstrap-admin.sh
 
       # A failed rollout only says "timed out waiting for the condition". Print what the
@@ -467,9 +491,8 @@ jobs:
           GH_TOKEN: ${{ steps.ee_token.outputs.token }}
           SUCCESS: ${{ job.status == 'success' }}
           TRACING_ENABLED: ${{ steps.labels.outputs.enable_tracing }}
+          FRESH: ${{ steps.exists.outputs.fresh }}
           ADMIN_STATUS: ${{ steps.preview_admin.outputs.status }}
-          ADMIN_EMAIL: ${{ steps.preview_admin.outputs.admin_email }}
-          ADMIN_PASSWORD: ${{ steps.preview_admin.outputs.admin_password }}
           ADMIN_TOKEN: ${{ steps.preview_admin.outputs.admin_token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           FAILURE_REASON: ${{ steps.diagnose.outputs.reason }}
@@ -481,8 +504,13 @@ jobs:
               body="${body} 🔎 Jaeger URL: https://jaeger-${INSTANCE_NAME}.${PREVIEW_DOMAIN_BASE}"
             fi
             body="${body}"$'\n'"⏳ Removed after ${PREVIEW_MAX_IDLE_DAYS} days without a deploy; pushing a commit redeploys and resets the clock."
+            # The password is this preview's own, so every deploy comment repeats it;
+            # the token is only readable when the first deploy creates it.
+            if [ -n "${PREVIEW_ADMIN_PASSWORD:-}" ] && { [ "${ADMIN_STATUS}" = "created" ] || [ "${FRESH}" = "false" ]; }; then
+              body="${body}"$'\n'"🔐 Admin: \`${PREVIEW_ADMIN_EMAIL}\` / \`${PREVIEW_ADMIN_PASSWORD}\`"
+            fi
             if [ "${ADMIN_STATUS}" = "created" ]; then
-              body="${body}"$'\n'"🔐 Admin: \`${ADMIN_EMAIL}\` / \`${ADMIN_PASSWORD}\`"$'\n'"🔑 Instance API token: \`${ADMIN_TOKEN}\`"
+              body="${body}"$'\n'"🔑 Instance API token: \`${ADMIN_TOKEN}\`"
             fi
           else
             body="**Deployment Status: ❌ Failed** [Run](${RUN_URL})"
