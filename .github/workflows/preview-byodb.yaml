@@ -179,7 +179,21 @@ jobs:
       # preview-byodb-pod.sh (runs inside the app container).
       - name: Provision the BYODB database and space
         id: byodb
-        run: bash teable-ee/.github/scripts/preview-byodb.sh
+        run: |
+          set -euo pipefail
+          # The admin password is the preview's own, generated with its data Secret by
+          # the deploy workflow. Masked first: this repository's logs are public.
+          ADMIN_PASSWORD=$(kubectl get secret "teable-${INSTANCE_NAME}-data" \
+            -o jsonpath='{.data.PREVIEW_ADMIN_PASSWORD}' | base64 -d)
+          if [ -z "${ADMIN_PASSWORD}" ]; then
+            echo "teable-${INSTANCE_NAME}-data has no PREVIEW_ADMIN_PASSWORD" >&2
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "error=this preview was created before previews had their own admin password — remove its \`preview-cloud\` / \`preview-ee\` label and add it again to recreate it, then re-add \`preview-byodb\`" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "::add-mask::${ADMIN_PASSWORD}"
+          export ADMIN_PASSWORD
+          bash teable-ee/.github/scripts/preview-byodb.sh
 
       # Minted at the end: waiting for the preview can outlast a one-hour token.
       - name: Mint PR comment token
@@ -226,7 +240,7 @@ jobs:
               "- Preview: ${PREVIEW_URL}" \
               "- Space: \`${SPACE_NAME}\` — ${PREVIEW_URL}/space/${SPACE_ID}" \
               "- Bound data DB: \`${DISPLAY_HOST}/${DISPLAY_DATABASE}\` — state \`${DATA_DB_STATE}\`, internal schema \`${INTERNAL_SCHEMA}\`" \
-              "- Owner: \`${OWNER_EMAIL}\` (the fixed preview admin the deploy comment publishes)" \
+              "- Owner: \`${OWNER_EMAIL}\` (the preview admin; its password is in the deploy comment)" \
               ${opt_note[@]+"${opt_note[@]}"} \
               "" \
               "Remove the \`preview-byodb\` label and add it again (two separate actions) to re-provision; the database lives inside the preview cluster and is deleted with the preview. [Run](${run_url})")"
