@@ -186,13 +186,14 @@ jobs:
             npm publish --tag "$NPM_TAG" --provenance
           fi
 
-      # Tell agent-skills a new CLI version is live so its sync workflow can
+      # Tell teable-mcp (home of the teable-assistant-ops skill, moved there from
+      # agent-skills) a new CLI version is live so its sync workflow can
       # diff the command manifest and open a docs PR when the surface changed.
       # Reruns are safe: publish is guarded by the already-published check, and
       # a duplicate notification just re-triggers an idempotent diff.
       # repository_dispatch needs Contents write on the target; the receiver
       # reads source_ref from client_payload, so workflow_dispatch won't do.
-      - name: Mint an agent-skills dispatch token
+      - name: Mint a teable-mcp dispatch token
         id: skills-token
         if: steps.guard.outputs.skip != 'true' && steps.inputs.outputs.dry_run != 'true' && steps.version.outputs.npm_tag == 'latest'
         uses: actions/create-github-app-token@v3
@@ -200,10 +201,10 @@ jobs:
           app-id: ${{ secrets.RCI_APP_ID }}
           private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
           owner: teableio
-          repositories: agent-skills
+          repositories: teable-mcp
           permission-contents: write
 
-      - name: Notify agent-skills
+      - name: Notify teable-mcp
         if: steps.guard.outputs.skip != 'true' && steps.inputs.outputs.dry_run != 'true' && steps.version.outputs.npm_tag == 'latest'
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -215,7 +216,7 @@ jobs:
           curl --fail-with-body -X POST \
             -H "Authorization: token ${DISPATCH_TOKEN}" \
             -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/teableio/agent-skills/dispatches \
+            https://api.github.com/repos/teableio/teable-mcp/dispatches \
             -d "$(jq -n --arg version "$VERSION" --arg source_ref "$SOURCE_REF" \
               '{event_type: "cli-published", client_payload: {version: $version, source_ref: $source_ref}}')"
 
