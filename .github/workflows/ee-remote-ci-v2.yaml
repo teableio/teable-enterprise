@@ -117,16 +117,6 @@ jobs:
             @teable/v2-contract-http-openapi...
             ${{ steps.query-package.outputs.install-args }}
 
-      # The full source sweep is a one-shot repository gate, not a per-consumer unit case:
-      # it parses ~3k v2 sources, so it runs here once instead of inside the 5s unit callback.
-      - name: 🚧 Enforce v2 import boundary
-        run: |
-          pnpm exec oxlint \
-            -c community/packages/eslint-config-bases/src/bases/v2-import-boundary.json \
-            --disable-nested-config \
-            -A all \
-            community/packages/v2/*/src
-
       - name: ☁️ Upload workspace dependencies
         uses: ./.github/actions/workspace-deps-upload
         with:

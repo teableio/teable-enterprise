@@ -42,11 +42,11 @@ jobs:
     # One tsc scope per runner: with all three on one 16GB runner the large
     # projects overlapped and the runner was killed mid-tsc (exit 143, "runner
     # has received a shutdown signal") before it could ship its log.
-    # The two ee rows together are `pnpm g:typecheck`. backend-ee uses an
-    # 8 GiB heap; app-ee's package script sets 12 GiB for its full source graph
-    # after exhausting 8 GiB. Each gets a dedicated 16 GiB runner, not a
-    # concurrent tsc process. The filters live here rather than root scripts
-    # because this template also runs against checkouts that predate it.
+    # The two ee rows together are `pnpm g:typecheck`. backend-ee and app-ee
+    # each run tsc with an 8 GiB heap, so they get a runner each instead of
+    # running one after the other on a single runner. The filters are spelled
+    # out here, not as root scripts, because this template also runs against
+    # checkouts that predate it.
     strategy:
       fail-fast: false
       matrix:
