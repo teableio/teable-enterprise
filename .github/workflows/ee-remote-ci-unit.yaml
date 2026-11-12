@@ -49,7 +49,7 @@ jobs:
             filter: '--filter "@teable/backend-ee"'
             shard: 3/3
           - name: packages
-            filter: '--filter "@teable/*-ee" --filter "!@teable/backend-ee"'
+            filter: '--filter "@teable/*-ee" --filter "!@teable/backend-ee" --filter "./packages/app-platform/*"'
           - name: community packages
             filter: community
             shard: ''
@@ -153,8 +153,213 @@ jobs:
             ship "$LOG_DIR/unit-$SLUG.failed"
           fi
 
+  app-platform:
+    runs-on: ubuntu-latest
+    name: Unit Tests app-platform packages
+    timeout-minutes: 25
+    # Real PostgreSQL only: the identity adapter cases are opt-in on owned loopback
+    # databases, and a skipped case is not proof. Database names must satisfy the owned
+    # database guard (app_platform_*).
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: app_platform_metadata
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d app_platform_metadata"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CI: 1
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/app_platform_metadata
+      PRISMA_DATABASE_URL: postgres://postgres:postgres@localhost:5432/app_platform_metadata
+      PRISMA_META_DATABASE_URL: postgres://postgres:postgres@localhost:5432/app_platform_metadata
+      APP_PLATFORM_IDENTITY_DATABASE_URL: postgres://postgres:postgres@localhost:5432/app_platform_metadata
+      APP_PLATFORM_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/app_platform_test
+      APP_PLATFORM_MIGRATION_DATABASE_URL: postgres://postgres:postgres@localhost:5432/app_platform_migration
+
+    steps:
+      - name: 🎫 Mint checkout token
+        id: ee-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+          permission-contents: read
+
+      - name: 📦 Checkout teable-ee
+        uses: actions/checkout@v4
+        with:
+          repository: teableio/teable-ee
+          ref: ${{ github.event.client_payload.ee_checkout_sha || github.event.client_payload.ee_sha }}
+          token: ${{ steps.ee-token.outputs.token }}
+          persist-credentials: false
+
+      - name: 🟢 Use Node.js 24.22.2
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.2
+
+      - name: 📥 Monorepo install
+        uses: ./.github/actions/pnpm-install
+
+      - name: 🗄️ Create owned databases, generate Prisma Client, apply official migrations
+        run: |
+          mkdir -p "$LOG_DIR"
+          status=0
+          {
+            echo "=== create owned databases ===" &&
+            PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c 'CREATE DATABASE app_platform_test' &&
+            PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c 'CREATE DATABASE app_platform_migration' &&
+            echo "=== prisma generate ===" &&
+            (cd packages/db-main-prisma && pnpm -F @teable/db-main-prisma-ee prisma-generate --schema ./prisma/postgres/schema.prisma) &&
+            echo "=== official migrations against the metadata database ===" &&
+            (cd packages/db-main-prisma && pnpm prisma-migrate deploy --schema ./prisma/postgres/schema.prisma)
+          } >> "$LOG_DIR/unit-app-platform.log" 2>&1 || status=$?
+          echo "prepare exit=$status"
+          exit $status
+
+      - name: 🏗️ Build App Platform packages in dependency order
+        run: |
+          mkdir -p "$LOG_DIR"
+          status=0
+          {
+            for pkg in identity identity-adapter-prisma; do
+              echo "=== build @teable/app-platform-$pkg ===" &&
+              pnpm --fail-if-no-match -F "@teable/app-platform-$pkg" build || exit $?
+            done
+          } >> "$LOG_DIR/unit-app-platform.log" 2>&1 || status=$?
+          echo "build exit=$status"
+          exit $status
+
+      - name: 🧪 Package tests (serial, real PostgreSQL, a skip is a failure)
+        run: |
+          mkdir -p "$LOG_DIR/app-platform-reports"
+          rm -f "$LOG_DIR"/app-platform-reports/*.json
+          status=0
+          {
+            for pkg in identity identity-adapter-prisma; do
+              echo "=== test @teable/app-platform-$pkg ===" &&
+              pnpm --fail-if-no-match -F "@teable/app-platform-$pkg" exec vitest run \
+                --passWithNoTests=false \
+                --reporter=default \
+                --reporter=json \
+                --outputFile="$LOG_DIR/app-platform-reports/$pkg.json" || exit $?
+            done
+          } >> "$LOG_DIR/unit-app-platform.log" 2>&1 || status=$?
+          if [ "$status" -eq 0 ]; then
+            node -e '
+              const fs = require("fs");
+              const path = require("path");
+              const dir = process.argv[1];
+              const files = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));
+              if (files.length === 0) { console.error("no vitest report produced"); process.exit(1); }
+              let passed = 0, skipped = 0, failed = 0;
+              for (const file of files) {
+                const report = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8"));
+                const tests = (report.testResults || []).flatMap((f) => f.assertionResults || []);
+                let filePassed = 0;
+                for (const test of tests) {
+                  if (test.status === "pending" || test.status === "skipped" || test.status === "todo") skipped += 1;
+                  else if (test.status === "passed") { passed += 1; filePassed += 1; }
+                  else failed += 1;
+                }
+                console.log(`${file}: tests=${tests.length} passed=${filePassed}`);
+                if (filePassed === 0) {
+                  console.error(`package report ${file} has no passing test`);
+                  process.exit(1);
+                }
+              }
+              console.log(`app-platform passed=${passed} failed=${failed} skipped=${skipped}`);
+              if (skipped > 0) { console.error("a skip is not proof"); process.exit(1); }
+              if (failed > 0) { console.error("failing tests reported in the JSON report"); process.exit(1); }
+            ' "$LOG_DIR/app-platform-reports" >> "$LOG_DIR/unit-app-platform.log" 2>&1 || status=$?
+          fi
+          echo "app-platform tests exit=$status"
+          exit $status
+
+      - name: 🧪 Identity PostgreSQL suites (real PostgreSQL, a skip is a failure)
+        run: |
+          mkdir -p "$LOG_DIR/identity-pg-reports"
+          rm -f "$LOG_DIR"/identity-pg-reports/*.json
+          status=0
+          {
+            echo "=== create identity fixture databases ===" &&
+            for db in identity_admin session_cutover identity_time; do
+              PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d postgres -c "CREATE DATABASE $db" || exit $?
+            done &&
+            echo "=== identity PostgreSQL suites ===" &&
+            (cd enterprise/backend-ee && \
+              APP_IDENTITY_ADMIN_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/identity_admin \
+              APP_SESSION_CUTOVER_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/session_cutover \
+              APP_IDENTITY_TIME_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/identity_time \
+              pnpm exec vitest run \
+                --config ./vitest.config.ts \
+                --passWithNoTests=false \
+                --reporter=default \
+                --reporter=json \
+                --outputFile="$LOG_DIR/identity-pg-reports/identity-postgres.json" \
+                src/features/app/app-identity-admin.postgres.spec.ts \
+                src/features/app/app-session-cutover.postgres.spec.ts \
+                src/features/app/app-identity-timestamp.postgres.spec.ts)
+          } >> "$LOG_DIR/unit-app-platform.log" 2>&1 || status=$?
+          if [ "$status" -eq 0 ]; then
+            node -e '
+              const fs = require("fs");
+              const file = process.argv[1];
+              const report = JSON.parse(fs.readFileSync(file, "utf8"));
+              const tests = (report.testResults || []).flatMap((f) => f.assertionResults || []);
+              let passed = 0, skipped = 0, failed = 0;
+              for (const test of tests) {
+                if (test.status === "pending" || test.status === "skipped" || test.status === "todo") skipped += 1;
+                else if (test.status === "passed") passed += 1;
+                else failed += 1;
+              }
+              console.log(`identity postgres passed=${passed} failed=${failed} skipped=${skipped}`);
+              if (tests.length === 0) { console.error("no identity postgres test executed"); process.exit(1); }
+              if (skipped > 0) { console.error("a skip is not proof"); process.exit(1); }
+              if (failed > 0) { console.error("failing tests reported in the JSON report"); process.exit(1); }
+            ' "$LOG_DIR/identity-pg-reports/identity-postgres.json" >> "$LOG_DIR/unit-app-platform.log" 2>&1 || status=$?
+          fi
+          echo "identity postgres exit=$status"
+          exit $status
+
+      - name: 🎫 Mint log token
+        id: logs-token
+        if: always()
+        continue-on-error: true
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ci-logs
+          permission-contents: write
+
+      - name: 📤 Ship log
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.logs-token.outputs.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          [ -f "$LOG_DIR/unit-app-platform.log" ] || echo "(no log produced — job failed before its first logged step)" > "$LOG_DIR/unit-app-platform.log"
+          gh release create "$LOG_TAG" -R "$LOGS_REPO" --title "EE Remote CI $LOG_TAG (PR #$PR_NUMBER)" --notes "ee_sha=$EE_SHA run=$RUN_URL" 2>/dev/null || true
+          if ! gh release upload "$LOG_TAG" "$LOG_DIR/unit-app-platform.log" -R "$LOGS_REPO" --clobber; then
+            echo "::warning::failed to upload unit-app-platform.log"
+            [ "$JOB_STATUS" = "success" ] || exit 1
+          fi
+          if [ "$JOB_STATUS" != "success" ]; then
+            echo failed > "$LOG_DIR/unit-app-platform.failed"
+            gh release upload "$LOG_TAG" "$LOG_DIR/unit-app-platform.failed" -R "$LOGS_REPO" --clobber || true
+          fi
+
   verdict:
-    needs: [unit]
+    needs: [unit, app-platform]
     if: always()
     runs-on: ubuntu-latest
     name: Unit verdict
@@ -194,7 +399,7 @@ jobs:
         uses: ./.github/actions/remote-ci-conclude
         with:
           suite: unit
-          results: 'matrix=${{ needs.unit.result }}'
+          results: 'matrix=${{ needs.unit.result }} app-platform=${{ needs.app-platform.result }}'
           app-token: ${{ steps.app.outputs.token }}
           logs-token: ${{ steps.logs-token.outputs.token }}
 
@@ -211,4 +416,4 @@ jobs:
             -f "client_payload[log_tag]=${LOG_TAG}" \
             -f "client_payload[remote_run_url]=${RUN_URL}" \
             -f "client_payload[check_run_id]=${{ github.event.client_payload.check_run_id }}" \
-            -f "client_payload[results]=matrix=${{ needs.unit.result }}"
+            -f "client_payload[results]=matrix=${{ needs.unit.result }} app-platform=${{ needs.app-platform.result }}"
