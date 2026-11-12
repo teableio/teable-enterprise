@@ -341,14 +341,8 @@ jobs:
               WORKERS_ARGS=(--fileParallelism --maxWorkers=2)
             fi
             if [ "${{ matrix.pkg.queryCli }}" = "true" ]; then
-              # Historical checkouts still track the former snapshot. Validate
-              # those bytes before build can regenerate them; new checkouts
-              # only carry the ignored CLI-owned build output.
-              if git ls-files --error-unmatch -- community/packages/v2/data-query/src/managedQueryTool.generated.ts >/dev/null 2>&1; then
-                pnpm --fail-if-no-match -F @teable/cli check:query-tool
-              fi &&
-              pnpm --fail-if-no-match -F @teable/cli build &&
-                pnpm --fail-if-no-match -F @teable/cli check:query-tool &&
+              pnpm --fail-if-no-match -F @teable/cli check:query-tool &&
+                pnpm --fail-if-no-match -F @teable/cli build &&
                 pnpm --fail-if-no-match -F @teable/cli typecheck &&
                 node --test packages/ai-tools-cli/test/query-commands.test.js packages/ai-tools-cli/test/managed-query-tool.test.js
             elif [ "${{ matrix.pkg.gate }}" = "v2_data_query" ]; then
