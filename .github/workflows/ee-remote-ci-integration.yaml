@@ -39,7 +39,7 @@ env:
 
 jobs:
   integration:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     name: Integration Tests - ${{ matrix.e2e.database-type }} ${{ matrix.e2e.shard }}
     timeout-minutes: 15
 
@@ -107,6 +107,27 @@ jobs:
             node_modules/.pnpm/@prisma+client@*/node_modules/.prisma
             community/packages/db-data-prisma/src/generated
           key: prisma-clients-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml', 'packages/db-main-prisma/prisma/postgres/schema.prisma', 'community/packages/db-data-prisma/prisma/schema.prisma') }}
+
+      # The BYODB copy consumers restore a custom-format dump into the postgres:15.4
+      # fixture. A newer client is not guaranteed to restore into an older server,
+      # so select matching PostgreSQL 15 tools instead of the runner default.
+      - name: 🧰 Install PostgreSQL 15 client tools for BYODB copy tests
+        if: matrix.e2e.database-type == 'postgres-community-unit' || matrix.e2e.database-type == 'postgres-community-split'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ca-certificates curl gnupg
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          sudo sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo "${VERSION_CODENAME}")-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-15
+          echo "/usr/lib/postgresql/15/bin" >> "$GITHUB_PATH"
+          /usr/lib/postgresql/15/bin/pg_dump --version | grep -Eq '^pg_dump \(PostgreSQL\) 15\.'
+          /usr/lib/postgresql/15/bin/pg_restore --version | grep -Eq '^pg_restore \(PostgreSQL\) 15\.'
+          /usr/lib/postgresql/15/bin/psql --version | grep -Eq '^psql \(PostgreSQL\) 15\.'
 
       - name: 🧪 Run Tests
         env:
