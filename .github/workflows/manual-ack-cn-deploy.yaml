@@ -123,9 +123,9 @@ on:
         required: false
       LARK_BOT_URL:
         required: false
-      # Used by the ensure-aliyun job (Aliyun push; ghcr uses GITHUB_TOKEN) —
-      # callers not using `secrets: inherit` must pass it for the self-heal
-      # copy to work.
+      # Used by the ensure-aliyun job to check which tags are already on
+      # Aliyun (the copies run on the Hong Kong relay) — callers not using
+      # `secrets: inherit` must pass it for the self-heal copy to work.
       ALI_DOCKER_PASSWORD:
         required: false
       # Used by the preheat-sandbox-agent job — same contract as above.
@@ -143,6 +143,10 @@ env:
   ACK_CN_APP_BASTION: ${{ vars.ACK_CN_APP_BASTION || 'i-bp11l83r5m3vqmbimu1o' }}
   ALIYUN_ROLE_ARN: ${{ vars.ACK_CN_APP_DEPLOY_ROLE_ARN || 'acs:ram::1145786521954482:role/teable-cn-app-github-deploy' }}
   ALIYUN_OIDC_PROVIDER_ARN: ${{ vars.ACK_CN_APP_OIDC_PROVIDER_ARN || 'acs:ram::1145786521954482:oidc-provider/github-actions' }}
+  # ensure-aliyun copies through the Hong Kong relay (terraform/deployments/aliyun-acr-relay-hk
+  # in teable-infra) with its own role; see .github/scripts/acr-relay-copy.sh.
+  ACR_RELAY_INSTANCE_ID: ${{ vars.ACR_RELAY_INSTANCE_ID || 'i-j6cgf1dhj2eq8ue1rogk' }}
+  ACR_RELAY_ROLE_ARN: ${{ vars.ACR_RELAY_ROLE_ARN || 'acs:ram::1145786521954482:role/acr-relay-hk-github' }}
 
 # GitHub's "re-run failed jobs" reuses successful upstream jobs from the
 # previous attempt. Keep the initial fast-fail job, but every job that can
@@ -177,16 +181,19 @@ jobs:
     needs: validate-publish-lock
     runs-on: ubuntu-latest
     # Shared with manual-ecs-deploy's sync-aliyun for the same release tag:
-    # both push the same teable-cloud layers over the slow cross-border link,
-    # and racing each other splits the bandwidth until both time out.
+    # both push the same teable-cloud layers (through the same relay).
     # Serialized, whichever runs second finds the blobs already on Aliyun.
     concurrency:
       group: aliyun-upload-${{ inputs.image_tag }}
       cancel-in-progress: false
     timeout-minutes: 120
+    # packages: write stamps release.<id> on ghcr; id-token drives the relay.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     steps:
-      - name: Checkout lock validation script
-        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+      - name: Checkout scripts
         uses: actions/checkout@v4
 
       - name: Revalidate teable.cn publishing lock
@@ -197,6 +204,11 @@ jobs:
           PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
           TARGET: cn
         run: bash .github/scripts/validate-teable-publish-lock.sh
+
+      - name: Get Aliyun STS credentials for the relay
+        env:
+          ALIYUN_ROLE_ARN: ${{ env.ACR_RELAY_ROLE_ARN }}
+        run: bash .github/scripts/aliyun-oidc-login.sh
 
       - name: Install skopeo
         run: |
@@ -220,6 +232,7 @@ jobs:
       - name: Stamp and copy any missing images
         env:
           SRC_CREDS: ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DST_CREDS: ${{ vars.ALI_DOCKER_USERNAME }}:${{ secrets.ALI_DOCKER_PASSWORD }}
           SRC_REGISTRY: ghcr.io/teableio
           DST_REGISTRY: registry.cn-shenzhen.aliyuncs.com/teable
@@ -228,11 +241,7 @@ jobs:
           set -euo pipefail
           BETA_TAG="beta-${TAG#release.}"
 
-          # A killed upload discards the partial blob and the next attempt
-          # restarts it from zero, so the per-attempt timeout must outlast
-          # the biggest layer (teable-cloud's ~375MB node_modules) at the
-          # current ghcr -> Aliyun Shenzhen throughput. Blobs that did finish
-          # stay on Aliyun, so retries only make progress past that point.
+          # ghcr -> ghcr stamping stays on the runner (registry-internal, fast).
           retry_copy() {
             local src="$1" dst="$2" dst_creds="$3" arch_flags="$4"
             for attempt in 1 2 3; do
@@ -272,15 +281,17 @@ jobs:
             # Same arch rule as sync-aliyun: the app images are amd64-only on
             # Aliyun (patch-cdn re-pushes the tag amd64-only anyway), so
             # shipping the arm64 half would double the upload for nothing.
-            arch_flags="--override-arch amd64 --override-os linux"
-            [ "$image" = "teable-sandbox-agent" ] && arch_flags="--all"
+            arch=amd64
+            [ "$image" = "teable-sandbox-agent" ] && arch=all
 
-            echo "⏫ ${image}:${TAG} missing on Aliyun, copying from ghcr"
-            retry_copy \
+            # Over the border a single connection drops to ~200 KB/s, so the
+            # copy runs on the Hong Kong relay (which retries it itself).
+            echo "⏫ ${image}:${TAG} missing on Aliyun, copying from ghcr via the relay"
+            bash .github/scripts/acr-relay-copy.sh \
               "${SRC_REGISTRY}/${image}:${TAG}" \
               "${DST_REGISTRY}/${image}:${TAG}" \
-              "$DST_CREDS" \
-              "$arch_flags"
+              "$arch" \
+              "$GHCR_TOKEN"
           done
 
   # Preheat CN sandbox-agent nodes as soon as the agent tag lands on Aliyun.
