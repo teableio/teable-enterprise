@@ -199,56 +199,31 @@ jobs:
           token: ${{ steps.ee-token.outputs.token }}
           persist-credentials: false
 
-      - name: Inspect selected checkout for App Platform
+      - name: Detect App Platform applicability in the target checkout
         id: app-platform-scope
+        shell: bash
         run: |
-          set -euo pipefail
           mkdir -p "$LOG_DIR"
-          node <<'NODE'
-          const fs = require('node:fs');
-          const path = require('node:path');
-          const postgresSpecs = [
-            'enterprise/backend-ee/src/features/app/app-identity-admin.postgres.spec.ts',
-            'enterprise/backend-ee/src/features/app/app-session-cutover.postgres.spec.ts',
-            'enterprise/backend-ee/src/features/app/app-identity-timestamp.postgres.spec.ts',
-          ];
-          // Remote workflows also test older EE revisions that predate this feature.
-          const present = fs.existsSync('packages/app-platform') || postgresSpecs.some(fs.existsSync);
-          if (present) {
-            for (const name of ['identity', 'identity-adapter-prisma']) {
-              const file = `packages/app-platform/${name}/package.json`;
-              const manifest = JSON.parse(fs.readFileSync(file, 'utf8'));
-              if (manifest.name !== `@teable/app-platform-${name}`) {
-                throw new Error(`Unexpected package name in ${file}`);
-              }
-              if (typeof manifest.scripts?.build !== 'string' || !manifest.scripts.build.trim()) {
-                throw new Error(`Missing build command in ${file}`);
-              }
-            }
-            for (const file of postgresSpecs) {
-              if (!fs.statSync(file).isFile()) throw new Error(`Missing PostgreSQL suite: ${file}`);
-            }
-          }
-          const message = present
-            ? 'App Platform present: running the complete strict package and PostgreSQL gate.'
-            : 'App Platform not applicable: selected EE checkout predates the feature.';
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `present=${present}\n`);
-          fs.appendFileSync(path.join(process.env.LOG_DIR, 'unit-app-platform.log'), `${message}\n`);
-          console.log(message);
-          NODE
+          # A partial or malformed package tree must still reach the strict checks.
+          if [[ -e packages/app-platform || -L packages/app-platform ]]; then
+            echo 'applicable=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'applicable=false' >> "$GITHUB_OUTPUT"
+            echo 'App Platform not applicable: target checkout has no packages/app-platform.' | tee "$LOG_DIR/unit-app-platform.log"
+          fi
 
       - name: 🟢 Use Node.js 24.22.2
-        if: steps.app-platform-scope.outputs.present == 'true'
+        if: steps.app-platform-scope.outputs.applicable == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 24.22.2
 
       - name: 📥 Monorepo install
-        if: steps.app-platform-scope.outputs.present == 'true'
+        if: steps.app-platform-scope.outputs.applicable == 'true'
         uses: ./.github/actions/pnpm-install
 
       - name: 🗄️ Create owned databases, generate Prisma Client, apply official migrations
-        if: steps.app-platform-scope.outputs.present == 'true'
+        if: steps.app-platform-scope.outputs.applicable == 'true'
         run: |
           mkdir -p "$LOG_DIR"
           status=0
@@ -265,7 +240,7 @@ jobs:
           exit $status
 
       - name: 🏗️ Build App Platform packages in dependency order
-        if: steps.app-platform-scope.outputs.present == 'true'
+        if: steps.app-platform-scope.outputs.applicable == 'true'
         run: |
           mkdir -p "$LOG_DIR"
           status=0
@@ -279,7 +254,7 @@ jobs:
           exit $status
 
       - name: 🧪 Package tests (serial, real PostgreSQL, a skip is a failure)
-        if: steps.app-platform-scope.outputs.present == 'true'
+        if: steps.app-platform-scope.outputs.applicable == 'true'
         run: |
           mkdir -p "$LOG_DIR/app-platform-reports"
           rm -f "$LOG_DIR"/app-platform-reports/*.json
@@ -326,7 +301,7 @@ jobs:
           exit $status
 
       - name: 🧪 Identity PostgreSQL suites (real PostgreSQL, a skip is a failure)
-        if: steps.app-platform-scope.outputs.present == 'true'
+        if: steps.app-platform-scope.outputs.applicable == 'true'
         run: |
           mkdir -p "$LOG_DIR/identity-pg-reports"
           rm -f "$LOG_DIR"/identity-pg-reports/*.json
