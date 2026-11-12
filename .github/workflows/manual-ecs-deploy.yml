@@ -712,15 +712,24 @@ jobs:
       publish_target: ai
     secrets: inherit
 
-  # Preheat CN sandbox-agent nodes as soon as the agent tag lands on Aliyun.
+  # Preheat teable.ai sandbox-agent nodes once the release is live on EKS.
+  # teable.ai only: teable.cn preheats from its own deploy workflow
+  # (manual-ack-cn-deploy), so a CN deploy that fails or is held back keeps
+  # preheating the version CN actually runs. This job used to preheat both
+  # clouds after sync-aliyun; on 2026-11-11 the CN deploy was cancelled while
+  # this job still moved the CN preheat to the new release (new CN nodes then
+  # pulled an agent image nothing used), and the teable.ai preheat itself
+  # landed two hours after the EKS rollout because the Aliyun upload was
+  # queued behind the CN one.
   # Best-effort: not part of the notify gating — a preheat miss only costs
   # first-spawn latency.
   preheat-sandbox-agent:
-    needs: sync-aliyun
-    if: needs.sync-aliyun.result == 'success'
+    needs: deploy-eks
+    if: needs.deploy-eks.result == 'success' && needs.deploy-eks.outputs.skipped != 'true'
     uses: ./.github/workflows/preheat-sandbox-agent-cloud.yaml
     with:
       image_tag: ${{ inputs.image_tag }}
+      targets: ai
       best_effort: true
     secrets: inherit
 
