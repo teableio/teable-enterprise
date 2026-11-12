@@ -283,8 +283,9 @@ jobs:
               "$arch_flags"
           done
 
-  # Preheat CN sandbox-agent nodes as soon as the agent tag lands on Aliyun,
-  # so a CN-first launch doesn't wait for the AI launch's both-cloud preheat.
+  # Preheat CN sandbox-agent nodes as soon as the agent tag lands on Aliyun.
+  # This is the only place teable.cn gets preheated: the AI launch preheats
+  # teable.ai only, so the CN preheat never moves ahead of a CN deploy.
   # Best-effort: not part of the notify gating — a preheat miss only costs
   # first-spawn latency.
   preheat-sandbox-agent:
