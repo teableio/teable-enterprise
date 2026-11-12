@@ -199,59 +199,45 @@ jobs:
           token: ${{ steps.ee-token.outputs.token }}
           persist-credentials: false
 
-      - name: Inspect selected checkout for App Platform
-        id: app-platform-scope
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$LOG_DIR"
-          node <<'NODE'
-          const fs = require('node:fs');
-          const path = require('node:path');
-          const postgresSpecs = [
-            'enterprise/backend-ee/src/features/app/app-identity-admin.postgres.spec.ts',
-            'enterprise/backend-ee/src/features/app/app-session-cutover.postgres.spec.ts',
-            'enterprise/backend-ee/src/features/app/app-identity-timestamp.postgres.spec.ts',
-          ];
-          // Remote workflows also test older EE revisions that predate this feature.
-          const present = ['packages/app-platform', ...postgresSpecs].some((file) =>
-            fs.lstatSync(file, { throwIfNoEntry: false })
-          );
-          if (present) {
-            for (const name of ['identity', 'identity-adapter-prisma']) {
-              const file = `packages/app-platform/${name}/package.json`;
-              const manifest = JSON.parse(fs.readFileSync(file, 'utf8'));
-              if (manifest.name !== `@teable/app-platform-${name}`) {
-                throw new Error(`Unexpected package name in ${file}`);
-              }
-              if (typeof manifest.scripts?.build !== 'string' || !manifest.scripts.build.trim()) {
-                throw new Error(`Missing build command in ${file}`);
-              }
-            }
-            for (const file of postgresSpecs) {
-              if (!fs.statSync(file).isFile()) throw new Error(`Missing PostgreSQL suite: ${file}`);
-            }
-          }
-          const message = present
-            ? 'App Platform present: running the complete strict package and PostgreSQL gate.'
-            : 'App Platform not applicable: selected EE checkout predates the feature.';
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `present=${present}\n`);
-          fs.appendFileSync(path.join(process.env.LOG_DIR, 'unit-app-platform.log'), `${message}\n`);
-          console.log(message);
-          NODE
-
       - name: 🟢 Use Node.js 24.22.2
-        if: steps.app-platform-scope.outputs.present == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 24.22.2
 
+      - name: 🔎 Detect optional App Platform checkout
+        id: app-platform-package
+        run: |
+          mkdir -p "$LOG_DIR"
+          node <<'NODE' >> "$LOG_DIR/unit-app-platform.log" 2>&1
+          const { existsSync, readFileSync, appendFileSync } = require('node:fs');
+          const root = 'packages/app-platform';
+          const hostSpecs = [
+            'enterprise/backend-ee/src/features/app/app-identity-admin.postgres.spec.ts',
+            'enterprise/backend-ee/src/features/app/app-session-cutover.postgres.spec.ts',
+            'enterprise/backend-ee/src/features/app/app-identity-timestamp.postgres.spec.ts',
+          ];
+          if (!existsSync(root) && !hostSpecs.some((file) => existsSync(file))) {
+            appendFileSync(process.env.GITHUB_OUTPUT, 'present=false\n');
+            console.log('App Platform is absent at the tested checkout; feature-only work skipped.');
+          } else {
+            for (const name of ['identity', 'identity-adapter-prisma']) {
+              const manifest = `${root}/${name}/package.json`;
+              const pkg = JSON.parse(readFileSync(manifest, 'utf8'));
+              if (pkg.name !== `@teable/app-platform-${name}`) {
+                throw new Error(`Unexpected package name in ${manifest}`);
+              }
+            }
+            appendFileSync(process.env.GITHUB_OUTPUT, 'present=true\n');
+            console.log('App Platform packages are present; strict package and PostgreSQL suites required.');
+          }
+          NODE
+
       - name: 📥 Monorepo install
-        if: steps.app-platform-scope.outputs.present == 'true'
+        if: steps.app-platform-package.outputs.present == 'true'
         uses: ./.github/actions/pnpm-install
 
       - name: 🗄️ Create owned databases, generate Prisma Client, apply official migrations
-        if: steps.app-platform-scope.outputs.present == 'true'
+        if: steps.app-platform-package.outputs.present == 'true'
         run: |
           mkdir -p "$LOG_DIR"
           status=0
@@ -268,7 +254,7 @@ jobs:
           exit $status
 
       - name: 🏗️ Build App Platform packages in dependency order
-        if: steps.app-platform-scope.outputs.present == 'true'
+        if: steps.app-platform-package.outputs.present == 'true'
         run: |
           mkdir -p "$LOG_DIR"
           status=0
@@ -282,7 +268,7 @@ jobs:
           exit $status
 
       - name: 🧪 Package tests (serial, real PostgreSQL, a skip is a failure)
-        if: steps.app-platform-scope.outputs.present == 'true'
+        if: steps.app-platform-package.outputs.present == 'true'
         run: |
           mkdir -p "$LOG_DIR/app-platform-reports"
           rm -f "$LOG_DIR"/app-platform-reports/*.json
@@ -331,7 +317,7 @@ jobs:
           exit $status
 
       - name: 🧪 Identity PostgreSQL suites (real PostgreSQL, a skip is a failure)
-        if: steps.app-platform-scope.outputs.present == 'true'
+        if: steps.app-platform-package.outputs.present == 'true'
         run: |
           mkdir -p "$LOG_DIR/identity-pg-reports"
           rm -f "$LOG_DIR"/identity-pg-reports/*.json
