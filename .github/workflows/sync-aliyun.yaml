@@ -37,8 +37,6 @@ on:
     secrets:
       ALI_DOCKER_PASSWORD:
         required: true
-      DOCKER_HUB_AK:
-        required: false
       TEABLE_API_TOKEN:
         required: false
 
@@ -46,21 +44,26 @@ env:
   SRC_REGISTRY: ghcr.io/teableio
   EE_SRC_REGISTRY: docker.io/teableio
   DST_REGISTRY: registry.cn-shenzhen.aliyuncs.com/teable
-  MAX_RETRIES: 3
-  RETRY_DELAY: 15
-  # A killed upload discards the partial blob and the next attempt restarts
-  # it from zero, so this must outlast the biggest layer (teable-cloud's
-  # ~375MB node_modules) at the current ghcr -> Aliyun Shenzhen throughput.
-  COPY_TIMEOUT: 40m
+  # The copies run on the Hong Kong relay (see .github/scripts/acr-relay-copy.sh).
+  # Defaults match terraform/deployments/aliyun-acr-relay-hk in teable-infra;
+  # repository variables override them.
+  ACR_RELAY_INSTANCE_ID: ${{ vars.ACR_RELAY_INSTANCE_ID || 'i-j6cgf1dhj2eq8ue1rogk' }}
+  ALIYUN_ROLE_ARN: ${{ vars.ACR_RELAY_ROLE_ARN || 'acs:ram::1145786521954482:role/acr-relay-hk-github' }}
+  ALIYUN_OIDC_PROVIDER_ARN: ${{ vars.ACR_RELAY_OIDC_PROVIDER_ARN || 'acs:ram::1145786521954482:oidc-provider/github-actions' }}
 
 jobs:
   sync:
     name: Sync ${{ inputs.edition }} images
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    # id-token: the relay is driven with a 1h OIDC credential. packages: read
+    # lets the job's GITHUB_TOKEN pull the private ghcr images (on the relay).
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
     steps:
-      - name: Checkout lock validation script
-        if: inputs.release_record_id != '' && inputs.publish_lock_id != '' && inputs.publish_target != ''
+      - name: Checkout scripts
         uses: actions/checkout@v4
 
       - name: Revalidate publishing lock
@@ -72,6 +75,10 @@ jobs:
           TARGET: ${{ inputs.publish_target }}
         run: bash .github/scripts/validate-teable-publish-lock.sh
 
+      - name: Get Aliyun STS credentials for the relay
+        run: bash .github/scripts/aliyun-oidc-login.sh
+
+      # Only for the "already on Aliyun" checks; the copies run on the relay.
       - name: Install skopeo
         run: |
           set -euo pipefail
@@ -93,46 +100,30 @@ jobs:
 
       - name: Sync images to Aliyun
         env:
-          SRC_CREDS: ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}
-          DOCKER_HUB_AK: ${{ secrets.DOCKER_HUB_AK }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DST_CREDS: ${{ vars.ALI_DOCKER_USERNAME }}:${{ secrets.ALI_DOCKER_PASSWORD }}
         run: |
           set +e
 
+          # retry_copy <src> <dst> <amd64|all> [fallback_src]: one relay
+          # invocation per source; the relay retries the copy itself. ghcr
+          # sources get the job token (private images); the Docker Hub
+          # fallback is public and pulled anonymously.
           retry_copy() {
-            local src="$1" dst="$2" all_flag="$3"
-            local fallback_src="${4:-}" fallback_creds="${5:-}"
-            local primary_attempts="$MAX_RETRIES"
-            [ -n "$fallback_src" ] && primary_attempts=1
-
-            for attempt in $(seq 1 "$primary_attempts"); do
-              echo "[$attempt/$primary_attempts] Copying ${src} -> ${dst}"
-              if timeout --signal=TERM "$COPY_TIMEOUT" skopeo copy ${all_flag} \
-                  "docker://${src}" "docker://${dst}" \
-                  --src-creds="${SRC_CREDS}" \
-                  --dest-creds="${DST_CREDS}"; then
-                echo "✅ Success: ${src}"
+            local src="$1" dst="$2" arch="$3" fallback_src="${4:-}"
+            local token=""
+            [[ "$src" == ghcr.io/* ]] && token="$GHCR_TOKEN"
+            if bash .github/scripts/acr-relay-copy.sh "$src" "$dst" "$arch" "$token"; then
+              echo "✅ Success: ${src}"
+              return 0
+            fi
+            if [ -n "$fallback_src" ]; then
+              echo "⚠️ ${src} failed, falling back to ${fallback_src}"
+              if bash .github/scripts/acr-relay-copy.sh "$fallback_src" "$dst" "$arch"; then
+                echo "✅ Success via fallback: ${fallback_src}"
                 return 0
               fi
-              echo "⚠️ Attempt ${attempt} failed. Retrying in ${RETRY_DELAY}s..."
-              sleep $RETRY_DELAY
-            done
-
-            if [ -n "$fallback_src" ]; then
-              for attempt in $(seq 1 "$MAX_RETRIES"); do
-                echo "[$attempt/$MAX_RETRIES] Falling back to ${fallback_src} -> ${dst}"
-                if timeout --signal=TERM "$COPY_TIMEOUT" skopeo copy ${all_flag} \
-                    "docker://${fallback_src}" "docker://${dst}" \
-                    --src-creds="${fallback_creds}" \
-                    --dest-creds="${DST_CREDS}"; then
-                  echo "✅ Success via fallback: ${fallback_src}"
-                  return 0
-                fi
-                echo "⚠️ Fallback attempt ${attempt} failed. Retrying in ${RETRY_DELAY}s..."
-                sleep $RETRY_DELAY
-              done
             fi
-
             echo "❌ FAILED to copy ${src} -> ${dst}"
             return 1
           }
@@ -162,7 +153,7 @@ jobs:
                 retry_copy \
                   "${SRC_REGISTRY}/${image}:${tag}" \
                   "${DST_REGISTRY}/${image}:${tag}" \
-                  "--override-arch amd64 --override-os linux" \
+                  amd64 \
                   || FAILED=1
               done
             done
@@ -179,15 +170,13 @@ jobs:
               retry_copy \
                 "${SRC_REGISTRY}/teable-sandbox-agent:${tag}" \
                 "${DST_REGISTRY}/teable-sandbox-agent:${tag}" \
-                "--all" \
+                all \
                 || FAILED=1
             done
           elif [ "${{ inputs.edition }}" = "ee" ]; then
             # promote-latest-ee has already copied these exact multi-arch tags
             # to Docker Hub. Keep GHCR as the primary source for standalone
-            # syncs, then use Docker Hub after one bounded GHCR attempt.
-            FALLBACK_CREDS=""
-            [ -n "$DOCKER_HUB_AK" ] && FALLBACK_CREDS="teableio:${DOCKER_HUB_AK}"
+            # syncs, then use Docker Hub (public) if the GHCR copy fails.
             IMAGES=("teable" "teable-sandbox")
             SUFFIXES=("" "-ee")
 
@@ -195,14 +184,11 @@ jobs:
               for suffix in "${SUFFIXES[@]}"; do
                 for tag in "${TAGS[@]}"; do
                   [ -n "$tag" ] || continue
-                  fallback_src=""
-                  [ -n "$FALLBACK_CREDS" ] && fallback_src="${EE_SRC_REGISTRY}/${image}${suffix}:${tag}"
                   retry_copy \
                     "${SRC_REGISTRY}/${image}${suffix}:${tag}" \
                     "${DST_REGISTRY}/${image}${suffix}:${tag}" \
-                    "--all" \
-                    "$fallback_src" \
-                    "$FALLBACK_CREDS" \
+                    all \
+                    "${EE_SRC_REGISTRY}/${image}${suffix}:${tag}" \
                     || FAILED=1
                 done
               done
@@ -216,14 +202,11 @@ jobs:
             for tag in "${TAGS[@]}"; do
               [ -n "$tag" ] || continue
               [ "$tag" = "latest" ] && continue
-              fallback_src=""
-              [ -n "$FALLBACK_CREDS" ] && fallback_src="${EE_SRC_REGISTRY}/teable-sandbox-agent:${tag}"
               retry_copy \
                 "${SRC_REGISTRY}/teable-sandbox-agent:${tag}" \
                 "${DST_REGISTRY}/teable-sandbox-agent:${tag}" \
-                "--all" \
-                "$fallback_src" \
-                "$FALLBACK_CREDS" \
+                all \
+                "${EE_SRC_REGISTRY}/teable-sandbox-agent:${tag}" \
                 || FAILED=1
             done
           fi

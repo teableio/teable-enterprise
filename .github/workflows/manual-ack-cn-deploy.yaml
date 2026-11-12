@@ -123,9 +123,9 @@ on:
         required: false
       LARK_BOT_URL:
         required: false
-      # Used by the ensure-aliyun job (Aliyun push; ghcr uses GITHUB_TOKEN) —
-      # callers not using `secrets: inherit` must pass it for the self-heal
-      # copy to work.
+      # Used by stamp-ghcr and ensure-aliyun to check which tags are already
+      # on Aliyun (the copies run on the Hong Kong relay) — callers not using
+      # `secrets: inherit` must pass it for the self-heal copy to work.
       ALI_DOCKER_PASSWORD:
         required: false
       # Used by the preheat-sandbox-agent job — same contract as above.
@@ -143,6 +143,10 @@ env:
   ACK_CN_APP_BASTION: ${{ vars.ACK_CN_APP_BASTION || 'i-bp11l83r5m3vqmbimu1o' }}
   ALIYUN_ROLE_ARN: ${{ vars.ACK_CN_APP_DEPLOY_ROLE_ARN || 'acs:ram::1145786521954482:role/teable-cn-app-github-deploy' }}
   ALIYUN_OIDC_PROVIDER_ARN: ${{ vars.ACK_CN_APP_OIDC_PROVIDER_ARN || 'acs:ram::1145786521954482:oidc-provider/github-actions' }}
+  # ensure-aliyun copies through the Hong Kong relay (terraform/deployments/aliyun-acr-relay-hk
+  # in teable-infra) with its own role; see .github/scripts/acr-relay-copy.sh.
+  ACR_RELAY_INSTANCE_ID: ${{ vars.ACR_RELAY_INSTANCE_ID || 'i-j6cgf1dhj2eq8ue1rogk' }}
+  ACR_RELAY_ROLE_ARN: ${{ vars.ACR_RELAY_ROLE_ARN || 'acs:ram::1145786521954482:role/acr-relay-hk-github' }}
 
 # GitHub's "re-run failed jobs" reuses successful upstream jobs from the
 # previous attempt. Keep the initial fast-fail job, but every job that can
@@ -167,23 +171,27 @@ jobs:
 
   # teable.cn deploys official release.<id> tags from Aliyun, but Aliyun
   # only receives images at release time (manual-ecs-deploy's sync-aliyun).
-  # This job makes the CN launch self-sufficient: if this build was never
-  # released yet, its release.<id> is first stamped on ghcr from the
-  # beta-<id> staging twin, then any tag missing on Aliyun is copied over —
-  # so the CN and AI launches can run in either order. Idempotent:
+  # stamp-ghcr + ensure-aliyun make the CN launch self-sufficient: if this
+  # build was never released yet, its release.<id> is first stamped on ghcr
+  # from the beta-<id> staging twin, then any tag missing on Aliyun is copied
+  # over — so the CN and AI launches can run in either order. Idempotent:
   # near-instant when the tags already exist.
-  ensure-aliyun:
-    name: Ensure release images on Aliyun
+  #
+  # Two jobs because one job has one GITHUB_TOKEN: stamping needs
+  # packages: write, while ensure-aliyun hands its token to the Hong Kong
+  # relay and so must stay read-only.
+  #
+  # The agent is included because CN sandboxes pull
+  # <aliyun prefix>:<the app's release id> at spawn time; it always carries
+  # the release tag already (tagged at build time).
+  stamp-ghcr:
+    name: Stamp release tags on ghcr
     needs: validate-publish-lock
     runs-on: ubuntu-latest
-    # Shared with manual-ecs-deploy's sync-aliyun for the same release tag:
-    # both push the same teable-cloud layers over the slow cross-border link,
-    # and racing each other splits the bandwidth until both time out.
-    # Serialized, whichever runs second finds the blobs already on Aliyun.
-    concurrency:
-      group: aliyun-upload-${{ inputs.image_tag }}
-      cancel-in-progress: false
-    timeout-minutes: 120
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout lock validation script
         if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
@@ -217,7 +225,7 @@ jobs:
           echo "::error::skopeo installation failed after 3 attempts"
           exit 1
 
-      - name: Stamp and copy any missing images
+      - name: Stamp release tags missing on ghcr
         env:
           SRC_CREDS: ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}
           DST_CREDS: ${{ vars.ALI_DOCKER_USERNAME }}:${{ secrets.ALI_DOCKER_PASSWORD }}
@@ -228,17 +236,12 @@ jobs:
           set -euo pipefail
           BETA_TAG="beta-${TAG#release.}"
 
-          # A killed upload discards the partial blob and the next attempt
-          # restarts it from zero, so the per-attempt timeout must outlast
-          # the biggest layer (teable-cloud's ~375MB node_modules) at the
-          # current ghcr -> Aliyun Shenzhen throughput. Blobs that did finish
-          # stay on Aliyun, so retries only make progress past that point.
           retry_copy() {
-            local src="$1" dst="$2" dst_creds="$3" arch_flags="$4"
+            local src="$1" dst="$2"
             for attempt in 1 2 3; do
-              if timeout --signal=TERM 40m skopeo copy ${arch_flags} \
+              if timeout --signal=TERM 40m skopeo copy --all \
                   --src-creds="$SRC_CREDS" \
-                  --dest-creds="$dst_creds" \
+                  --dest-creds="$SRC_CREDS" \
                   "docker://${src}" "docker://${dst}"; then
                 return 0
               fi
@@ -249,9 +252,87 @@ jobs:
             return 1
           }
 
-          # The agent is included because CN sandboxes pull
-          # <aliyun prefix>:<the app's release id> at spawn time; it always
-          # carries the release tag already (tagged at build time).
+          for image in teable-cloud teable-sandbox-cloud teable-sandbox-agent; do
+            # A tag already on Aliyun needs neither stamping nor copying.
+            if timeout 60s skopeo inspect --raw --creds="$DST_CREDS" \
+                "docker://${DST_REGISTRY}/${image}:${TAG}" >/dev/null 2>&1; then
+              echo "✅ ${image}:${TAG} already on Aliyun"
+              continue
+            fi
+            if timeout 60s skopeo inspect --raw --creds="$SRC_CREDS" \
+                "docker://${SRC_REGISTRY}/${image}:${TAG}" >/dev/null 2>&1; then
+              echo "✅ ${image}:${TAG} already stamped on ghcr"
+              continue
+            fi
+            echo "⏫ ${image}:${TAG} not stamped yet, stamping from ${BETA_TAG} on ghcr"
+            retry_copy \
+              "${SRC_REGISTRY}/${image}:${BETA_TAG}" \
+              "${SRC_REGISTRY}/${image}:${TAG}"
+          done
+
+  ensure-aliyun:
+    name: Ensure release images on Aliyun
+    needs: stamp-ghcr
+    runs-on: ubuntu-latest
+    # Shared with manual-ecs-deploy's sync-aliyun for the same release tag:
+    # both push the same teable-cloud layers (through the same relay).
+    # Serialized, whichever runs second finds the blobs already on Aliyun.
+    concurrency:
+      group: aliyun-upload-${{ inputs.image_tag }}
+      cancel-in-progress: false
+    timeout-minutes: 120
+    # Read-only token: it goes to the relay for the private ghcr pulls.
+    # id-token drives the relay.
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    steps:
+      - name: Checkout scripts
+        uses: actions/checkout@v4
+
+      - name: Revalidate teable.cn publishing lock
+        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+        env:
+          TEABLE_API_TOKEN: ${{ secrets.TEABLE_API_TOKEN }}
+          RELEASE_RECORD_ID: ${{ inputs.release_record_id }}
+          PUBLISH_LOCK_ID: ${{ inputs.publish_lock_id }}
+          TARGET: cn
+        run: bash .github/scripts/validate-teable-publish-lock.sh
+
+      - name: Get Aliyun STS credentials for the relay
+        env:
+          ALIYUN_ROLE_ARN: ${{ env.ACR_RELAY_ROLE_ARN }}
+        run: bash .github/scripts/aliyun-oidc-login.sh
+
+      - name: Install skopeo
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if sudo timeout 180s apt-get update \
+                -o Acquire::Retries=3 \
+                -o Acquire::http::Timeout=30 \
+                -o Acquire::https::Timeout=30 && \
+               sudo env DEBIAN_FRONTEND=noninteractive \
+                timeout 180s apt-get install -y skopeo; then
+              exit 0
+            fi
+            echo "::warning::skopeo install attempt ${attempt} failed"
+            sudo dpkg --configure -a || true
+            sleep 10
+          done
+          echo "::error::skopeo installation failed after 3 attempts"
+          exit 1
+
+      - name: Copy missing images through the relay
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DST_CREDS: ${{ vars.ALI_DOCKER_USERNAME }}:${{ secrets.ALI_DOCKER_PASSWORD }}
+          SRC_REGISTRY: ghcr.io/teableio
+          DST_REGISTRY: registry.cn-shenzhen.aliyuncs.com/teable
+          TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
           for image in teable-cloud teable-sandbox-cloud teable-sandbox-agent; do
             if timeout 60s skopeo inspect --raw --creds="$DST_CREDS" \
                 "docker://${DST_REGISTRY}/${image}:${TAG}" >/dev/null 2>&1; then
@@ -259,28 +340,20 @@ jobs:
               continue
             fi
 
-            if ! timeout 60s skopeo inspect --raw --creds="$SRC_CREDS" \
-                "docker://${SRC_REGISTRY}/${image}:${TAG}" >/dev/null 2>&1; then
-              echo "⏫ ${image}:${TAG} not stamped yet, stamping from ${BETA_TAG} on ghcr"
-              retry_copy \
-                "${SRC_REGISTRY}/${image}:${BETA_TAG}" \
-                "${SRC_REGISTRY}/${image}:${TAG}" \
-                "$SRC_CREDS" \
-                "--all"
-            fi
-
             # Same arch rule as sync-aliyun: the app images are amd64-only on
             # Aliyun (patch-cdn re-pushes the tag amd64-only anyway), so
             # shipping the arm64 half would double the upload for nothing.
-            arch_flags="--override-arch amd64 --override-os linux"
-            [ "$image" = "teable-sandbox-agent" ] && arch_flags="--all"
+            arch=amd64
+            [ "$image" = "teable-sandbox-agent" ] && arch=all
 
-            echo "⏫ ${image}:${TAG} missing on Aliyun, copying from ghcr"
-            retry_copy \
+            # Over the border a single connection drops to ~200 KB/s, so the
+            # copy runs on the Hong Kong relay (which retries it itself).
+            echo "⏫ ${image}:${TAG} missing on Aliyun, copying from ghcr via the relay"
+            bash .github/scripts/acr-relay-copy.sh \
               "${SRC_REGISTRY}/${image}:${TAG}" \
               "${DST_REGISTRY}/${image}:${TAG}" \
-              "$DST_CREDS" \
-              "$arch_flags"
+              "$arch" \
+              "$GHCR_TOKEN"
           done
 
   # Preheat CN sandbox-agent nodes as soon as the agent tag lands on Aliyun.
@@ -617,12 +690,14 @@ jobs:
 
   notify-failure:
     name: Report teable.cn deploy failure
-    needs: [validate-publish-lock, ensure-aliyun, patch-cdn, deploy, notify, finalize-release]
+    needs: [validate-publish-lock, stamp-ghcr, ensure-aliyun, patch-cdn, deploy, notify, finalize-release]
     if: >-
       always() &&
       inputs.record_launch != false &&
       (needs.validate-publish-lock.result == 'failure' ||
        needs.validate-publish-lock.result == 'cancelled' ||
+       needs.stamp-ghcr.result == 'failure' ||
+       needs.stamp-ghcr.result == 'cancelled' ||
        needs.ensure-aliyun.result == 'failure' ||
        needs.ensure-aliyun.result == 'cancelled' ||
        needs.patch-cdn.result == 'failure' ||
@@ -665,7 +740,9 @@ jobs:
         env:
           FEISHU_WEBHOOK_URL: ${{ secrets.LARK_BOT_URL }}
           PREFLIGHT_RESULT: ${{ needs.validate-publish-lock.result }}
-          ENSURE_RESULT: ${{ needs.ensure-aliyun.result }}
+          # Stamping on ghcr is part of preparing the Aliyun images; when it
+          # failed, ensure-aliyun only shows "skipped".
+          ENSURE_RESULT: ${{ (needs.stamp-ghcr.result == 'failure' || needs.stamp-ghcr.result == 'cancelled') && format('stamp {0}', needs.stamp-ghcr.result) || needs.ensure-aliyun.result }}
           PATCH_RESULT: ${{ needs.patch-cdn.result }}
           DEPLOY_RESULT: ${{ needs.deploy.result }}
           LAUNCH_RESULT: ${{ needs.notify.result }}
