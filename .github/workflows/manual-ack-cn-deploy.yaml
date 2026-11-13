@@ -796,7 +796,7 @@ jobs:
           for pod in $pods; do
             prefix=""
             # exec goes through the bastion tunnel, which drops the odd connection.
-            for attempt in 1 2 3; do
+            for _ in 1 2 3; do
               if prefix=$(k exec "$pod" -c teable-cloud -- printenv NEXT_BUILD_ENV_ASSET_PREFIX); then break; fi
               prefix=""
               sleep 3
