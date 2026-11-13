@@ -11,13 +11,22 @@ permissions:
 jobs:
   sign:
     runs-on: macos-26
-    timeout-minutes: 25
+    timeout-minutes: 60
     steps:
+      - name: Mint checkout token
+        id: ee-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ee
+          permission-contents: read
       - uses: actions/checkout@v4
         with:
           repository: teableio/teable-ee
           ref: ${{ inputs.source_sha }}
-          token: ${{ secrets.PACKAGES_KEY }}
+          token: ${{ steps.ee-token.outputs.token }}
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
@@ -31,10 +40,20 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
           bash .github/wda-signing/build.sh > "$RUNNER_TEMP/wda-build.log" 2>&1
+      - name: Mint logs token
+        id: logs-token
+        if: always()
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RCI_APP_ID }}
+          private-key: ${{ secrets.RCI_APP_PRIVATE_KEY }}
+          owner: teableio
+          repositories: teable-ci-logs
+          permission-contents: write
       - name: Store result in private artifact repository
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.PACKAGES_KEY }}
+          GH_TOKEN: ${{ steps.logs-token.outputs.token }}
         run: |
           tag="wda-ipad-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           files=("$RUNNER_TEMP/wda-build.log")
