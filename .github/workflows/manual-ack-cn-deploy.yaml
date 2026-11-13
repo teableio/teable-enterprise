@@ -388,6 +388,10 @@ jobs:
       contents: read
       packages: read
       id-token: write
+    outputs:
+      # 'true' when the deployed tag carries the CDN patch (patched now or
+      # earlier); 'false' only for a pre-Turbopack image launched untouched.
+      cdn_patched: ${{ steps.existing.outputs.exists == 'true' || steps.patch.outputs.patched == 'true' }}
     env:
       IMAGE_TAG: ${{ inputs.image_tag }}
       CDN_ORIGIN: https://sss.teable.cn
@@ -769,6 +773,42 @@ jobs:
           kubectl -n "${ACK_CN_APP_NAMESPACE}" set image deployment/teable-cloud teable-cloud="${image}"
           kubectl -n "${ACK_CN_APP_NAMESPACE}" annotate deployment/teable-cloud originImageName="${image}" --overwrite
           kubectl -n "${ACK_CN_APP_NAMESPACE}" rollout status deployment/teable-cloud --timeout=15m
+
+      # The rollout must end on the CDN-patched image. The patch sets
+      # NEXT_BUILD_ENV_ASSET_PREFIX, and a pod without it serves pages whose
+      # asset URLs miss the CDN. Ordering already prevents this (deploy needs a
+      # successful patch-cdn, and the pre-pull goes by digest); this turns any
+      # other way of ending up on an unpatched image into a failed launch and
+      # an alert instead of a silent one.
+      - name: Assert every app pod runs the CDN-patched image
+        if: needs.patch-cdn.outputs.cdn_patched == 'true'
+        env:
+          CDN_ORIGIN: https://sss.teable.cn
+        run: |
+          set -euo pipefail
+          k() { kubectl -n "${ACK_CN_APP_NAMESPACE}" "$@"; }
+          selector=$(k get deployment teable-cloud -o json \
+            | jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')
+          pods=$(k get pods -l "$selector" -o json \
+            | jq -r '.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running") | .metadata.name')
+          [ -n "$pods" ] || { echo "::error::no running teable-cloud pods to check"; exit 1; }
+          bad=0
+          for pod in $pods; do
+            prefix=""
+            # exec goes through the bastion tunnel, which drops the odd connection.
+            for attempt in 1 2 3; do
+              if prefix=$(k exec "$pod" -c teable-cloud -- printenv NEXT_BUILD_ENV_ASSET_PREFIX); then break; fi
+              prefix=""
+              sleep 3
+            done
+            if [ "$prefix" = "$CDN_ORIGIN" ]; then
+              echo "✅ ${pod}: ${prefix}"
+            else
+              echo "::error::${pod} runs an image without the CDN patch (NEXT_BUILD_ENV_ASSET_PREFIX='${prefix}')"
+              bad=1
+            fi
+          done
+          exit "$bad"
 
       # prepull-app-image deletes its DaemonSet itself; this catches a pre-pull
       # job that was cancelled mid-way.
