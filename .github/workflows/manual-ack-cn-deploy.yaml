@@ -381,14 +381,17 @@ jobs:
     needs: ensure-aliyun
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # packages: read pulls the patch base from ghcr.
     permissions:
       contents: read
+      packages: read
       id-token: write
     env:
       IMAGE_TAG: ${{ inputs.image_tag }}
       CDN_ORIGIN: https://sss.teable.cn
       ASSET_BUCKET: ${{ vars.ACK_CN_APP_PUBLIC_BUCKET || 'teable-cn2-app-public' }}
       ALIYUN_IMAGE: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud
+      GHCR_IMAGE: ghcr.io/teableio/teable-cloud
 
     steps:
       - name: Checkout deploy and lock validation scripts
@@ -410,23 +413,59 @@ jobs:
           username: ${{ vars.ALI_DOCKER_USERNAME }}
           password: ${{ secrets.ALI_DOCKER_PASSWORD }}
 
-      - name: Check if the image is already patched (redeploy fast-path)
+      - name: Login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Reads the label and digests from the registries instead of pulling the
+      # image first: pulling ~600 MB out of Shenzhen to a GitHub runner took
+      # ~105 s of this job's ~4 minutes (2026-11). The patch base comes from
+      # ghcr, which a runner pulls in seconds: ensure-aliyun copied the amd64
+      # manifest unchanged, so the same digest is on ghcr, and pinning it keeps
+      # the patch layer on exactly the layers already on Aliyun (the push then
+      # uploads only that layer). On any mismatch the base comes from Aliyun.
+      - name: Check if the image is already patched and pick the patch base
         id: existing
         run: |
           set -euo pipefail
-          docker pull "${ALIYUN_IMAGE}:${IMAGE_TAG}"
-          CURRENT=$(docker inspect --format '{{index .Config.Labels "teable.asset-prefix"}}' \
-            "${ALIYUN_IMAGE}:${IMAGE_TAG}" 2>/dev/null || echo "")
+          acr_ref="${ALIYUN_IMAGE}:${IMAGE_TAG}"
+          CURRENT=$(docker buildx imagetools inspect "$acr_ref" --format '{{json .Image}}' \
+            | jq -r 'if .config then (.config.Labels["teable.asset-prefix"] // "") else "" end')
           if [ "$CURRENT" = "$CDN_ORIGIN" ]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "✅ ${IMAGE_TAG} already carries the ${CDN_ORIGIN} patch; assets are append-only, skipping"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            # The OSS upload below reads the static files out of this image.
+            docker pull "$acr_ref"
+            exit 0
           fi
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+
+          acr_digest=$(docker buildx imagetools inspect "$acr_ref" --format '{{json .Manifest}}' | jq -r '.digest')
+          ghcr_digest=$(docker buildx imagetools inspect "${GHCR_IMAGE}:${IMAGE_TAG}" --format '{{json .Manifest}}' \
+            | jq -r 'if .manifests then ([.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest] | first // "") else .digest end')
+          if [ -n "$ghcr_digest" ] && [ "$ghcr_digest" = "$acr_digest" ]; then
+            base="${GHCR_IMAGE}@${acr_digest}"
+            docker pull "$base"
+            # Same digest from Aliyun: every layer is already local, so this
+            # fetches only the manifest and config, but it records that Aliyun
+            # holds these layers, which is what lets the push below skip them
+            # whichever image store this runner's docker uses.
+            docker pull "${ALIYUN_IMAGE}@${acr_digest}"
+          else
+            echo "::warning::ghcr amd64 digest (${ghcr_digest:-none}) differs from Aliyun (${acr_digest}); pulling the patch base from Aliyun"
+            base="$acr_ref"
+            docker pull "$base"
+          fi
+          echo "base=${base}" >> "$GITHUB_OUTPUT"
 
       - name: Build patch layer
         if: steps.existing.outputs.exists == 'false'
         id: patch
+        env:
+          BASE_REF: ${{ steps.existing.outputs.base }}
         run: |
           set -euo pipefail
 
@@ -439,7 +478,7 @@ jobs:
           set +e
           docker run --rm --entrypoint node -e PATCH_DRY_RUN=1 \
             -v "$PWD/.github/scripts/patch-asset-prefix.mjs:/tmp/patch-asset-prefix.mjs:ro" \
-            "${ALIYUN_IMAGE}:${IMAGE_TAG}" /tmp/patch-asset-prefix.mjs "${CDN_ORIGIN}" /app
+            "${BASE_REF}" /tmp/patch-asset-prefix.mjs "${CDN_ORIGIN}" /app
           rc=$?
           set -e
           if [ "$rc" = 3 ]; then
@@ -453,7 +492,7 @@ jobs:
           fi
 
           docker build -t app-cdn-variant \
-            --build-arg BASE_IMAGE="${ALIYUN_IMAGE}:${IMAGE_TAG}" \
+            --build-arg BASE_IMAGE="${BASE_REF}" \
             --build-arg CDN_ORIGIN="${CDN_ORIGIN}" \
             -f - .github/scripts <<'EOF'
           ARG BASE_IMAGE
@@ -511,9 +550,101 @@ jobs:
           docker tag app-cdn-variant "${ALIYUN_IMAGE}:${IMAGE_TAG}"
           docker push "${ALIYUN_IMAGE}:${IMAGE_TAG}"
 
+  # Pre-pull the new app image on every app node while patch-cdn runs. Each of
+  # the 3 app nodes pulls ~635 MB from Shenzhen in ~1m25s, and the migration
+  # Job plus the one-at-a-time rollout used to take those pulls in turn: ~4.5
+  # of the deploy's 10 minutes (2026-11-13). Pulled by digest, never by tag:
+  # the app and migration pods use imagePullPolicy IfNotPresent, so a node
+  # holding the unpatched image under the release tag would never fetch the
+  # CDN-patched one. The patch only adds a layer on top, so the rollout then
+  # fetches just that layer. Best-effort: failures are warnings, and deploy
+  # runs whatever this job's result.
+  prepull-app-image:
+    name: Pre-pull the app image on ACK nodes
+    needs: ensure-aliyun
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      IMAGE_REF: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud
+      IMAGE_TAG: ${{ inputs.image_tag }}
+    steps:
+      - name: Checkout tunnel script
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Login to Aliyun container registry
+        uses: docker/login-action@v3
+        with:
+          registry: registry.cn-shenzhen.aliyuncs.com
+          username: ${{ vars.ALI_DOCKER_USERNAME }}
+          password: ${{ secrets.ALI_DOCKER_PASSWORD }}
+
+      - name: Get Aliyun STS credentials via OIDC
+        run: bash .github/scripts/aliyun-oidc-login.sh
+
+      - name: Pull the image on every app node
+        run: |
+          set -uo pipefail
+          skip() { echo "::warning::app image pre-pull skipped: $*"; exit 0; }
+          digest=$(docker buildx imagetools inspect "${IMAGE_REF}:${IMAGE_TAG}" --format '{{json .Manifest}}' \
+            | jq -r '.digest // empty')
+          [ -n "$digest" ] || skip "could not read the digest of ${IMAGE_TAG}"
+          bash .github/scripts/aliyun-kube-tunnel.sh "${ACK_CN_APP_CLUSTER_ID}" "${ACK_CN_APP_BASTION}" \
+            "${ACK_CN_APP_REGION}" "${RUNNER_TEMP}/kubeconfig" || skip "could not reach the cluster"
+          export KUBECONFIG="${RUNNER_TEMP}/kubeconfig"
+          k() { kubectl -n "${ACK_CN_APP_NAMESPACE}" "$@"; }
+          trap 'k delete daemonset teable-cloud-prepull --ignore-not-found --wait=false >/dev/null 2>&1 || true' EXIT
+
+          cat <<EOF | k apply -f - || skip "could not create the pre-pull DaemonSet"
+          apiVersion: apps/v1
+          kind: DaemonSet
+          metadata:
+            name: teable-cloud-prepull
+            labels:
+              app.kubernetes.io/name: teable-cloud-prepull
+          spec:
+            selector:
+              matchLabels:
+                app.kubernetes.io/name: teable-cloud-prepull
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/name: teable-cloud-prepull
+              spec:
+                # Same nodes and pull secret as deployment/teable-cloud.
+                nodeSelector:
+                  teable.io/node-pool: app
+                imagePullSecrets:
+                  - name: teable-cloud
+                terminationGracePeriodSeconds: 0
+                containers:
+                  - name: pull
+                    image: "${IMAGE_REF}@${digest}"
+                    imagePullPolicy: IfNotPresent
+                    command: ["sleep", "3600"]
+                    resources:
+                      requests: { cpu: 1m, memory: 8Mi }
+                      limits: { cpu: 50m, memory: 32Mi }
+          EOF
+
+          # A healthy pull takes ~1.5 minutes; past 5, stop holding up the deploy.
+          if k rollout status daemonset/teable-cloud-prepull --timeout=5m; then
+            echo "pre-pulled ${IMAGE_REF}@${digest} on every app node"
+          else
+            k get pods -l app.kubernetes.io/name=teable-cloud-prepull -o wide || true
+            skip "not every app node finished pulling within 5 minutes"
+          fi
+
   deploy:
     name: Deploy to ACK (teable-cn-app)
-    needs: [ensure-aliyun, patch-cdn]
+    needs: [ensure-aliyun, patch-cdn, prepull-app-image]
+    # prepull-app-image is best-effort: deploy runs whatever its result.
+    if: ${{ !cancelled() && needs.ensure-aliyun.result == 'success' && needs.patch-cdn.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -636,6 +767,12 @@ jobs:
           kubectl -n "${ACK_CN_APP_NAMESPACE}" set image deployment/teable-cloud teable-cloud="${image}"
           kubectl -n "${ACK_CN_APP_NAMESPACE}" annotate deployment/teable-cloud originImageName="${image}" --overwrite
           kubectl -n "${ACK_CN_APP_NAMESPACE}" rollout status deployment/teable-cloud --timeout=15m
+
+      # prepull-app-image deletes its DaemonSet itself; this catches a pre-pull
+      # job that was cancelled mid-way.
+      - name: Remove a leftover pre-pull DaemonSet
+        if: always()
+        run: kubectl -n "${ACK_CN_APP_NAMESPACE}" delete daemonset teable-cloud-prepull --ignore-not-found --wait=false || true
 
   notify:
     name: Record teable.cn Launch
