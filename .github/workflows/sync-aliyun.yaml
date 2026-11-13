@@ -102,6 +102,8 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DST_CREDS: ${{ vars.ALI_DOCKER_USERNAME }}:${{ secrets.ALI_DOCKER_PASSWORD }}
+          # Direct-copy fallback when the relay is unusable (acr-relay-copy.sh).
+          ACR_DIRECT_DST_CREDS: ${{ vars.ALI_DOCKER_USERNAME }}:${{ secrets.ALI_DOCKER_PASSWORD }}
         run: |
           set +e
 
