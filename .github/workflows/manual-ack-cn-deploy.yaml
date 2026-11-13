@@ -556,101 +556,9 @@ jobs:
           docker tag app-cdn-variant "${ALIYUN_IMAGE}:${IMAGE_TAG}"
           docker push "${ALIYUN_IMAGE}:${IMAGE_TAG}"
 
-  # Pre-pull the new app image on every app node while patch-cdn runs. Each of
-  # the 3 app nodes pulls ~635 MB from Shenzhen in ~1m25s, and the migration
-  # Job plus the one-at-a-time rollout used to take those pulls in turn: ~4.5
-  # of the deploy's 10 minutes (2026-11-13). Pulled by digest, never by tag:
-  # the app and migration pods use imagePullPolicy IfNotPresent, so a node
-  # holding the unpatched image under the release tag would never fetch the
-  # CDN-patched one. The patch only adds a layer on top, so the rollout then
-  # fetches just that layer. Best-effort: failures are warnings, and deploy
-  # runs whatever this job's result.
-  prepull-app-image:
-    name: Pre-pull the app image on ACK nodes
-    needs: ensure-aliyun
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      IMAGE_REF: registry.cn-shenzhen.aliyuncs.com/teable/teable-cloud
-      IMAGE_TAG: ${{ inputs.image_tag }}
-    steps:
-      - name: Checkout tunnel script
-        uses: actions/checkout@v4
-
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Login to Aliyun container registry
-        uses: docker/login-action@v3
-        with:
-          registry: registry.cn-shenzhen.aliyuncs.com
-          username: ${{ vars.ALI_DOCKER_USERNAME }}
-          password: ${{ secrets.ALI_DOCKER_PASSWORD }}
-
-      - name: Get Aliyun STS credentials via OIDC
-        run: bash .github/scripts/aliyun-oidc-login.sh
-
-      - name: Pull the image on every app node
-        run: |
-          set -uo pipefail
-          skip() { echo "::warning::app image pre-pull skipped: $*"; exit 0; }
-          digest=$(docker buildx imagetools inspect "${IMAGE_REF}:${IMAGE_TAG}" --format '{{json .Manifest}}' \
-            | jq -r '.digest // empty')
-          [ -n "$digest" ] || skip "could not read the digest of ${IMAGE_TAG}"
-          bash .github/scripts/aliyun-kube-tunnel.sh "${ACK_CN_APP_CLUSTER_ID}" "${ACK_CN_APP_BASTION}" \
-            "${ACK_CN_APP_REGION}" "${RUNNER_TEMP}/kubeconfig" || skip "could not reach the cluster"
-          export KUBECONFIG="${RUNNER_TEMP}/kubeconfig"
-          k() { kubectl -n "${ACK_CN_APP_NAMESPACE}" "$@"; }
-          trap 'k delete daemonset teable-cloud-prepull --ignore-not-found --wait=false >/dev/null 2>&1 || true' EXIT
-
-          cat <<EOF | k apply -f - || skip "could not create the pre-pull DaemonSet"
-          apiVersion: apps/v1
-          kind: DaemonSet
-          metadata:
-            name: teable-cloud-prepull
-            labels:
-              app.kubernetes.io/name: teable-cloud-prepull
-          spec:
-            selector:
-              matchLabels:
-                app.kubernetes.io/name: teable-cloud-prepull
-            template:
-              metadata:
-                labels:
-                  app.kubernetes.io/name: teable-cloud-prepull
-              spec:
-                # Same nodes and pull secret as deployment/teable-cloud.
-                nodeSelector:
-                  teable.io/node-pool: app
-                imagePullSecrets:
-                  - name: teable-cloud
-                terminationGracePeriodSeconds: 0
-                containers:
-                  - name: pull
-                    image: "${IMAGE_REF}@${digest}"
-                    imagePullPolicy: IfNotPresent
-                    command: ["sleep", "3600"]
-                    resources:
-                      requests: { cpu: 1m, memory: 8Mi }
-                      limits: { cpu: 50m, memory: 32Mi }
-          EOF
-
-          # A healthy pull takes ~1.5 minutes; past 5, stop holding up the deploy.
-          if k rollout status daemonset/teable-cloud-prepull --timeout=5m; then
-            echo "pre-pulled ${IMAGE_REF}@${digest} on every app node"
-          else
-            k get pods -l app.kubernetes.io/name=teable-cloud-prepull -o wide || true
-            skip "not every app node finished pulling within 5 minutes"
-          fi
-
   deploy:
     name: Deploy to ACK (teable-cn-app)
-    needs: [ensure-aliyun, patch-cdn, prepull-app-image]
-    # prepull-app-image is best-effort: deploy runs whatever its result.
-    if: ${{ !cancelled() && needs.ensure-aliyun.result == 'success' && needs.patch-cdn.result == 'success' }}
+    needs: [ensure-aliyun, patch-cdn]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -777,9 +685,9 @@ jobs:
       # The rollout must end on the CDN-patched image. The patch sets
       # NEXT_BUILD_ENV_ASSET_PREFIX, and a pod without it serves pages whose
       # asset URLs miss the CDN. Ordering already prevents this (deploy needs a
-      # successful patch-cdn, and the pre-pull goes by digest); this turns any
-      # other way of ending up on an unpatched image into a failed launch and
-      # an alert instead of a silent one.
+      # successful patch-cdn); this turns any other way of ending up on an
+      # unpatched image into a failed launch and an alert instead of a silent
+      # one.
       - name: Assert every app pod runs the CDN-patched image
         if: needs.patch-cdn.outputs.cdn_patched == 'true'
         env:
@@ -809,12 +717,6 @@ jobs:
             fi
           done
           exit "$bad"
-
-      # prepull-app-image deletes its DaemonSet itself; this catches a pre-pull
-      # job that was cancelled mid-way.
-      - name: Remove a leftover pre-pull DaemonSet
-        if: always()
-        run: kubectl -n "${ACK_CN_APP_NAMESPACE}" delete daemonset teable-cloud-prepull --ignore-not-found --wait=false || true
 
   notify:
     name: Record teable.cn Launch
