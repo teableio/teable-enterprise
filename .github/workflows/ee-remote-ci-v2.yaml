@@ -502,7 +502,7 @@ jobs:
             (cd community/packages/db-data-prisma && pnpm prisma-migrate deploy --schema ./prisma/schema.prisma)
             if [ "${{ matrix.edition.label }}" = "CLOUD" ]; then
               echo "=== inline query: PGlite and PostgreSQL executor ==="
-              TEABLE_V2_RUN_PG_INTEGRATION=1 pnpm --fail-if-no-match -F @teable/v2-adapter-table-repository-postgres exec vitest run src/record/data-query/PostgresDataQueryExecutor.pglite.spec.ts src/record/data-query/PostgresDataQueryExecutor.pg.integration.spec.ts --passWithNoTests=false
+              TEABLE_V2_RUN_PG_INTEGRATION=1 pnpm --fail-if-no-match -F @teable/v2-adapter-table-repository-postgres exec vitest run src/record/data-query/PostgresDataQueryExecutor.pglite.spec.ts src/record/data-query/PostgresDataQueryExecutor.pg.integration.spec.ts src/record/data-query/PostgresDataQueryExistence.pg.integration.spec.ts --passWithNoTests=false
               echo "=== inline query: failure trace privacy and host boundaries ==="
               TEABLE_V2_RUN_PG_INTEGRATION=1 pnpm --fail-if-no-match -F @teable/backend exec vitest run src/tracing-pg.integration.spec.ts src/tracing-db-context.spec.ts src/configs/env.validation.schema.spec.ts src/filter/global-exception.filter.spec.ts --passWithNoTests=false
             fi
