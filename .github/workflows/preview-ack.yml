@@ -407,32 +407,20 @@ jobs:
           export PREVIEW_DATA_STORAGE_CLASS
           # The rendered manifest holds Secrets: write it to the runner, never print it.
           bash tooling/.github/scripts/render-preview-ack.sh > "${RUNNER_TEMP}/preview.yaml"
-          # Env set by hand on the app container (kubectl set env) survives a redeploy: it is
-          # whatever differs from the last applied template. Unset a variable to go back to
-          # the template's value.
+          # Env set by hand (kubectl set env) is whatever differs from the last applied
+          # template; put it back after the apply. Unset a variable to get the template's value.
           app="teable-${INSTANCE_NAME}"
-          manual_env=$(kubectl get deployment "$app" --ignore-not-found -o json | jq -c --arg app "$app" '
-            (.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] // "{}" | fromjson
-              | [.spec.template.spec.containers[]? | select(.name == $app) | .env[]?]) as $last
-            | [.spec.template.spec.containers[] | select(.name == $app) | .env[]?
-                | select(has("value")) | select(. as $e | all($last[]; . != $e))]')
-          if [ -n "$manual_env" ] && [ "$manual_env" != "[]" ]; then
-            echo "Keeping env set by hand: $(jq -r 'map(.name) | join(", ")' <<<"$manual_env")"
-            kubectl create --dry-run=client -o json -f "${RUNNER_TEMP}/preview.yaml" \
-              | jq --arg app "$app" --argjson manual "$manual_env" '
-                  (if .kind == "List" then .items[] else . end
-                    | select(.kind == "Deployment" and .metadata.name == $app)
-                    | .spec.template.spec.containers[] | select(.name == $app) | .env)
-                  |= ([.[]? | . as $e | (first($manual[] | select(.name == $e.name)) // $e)] as $kept
-                      | $kept + [$manual[] | select(.name as $n | all($kept[]; .name != $n))])' \
-              > "${RUNNER_TEMP}/preview.json"
-            kubectl apply -f "${RUNNER_TEMP}/preview.json"
-            # Record the template, not the hand-set values, so they still show up as set by
-            # hand on the next deploy.
-            kubectl apply set-last-applied -f "${RUNNER_TEMP}/preview.yaml"
-            rm -f "${RUNNER_TEMP}/preview.json"
-          else
-            kubectl apply -f "${RUNNER_TEMP}/preview.yaml"
+          manual_env=$(kubectl get deployment "$app" --ignore-not-found -o json | jq -r --arg app "$app" '
+            ([.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] // "{}" | fromjson
+              | .spec.template.spec.containers[]? | select(.name == $app) | .env[]?]) as $last
+            | .spec.template.spec.containers[] | select(.name == $app) | .env[]?
+            | select(has("value") and (IN($last[]) | not)) | "\(.name)=\(.value)"')
+          # Paused, the apply and the env put back roll out once, together.
+          if [ -n "$manual_env" ]; then kubectl rollout pause deployment "$app"; fi
+          kubectl apply -f "${RUNNER_TEMP}/preview.yaml"
+          if [ -n "$manual_env" ]; then
+            kubectl set env deployment "$app" -c "$app" - <<<"$manual_env"
+            kubectl rollout resume deployment "$app"
           fi
           # The reaper removes previews idle for PREVIEW_MAX_IDLE_DAYS since this stamp.
           # Deployment metadata only, so it does not roll the pods.
