@@ -300,8 +300,14 @@ jobs:
       # mode=min + gzip on purpose: mode=max is what tripped GHCR's secondary
       # rate limit on 2026-08-04, and recompressing to zstd would hand the
       # base image different layer digests than a cold build.
+      #
+      # The cache is an optimization and must never fail a release: this step
+      # is continue-on-error, and both exports set ignore-error=true (without
+      # it a GHCR hiccup while writing the cache fails the whole build; a
+      # failed import is only ever a warning). Worst case is a cold build.
       - name: Build and export toolchain-stage cache
         if: steps.check.outputs.exists == 'false'
+        continue-on-error: true
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -311,7 +317,7 @@ jobs:
           outputs: type=cacheonly
           provenance: false
           cache-from: type=registry,ref=${{ steps.basecache.outputs.toolchain }}
-          cache-to: type=registry,ref=${{ steps.basecache.outputs.toolchain }},mode=min,oci-mediatypes=true,image-manifest=true
+          cache-to: type=registry,ref=${{ steps.basecache.outputs.toolchain }},mode=min,oci-mediatypes=true,image-manifest=true,ignore-error=true
 
       - name: Build and push base image
         if: steps.check.outputs.exists == 'false'
@@ -328,7 +334,7 @@ jobs:
           cache-from: |
             type=registry,ref=${{ steps.basecache.outputs.toolchain }}
             type=registry,ref=${{ steps.basecache.outputs.base }}
-          cache-to: type=registry,ref=${{ steps.basecache.outputs.base }},mode=min,oci-mediatypes=true,image-manifest=true
+          cache-to: type=registry,ref=${{ steps.basecache.outputs.base }},mode=min,oci-mediatypes=true,image-manifest=true,ignore-error=true
 
   # Seeds the scoped deps-stage build cache (zstd) that the app builds import.
   # Runs BESIDE the build, never gating it: on a routine release everything
