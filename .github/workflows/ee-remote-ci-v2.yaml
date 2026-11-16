@@ -500,9 +500,6 @@ jobs:
             (cd community/packages/db-data-prisma && pnpm prisma-generate)
             (cd packages/db-main-prisma && pnpm prisma-migrate deploy --schema ./prisma/postgres/schema.prisma)
             (cd community/packages/db-data-prisma && pnpm prisma-migrate deploy --schema ./prisma/schema.prisma)
-            # Both editions invoke the real CLI binary, which loads dist/index.js.
-            echo "=== build CLI for host query execution ==="
-            pnpm --fail-if-no-match -F @teable/cli build
             if [ "${{ matrix.edition.label }}" = "CLOUD" ]; then
               echo "=== inline query: PGlite and PostgreSQL executor ==="
               TEABLE_V2_RUN_PG_INTEGRATION=1 pnpm --fail-if-no-match -F @teable/v2-adapter-table-repository-postgres exec vitest run src/record/data-query/PostgresDataQueryExecutor.pglite.spec.ts src/record/data-query/PostgresDataQueryExecutor.pg.integration.spec.ts src/record/data-query/PostgresDataQueryExistence.pg.integration.spec.ts --passWithNoTests=false
