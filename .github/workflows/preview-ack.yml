@@ -203,8 +203,11 @@ jobs:
             fi
           done
           echo "Agent base image missing, will build: ${repo}:preview-${tag}"
-          echo "ref=${repo}:preview-${tag}" >> "$GITHUB_OUTPUT"
-          echo "build=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "ref=${repo}:preview-${tag}"
+            echo "build=true"
+            echo "cache_month=$(date -u +%Y%m)"
+          } >> "$GITHUB_OUTPUT"
 
       # Never push base-<hash>: a release that finds that tag skips building its own
       # amd64+arm64 base and would ship this amd64-only one.
@@ -218,6 +221,14 @@ jobs:
           tags: ${{ steps.agent_base.outputs.ref }}
           push: true
           provenance: false
+          # Reuse the layers the release pipeline cached this month (build-teable.yaml,
+          # ensure-agent-base), so a PR that only touches the scaffold does not rebuild —
+          # and the test cluster does not re-download — the apt/pip/npm/Chromium layers.
+          # Read-only: a PR's base must never overwrite the cache releases build from.
+          # A missing ref (no release rebuild yet this month) just means a cold build.
+          cache-from: |
+            type=registry,ref=ghcr.io/teableio/teable-buildcache:agent-base-toolchain-${{ steps.agent_base.outputs.cache_month }}
+            type=registry,ref=ghcr.io/teableio/teable-buildcache:agent-base-${{ steps.agent_base.outputs.cache_month }}
 
       - name: 📦 Build and push
         env:

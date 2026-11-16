@@ -216,6 +216,15 @@ jobs:
   # Build (or skip) the source-independent sandbox agent base image. The tag is
   # the content hash of its inputs, so an existing tag means nothing changed —
   # routine releases skip this entirely and only push the thin source layer.
+  #
+  # A rebuild reuses the unchanged layers of the previous base through a
+  # registry build cache. Without it every rebuild re-ran apt, pip, the npm
+  # toolchain and the Chromium download from scratch, producing ~800 MB of
+  # byte-different but equivalent layers under new digests: ~20 min of CI
+  # here, and every sandbox node re-downloading the whole agent image on the
+  # next release. Rebuilds are no longer rare — the scaffold sources are a
+  # hash input and change several times a week — so with the cache a scaffold
+  # or settings change only rebuilds the layers after it.
   ensure-agent-base:
     needs: prepare-release
     runs-on: ubuntu-latest
@@ -259,13 +268,50 @@ jobs:
 
       # QEMU must be registered before the Buildx builder is created, or the
       # cold-base multi-arch rebuild gets a builder without the arm64 emulator.
-      - name: Set up QEMU (arm64 emulation for the rare base rebuild)
+      - name: Set up QEMU (arm64 emulation for the base rebuild)
         if: steps.check.outputs.exists == 'false'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         if: steps.check.outputs.exists == 'false'
         uses: docker/setup-buildx-action@v3
+
+      # The refs carry the UTC month, so the first rebuild of each month runs
+      # cold. That is the refresh point for everything the Dockerfile does not
+      # pin: Debian packages (apt-get update) and the official skills cloned
+      # from their default branches. Before the cache they refreshed on every
+      # rebuild; a cache that never expired would freeze them for good.
+      # preview-ack.yml imports the same refs (read-only); ghcr-gc.yaml reaps
+      # the refs of past months.
+      - name: Resolve base build cache refs
+        id: basecache
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          month="$(date -u +%Y%m)"
+          repo="${{ env.REGISTRY_GITHUB }}/teable-buildcache"
+          echo "toolchain=${repo}:agent-base-toolchain-${month}" >> "$GITHUB_OUTPUT"
+          echo "base=${repo}:agent-base-${month}" >> "$GITHUB_OUTPUT"
+
+      # The toolchain stage is not part of the final image (it is only bind-
+      # mounted and is the parent of scaffold-gen), so the mode=min export of
+      # the base build below would not carry it. Export it as its own target,
+      # the same way populate-deps-cache does: a scaffold change then pulls the
+      # cached toolchain instead of reinstalling the npm globals under QEMU.
+      # mode=min + gzip on purpose: mode=max is what tripped GHCR's secondary
+      # rate limit on 2026-08-04, and recompressing to zstd would hand the
+      # base image different layer digests than a cold build.
+      - name: Build and export toolchain-stage cache
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: dockers/teable/Dockerfile.sandbox-agent-base
+          target: toolchain
+          platforms: linux/amd64,linux/arm64
+          outputs: type=cacheonly
+          provenance: false
+          cache-from: type=registry,ref=${{ steps.basecache.outputs.toolchain }}
+          cache-to: type=registry,ref=${{ steps.basecache.outputs.toolchain }},mode=min,oci-mediatypes=true,image-manifest=true
 
       - name: Build and push base image
         if: steps.check.outputs.exists == 'false'
@@ -279,6 +325,10 @@ jobs:
             ${{ env.REGISTRY_GITHUB }}/teable-sandbox-agent-base:latest
           push: true
           provenance: false
+          cache-from: |
+            type=registry,ref=${{ steps.basecache.outputs.toolchain }}
+            type=registry,ref=${{ steps.basecache.outputs.base }}
+          cache-to: type=registry,ref=${{ steps.basecache.outputs.base }},mode=min,oci-mediatypes=true,image-manifest=true
 
   # Seeds the scoped deps-stage build cache (zstd) that the app builds import.
   # Runs BESIDE the build, never gating it: on a routine release everything

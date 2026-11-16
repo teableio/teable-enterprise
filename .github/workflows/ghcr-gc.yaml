@@ -90,3 +90,18 @@ jobs:
           delete-untagged: true
           validate: true
           dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+
+      # The agent-base build cache is month-scoped (build-teable.yaml,
+      # ensure-agent-base): agent-base-<yyyymm> and agent-base-toolchain-<yyyymm>.
+      # A month is at most 31 days, so a ref older than 45 days belongs to a past
+      # month and is never read again.
+      - name: Clean past-month agent-base cache refs
+        uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          owner: teableio
+          packages: teable-buildcache
+          delete-tags: agent-base-*
+          older-than: 45 days
+          validate: true
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
