@@ -30,7 +30,9 @@ env:
 
 jobs:
   ai-web:
-    runs-on: ubuntu-latest
+    # Playwright 1.57 supports Ubuntu 24.04, not newer ubuntu-latest images.
+    # Keep the pin in this source template so develop syncs preserve it.
+    runs-on: ubuntu-24.04
     name: AI E2E Tests
     timeout-minutes: 60
 
