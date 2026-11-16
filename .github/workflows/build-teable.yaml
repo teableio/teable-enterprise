@@ -283,14 +283,31 @@ jobs:
       # rebuild; a cache that never expired would freeze them for good.
       # preview-ack.yml imports the same refs (read-only); ghcr-gc.yaml reaps
       # the refs of past months.
+      #
+      # Only the automatic develop builds (repository_dispatch) write the
+      # cache. A manual run can build any teable-ee ref; if it wrote too, a
+      # branch with different early steps would replace develop's cache and
+      # the next develop rebuild would run cold. Manual runs still read it.
       - name: Resolve base build cache refs
         id: basecache
         if: steps.check.outputs.exists == 'false'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           month="$(date -u +%Y%m)"
           repo="${{ env.REGISTRY_GITHUB }}/teable-buildcache"
-          echo "toolchain=${repo}:agent-base-toolchain-${month}" >> "$GITHUB_OUTPUT"
-          echo "base=${repo}:agent-base-${month}" >> "$GITHUB_OUTPUT"
+          toolchain="${repo}:agent-base-toolchain-${month}"
+          base="${repo}:agent-base-${month}"
+          # ignore-error: see the toolchain step below.
+          opts="mode=min,oci-mediatypes=true,image-manifest=true,ignore-error=true"
+          {
+            echo "toolchain=${toolchain}"
+            echo "base=${base}"
+            if [ "${EVENT_NAME}" = "repository_dispatch" ]; then
+              echo "toolchain_to=type=registry,ref=${toolchain},${opts}"
+              echo "base_to=type=registry,ref=${base},${opts}"
+            fi
+          } >> "$GITHUB_OUTPUT"
 
       # The toolchain stage is not part of the final image (it is only bind-
       # mounted and is the parent of scaffold-gen), so the mode=min export of
@@ -317,7 +334,7 @@ jobs:
           outputs: type=cacheonly
           provenance: false
           cache-from: type=registry,ref=${{ steps.basecache.outputs.toolchain }}
-          cache-to: type=registry,ref=${{ steps.basecache.outputs.toolchain }},mode=min,oci-mediatypes=true,image-manifest=true,ignore-error=true
+          cache-to: ${{ steps.basecache.outputs.toolchain_to }}
 
       - name: Build and push base image
         if: steps.check.outputs.exists == 'false'
@@ -334,7 +351,7 @@ jobs:
           cache-from: |
             type=registry,ref=${{ steps.basecache.outputs.toolchain }}
             type=registry,ref=${{ steps.basecache.outputs.base }}
-          cache-to: type=registry,ref=${{ steps.basecache.outputs.base }},mode=min,oci-mediatypes=true,image-manifest=true,ignore-error=true
+          cache-to: ${{ steps.basecache.outputs.base_to }}
 
   # Seeds the scoped deps-stage build cache (zstd) that the app builds import.
   # Runs BESIDE the build, never gating it: on a routine release everything
