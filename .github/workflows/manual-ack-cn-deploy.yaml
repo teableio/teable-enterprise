@@ -111,6 +111,11 @@ on:
         required: false
         type: boolean
         default: true
+      wait_for_preheat:
+        description: 'Hold the rollout until sandbox nodes have the agent image (rollbacks pass false)'
+        required: false
+        type: boolean
+        default: true
     outputs:
       start_time:
         description: 'Deployment start timestamp'
@@ -576,6 +581,22 @@ jobs:
     steps:
       - name: Checkout deploy and lock validation scripts
         uses: actions/checkout@v4
+
+      # The preheat job runs alongside patch-cdn and is usually done by now,
+      # so this is normally a single status call; it waits (up to 5 minutes)
+      # only when the pull is slower. First in the job so the wait neither
+      # leaves the bastion port forward idle nor widens the gap between the
+      # lock revalidation and the rollout. Rollbacks skip it; the condition
+      # is explained at the same step in manual-ecs-deploy.yml.
+      - name: Wait for the sandbox agent preheat
+        if: format('{0}', inputs.wait_for_preheat) != 'false'
+        continue-on-error: true
+        timeout-minutes: 7
+        env:
+          PREHEAT_TOKEN: ${{ secrets.INFRA_TEABLE_CN_PREHEAT_TOKEN }}
+        run: >-
+          bash .github/scripts/wait-sandbox-agent-preheat.sh https://infra.teable.cn
+          "${REGISTRY}/teable-sandbox-agent:${IMAGE_TAG}"
 
       - name: Revalidate teable.cn publishing lock
         if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''

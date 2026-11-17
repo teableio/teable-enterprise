@@ -57,6 +57,9 @@ jobs:
       image_tag: ${{ inputs.image_tag }}
       trigger: ${{ inputs.trigger }}
       record_launch: false
+      # A rollback goes out right away; a cold sandbox node only costs
+      # first-spawn latency, the version being rolled back costs more.
+      wait_for_preheat: false
     secrets: inherit
 
   deploy-cn:
@@ -73,6 +76,7 @@ jobs:
       image_tag: ${{ inputs.image_tag }}
       trigger: ${{ inputs.trigger }}
       record_launch: false
+      wait_for_preheat: false
     secrets: inherit
 
   promote-ee:
