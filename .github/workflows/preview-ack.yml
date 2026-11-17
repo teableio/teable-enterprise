@@ -430,7 +430,13 @@ jobs:
                     |= ([.[]? | . as $e | (first($manual[] | select(.name == $e.name)) // $e)] as $kept
                         | $kept + [$manual[] | select(.name as $n | all($kept[]; .name != $n))])
                 else . end' > "${RUNNER_TEMP}/preview.json"
-          kubectl apply -f "${RUNNER_TEMP}/preview.json"
+          # A rejected apply quotes its patch, hand-set values included, and this log is
+          # public: show only the kind of error and which object.
+          if ! kubectl apply -f "${RUNNER_TEMP}/preview.json" 2>"${RUNNER_TEMP}/apply.err"; then
+            grep -oE '^(Error from server \([A-Za-z]+\)|Resource: .*|Name: .*)' "${RUNNER_TEMP}/apply.err" >&2 \
+              || echo "kubectl apply failed; details hidden, they can include env values" >&2
+            exit 1
+          fi
           # The reaper removes previews idle for PREVIEW_MAX_IDLE_DAYS since this stamp.
           # Deployment metadata only, so it does not roll the pods.
           kubectl annotate deployment "teable-${INSTANCE_NAME}" --overwrite \
@@ -438,7 +444,8 @@ jobs:
           if [ "${ENABLE_TRACING}" != "true" ]; then
             kubectl delete deployment,service,ingress "teable-${INSTANCE_NAME}-jaeger" --ignore-not-found
           fi
-          rm -f "${RUNNER_TEMP}/preview.yaml" "${RUNNER_TEMP}/preview.json" "${RUNNER_TEMP}/live.json"
+          rm -f "${RUNNER_TEMP}/preview.yaml" "${RUNNER_TEMP}/preview.json" "${RUNNER_TEMP}/live.json" \
+            "${RUNNER_TEMP}/apply.err"
 
       - name: Rollout status
         env:
