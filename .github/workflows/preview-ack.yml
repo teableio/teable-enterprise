@@ -430,12 +430,37 @@ jobs:
                     |= ([.[]? | . as $e | (first($manual[] | select(.name == $e.name)) // $e)] as $kept
                         | $kept + [$manual[] | select(.name as $n | all($kept[]; .name != $n))])
                 else . end' > "${RUNNER_TEMP}/preview.json"
-          # A rejected apply quotes its patch, hand-set values included, and this log is
-          # public: show only the kind of error and which object.
-          if ! kubectl apply -f "${RUNNER_TEMP}/preview.json" 2>"${RUNNER_TEMP}/apply.err"; then
-            grep -oE '^(Error from server \([A-Za-z]+\)|Resource: .*|Name: .*)' "${RUNNER_TEMP}/apply.err" >&2 \
-              || echo "kubectl apply failed; details hidden, they can include env values" >&2
-            exit 1
+          # Name the kept entries (names only) here and on the PR, so whoever deploys next
+          # can tell why the preview differs from the template.
+          kept_env=$(jq -r --arg app "$app" '
+            select(.kind == "Deployment" and .metadata.name == $app)
+            | (.metadata.annotations["teable.io/template-env"] | fromjson) as $t
+            | [.spec.template.spec.containers[] | select(.name == $app) | .env[]?
+               | select(has("valueFrom") | not) | {name, value: (.value // "")}
+               | select(IN($t[]) | not) | .name]
+            | join(", ")' "${RUNNER_TEMP}/preview.json")
+          if [ -n "${kept_env}" ]; then
+            echo "Keeping env set by hand: ${kept_env}"
+          fi
+          echo "kept_env=${kept_env}" >> "$GITHUB_OUTPUT"
+          # A rejected apply can quote its patch, hand-set values included, and this log is
+          # public. Print only kubectl's own lines (error kind, object, reason, warnings,
+          # connection errors) and hide the value a field error quotes.
+          apply_rc=0
+          kubectl apply -f "${RUNNER_TEMP}/preview.json" 2>"${RUNNER_TEMP}/apply.err" || apply_rc=$?
+          apply_err=$(sed -nE \
+            -e '/^(Error from server|error: |Warning: |The |Unable to connect|Resource: |Name: |(from server )?for: |\* |[EW][0-9]{4} )/!d' \
+            -e 's/((Invalid|Unsupported|Duplicate) value: |Not found: )"([^"\\]|\\.)*"/\1<hidden>/g' \
+            -e 's/((Invalid|Unsupported|Duplicate) value: |Not found: )[^<].*/\1<hidden>/' \
+            -e p "${RUNNER_TEMP}/apply.err")
+          if [ -n "${apply_err}" ]; then
+            printf '%s\n' "${apply_err}" >&2
+          fi
+          if [ "${apply_rc}" -ne 0 ]; then
+            if [ -z "${apply_err}" ]; then
+              echo "kubectl apply failed; its output is withheld, it can include env values" >&2
+            fi
+            exit "${apply_rc}"
           fi
           # The reaper removes previews idle for PREVIEW_MAX_IDLE_DAYS since this stamp.
           # Deployment metadata only, so it does not roll the pods.
@@ -526,6 +551,7 @@ jobs:
           ADMIN_TOKEN: ${{ steps.preview_admin.outputs.admin_token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           FAILURE_REASON: ${{ steps.diagnose.outputs.reason }}
+          KEPT_ENV: ${{ steps.render.outputs.kept_env }}
         run: |
           url="https://${INSTANCE_NAME}.${PREVIEW_DOMAIN_BASE}"
           if [ "${SUCCESS}" = "true" ]; then
@@ -547,5 +573,8 @@ jobs:
             if [ -n "${FAILURE_REASON}" ]; then
               body="${body}"$'\n'"Stuck on: \`${FAILURE_REASON}\`"
             fi
+          fi
+          if [ -n "${KEPT_ENV}" ]; then
+            body="${body}"$'\n'"🛠️ Env set by hand, kept over the template: \`${KEPT_ENV//\`/}\`. To drop one: \`kubectl set env deploy/teable-${INSTANCE_NAME} NAME-\`; the template's value, if it has one, comes back on the next deploy."
           fi
           gh api "repos/teableio/teable-ee/issues/${PR_NUMBER}/comments" -f body="${body}"
