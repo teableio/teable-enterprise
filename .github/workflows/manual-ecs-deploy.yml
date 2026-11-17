@@ -94,6 +94,11 @@ on:
         required: false
         type: boolean
         default: true
+      wait_for_preheat:
+        description: 'Hold the rollout until sandbox nodes have the agent image (rollbacks pass false)'
+        required: false
+        type: boolean
+        default: true
     outputs:
       start_time:
         description: 'Deployment start timestamp'
@@ -392,9 +397,24 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout lock validation script
-        if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
+      - name: Checkout scripts
         uses: actions/checkout@v4
+
+      # The preheat job starts right after prepare; give the nodes up to 5
+      # minutes to finish pulling before the new version spawns sandboxes.
+      # Runs before the lock revalidation so the wait doesn't widen the gap
+      # between that check and the rollout. Rollbacks pass
+      # wait_for_preheat: false. It is not a workflow_dispatch input (that
+      # list is full), so a dispatched launch sees null: format() keeps null
+      # meaning "wait", where a bare `!= false` would coerce it to false.
+      - name: Wait for the sandbox agent preheat
+        if: format('{0}', inputs.wait_for_preheat) != 'false'
+        continue-on-error: true
+        timeout-minutes: 7
+        env:
+          PREHEAT_TOKEN: ${{ secrets.INFRA_TEABLE_AI_PREHEAT_TOKEN }}
+          IMAGE: ghcr.io/teableio/teable-sandbox-agent:${{ inputs.image_tag }}
+        run: bash .github/scripts/wait-sandbox-agent-preheat.sh https://infra.teable.ai "$IMAGE"
 
       - name: Revalidate teable.ai publishing lock
         if: inputs.record_launch != false && inputs.release_record_id != '' && inputs.publish_lock_id != ''
@@ -712,20 +732,20 @@ jobs:
       publish_target: ai
     secrets: inherit
 
-  # Preheat teable.ai sandbox-agent nodes once the release is live on EKS.
+  # Preheat teable.ai sandbox-agent nodes before the rollout: the agent image
+  # is tagged release.<id> at build time (stamp-release doesn't touch it), so
+  # nothing upstream is needed, and deploy-eks waits for the pull to finish
+  # before switching. Running it after deploy-eks (as from 2026-11-12) meant
+  # the first sandboxes of every new version pulled ~900MB themselves.
   # teable.ai only: teable.cn preheats from its own deploy workflow
   # (manual-ack-cn-deploy), so a CN deploy that fails or is held back keeps
-  # preheating the version CN actually runs. This job used to preheat both
-  # clouds after sync-aliyun; on 2026-11-11 the CN deploy was cancelled while
-  # this job still moved the CN preheat to the new release (new CN nodes then
-  # pulled an agent image nothing used), and the teable.ai preheat itself
-  # landed two hours after the EKS rollout because the Aliyun upload was
-  # queued behind the CN one.
+  # preheating the version CN actually runs.
+  # If the rollout then fails, the preheat stays one version ahead of what
+  # runs until the next launch re-points it.
   # Best-effort: not part of the notify gating — a preheat miss only costs
   # first-spawn latency.
   preheat-sandbox-agent:
-    needs: deploy-eks
-    if: needs.deploy-eks.result == 'success' && needs.deploy-eks.outputs.skipped != 'true'
+    needs: prepare
     uses: ./.github/workflows/preheat-sandbox-agent-cloud.yaml
     with:
       image_tag: ${{ inputs.image_tag }}
