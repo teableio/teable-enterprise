@@ -407,7 +407,65 @@ jobs:
           export PREVIEW_DATA_STORAGE_CLASS
           # The rendered manifest holds Secrets: write it to the runner, never print it.
           bash tooling/.github/scripts/render-preview-ack.sh > "${RUNNER_TEMP}/preview.yaml"
-          kubectl apply -f "${RUNNER_TEMP}/preview.yaml"
+          # Env set by hand on the app container (kubectl set env) survives a redeploy: the
+          # literal and secretKeyRef entries that differ from the template env recorded on the
+          # Deployment at the last deploy. They are merged into the rendered manifest, so the
+          # new image and the env land in one update. Unset a variable to get the template's
+          # value back. For credentials, put them in a Secret labelled
+          # teable.io/preview-instance=teable-<instance> and use `kubectl set env --from`:
+          # the Deployment then holds only references, and cleanup deletes the Secret.
+          app="teable-${INSTANCE_NAME}"
+          kubectl get deployment "$app" --ignore-not-found -o json > "${RUNNER_TEMP}/live.json"
+          kubectl create --dry-run=client -o json -f "${RUNNER_TEMP}/preview.yaml" \
+            | jq --arg app "$app" --slurpfile live "${RUNNER_TEMP}/live.json" '
+                def norm: if has("valueFrom") then . else {name, value: (.value // "")} end;
+                def app_env: [.spec.template.spec.containers[]? | select(.name == $app) | .env[]? | norm];
+                if .kind == "Deployment" and .metadata.name == $app then
+                  ($live[0] // {}) as $d
+                  | ($d.metadata.annotations // {}) as $a
+                  | (if $a["teable.io/template-env"] then $a["teable.io/template-env"] | fromjson
+                     elif $a["kubectl.kubernetes.io/last-applied-configuration"]
+                     then $a["kubectl.kubernetes.io/last-applied-configuration"] | fromjson | app_env
+                     else [] end) as $base
+                  | [$d | app_env[] | select(((has("valueFrom") | not) or .valueFrom.secretKeyRef) and (IN($base[]) | not))] as $manual
+                  | .metadata.annotations["teable.io/template-env"] = (app_env | tojson)
+                  | (.spec.template.spec.containers[] | select(.name == $app) | .env)
+                    |= ([.[]? | . as $e | (first($manual[] | select(.name == $e.name)) // $e)] as $kept
+                        | $kept + [$manual[] | select(.name as $n | all($kept[]; .name != $n))])
+                else . end' > "${RUNNER_TEMP}/preview.json"
+          # Name the kept entries (names only) here and on the PR, so whoever deploys next
+          # can tell why the preview differs from the template.
+          kept_env=$(jq -r --arg app "$app" '
+            select(.kind == "Deployment" and .metadata.name == $app)
+            | (.metadata.annotations["teable.io/template-env"] | fromjson) as $t
+            | [.spec.template.spec.containers[] | select(.name == $app) | .env[]?
+               | select((has("valueFrom") | not) or .valueFrom.secretKeyRef)
+               | if has("valueFrom") then . else {name, value: (.value // "")} end
+               | select(IN($t[]) | not) | .name]
+            | join(", ")' "${RUNNER_TEMP}/preview.json")
+          if [ -n "${kept_env}" ]; then
+            echo "Keeping env set by hand: ${kept_env}"
+          fi
+          echo "kept_env=${kept_env}" >> "$GITHUB_OUTPUT"
+          # A rejected apply can quote its patch, hand-set values included, and this log is
+          # public. Print only kubectl's own lines (error kind, object, reason, warnings,
+          # connection errors) and hide the value a field error quotes.
+          apply_rc=0
+          kubectl apply -f "${RUNNER_TEMP}/preview.json" 2>"${RUNNER_TEMP}/apply.err" || apply_rc=$?
+          apply_err=$(sed -nE \
+            -e '/^(Error from server|error: |Warning: |The |Unable to connect|Resource: |Name: |(from server )?for: |\* |[EW][0-9]{4} )/!d' \
+            -e 's/((Invalid|Unsupported|Duplicate) value: |Not found: )"([^"\\]|\\.)*"/\1<hidden>/g' \
+            -e 's/((Invalid|Unsupported|Duplicate) value: |Not found: )[^<].*/\1<hidden>/' \
+            -e p "${RUNNER_TEMP}/apply.err")
+          if [ -n "${apply_err}" ]; then
+            printf '%s\n' "${apply_err}" >&2
+          fi
+          if [ "${apply_rc}" -ne 0 ]; then
+            if [ -z "${apply_err}" ]; then
+              echo "kubectl apply failed; its output is withheld, it can include env values" >&2
+            fi
+            exit "${apply_rc}"
+          fi
           # The reaper removes previews idle for PREVIEW_MAX_IDLE_DAYS since this stamp.
           # Deployment metadata only, so it does not roll the pods.
           kubectl annotate deployment "teable-${INSTANCE_NAME}" --overwrite \
@@ -415,7 +473,8 @@ jobs:
           if [ "${ENABLE_TRACING}" != "true" ]; then
             kubectl delete deployment,service,ingress "teable-${INSTANCE_NAME}-jaeger" --ignore-not-found
           fi
-          rm -f "${RUNNER_TEMP}/preview.yaml"
+          rm -f "${RUNNER_TEMP}/preview.yaml" "${RUNNER_TEMP}/preview.json" "${RUNNER_TEMP}/live.json" \
+            "${RUNNER_TEMP}/apply.err"
 
       - name: Rollout status
         env:
@@ -496,6 +555,7 @@ jobs:
           ADMIN_TOKEN: ${{ steps.preview_admin.outputs.admin_token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           FAILURE_REASON: ${{ steps.diagnose.outputs.reason }}
+          KEPT_ENV: ${{ steps.render.outputs.kept_env }}
         run: |
           url="https://${INSTANCE_NAME}.${PREVIEW_DOMAIN_BASE}"
           if [ "${SUCCESS}" = "true" ]; then
@@ -517,5 +577,8 @@ jobs:
             if [ -n "${FAILURE_REASON}" ]; then
               body="${body}"$'\n'"Stuck on: \`${FAILURE_REASON}\`"
             fi
+          fi
+          if [ -n "${KEPT_ENV}" ]; then
+            body="${body}"$'\n'"🛠️ Env set by hand, kept over the template: \`${KEPT_ENV//\`/}\`. To drop one: \`kubectl set env deploy/teable-${INSTANCE_NAME} NAME-\`; the template's value, if it has one, comes back on the next deploy."
           fi
           gh api "repos/teableio/teable-ee/issues/${PR_NUMBER}/comments" -f body="${body}"
