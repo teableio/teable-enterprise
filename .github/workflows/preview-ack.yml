@@ -408,9 +408,12 @@ jobs:
           # The rendered manifest holds Secrets: write it to the runner, never print it.
           bash tooling/.github/scripts/render-preview-ack.sh > "${RUNNER_TEMP}/preview.yaml"
           # Env set by hand on the app container (kubectl set env) survives a redeploy: the
-          # literal entries that differ from the template env recorded on the Deployment at
-          # the last deploy. They are merged into the rendered manifest, so the new image and
-          # the env land in one update. Unset a variable to get the template's value back.
+          # literal and secretKeyRef entries that differ from the template env recorded on the
+          # Deployment at the last deploy. They are merged into the rendered manifest, so the
+          # new image and the env land in one update. Unset a variable to get the template's
+          # value back. For credentials, put them in a Secret labelled
+          # teable.io/preview-instance=teable-<instance> and use `kubectl set env --from`:
+          # the Deployment then holds only references, and cleanup deletes the Secret.
           app="teable-${INSTANCE_NAME}"
           kubectl get deployment "$app" --ignore-not-found -o json > "${RUNNER_TEMP}/live.json"
           kubectl create --dry-run=client -o json -f "${RUNNER_TEMP}/preview.yaml" \
@@ -424,7 +427,7 @@ jobs:
                      elif $a["kubectl.kubernetes.io/last-applied-configuration"]
                      then $a["kubectl.kubernetes.io/last-applied-configuration"] | fromjson | app_env
                      else [] end) as $base
-                  | [$d | app_env[] | select((has("valueFrom") | not) and (IN($base[]) | not))] as $manual
+                  | [$d | app_env[] | select(((has("valueFrom") | not) or .valueFrom.secretKeyRef) and (IN($base[]) | not))] as $manual
                   | .metadata.annotations["teable.io/template-env"] = (app_env | tojson)
                   | (.spec.template.spec.containers[] | select(.name == $app) | .env)
                     |= ([.[]? | . as $e | (first($manual[] | select(.name == $e.name)) // $e)] as $kept
@@ -436,7 +439,8 @@ jobs:
             select(.kind == "Deployment" and .metadata.name == $app)
             | (.metadata.annotations["teable.io/template-env"] | fromjson) as $t
             | [.spec.template.spec.containers[] | select(.name == $app) | .env[]?
-               | select(has("valueFrom") | not) | {name, value: (.value // "")}
+               | select((has("valueFrom") | not) or .valueFrom.secretKeyRef)
+               | if has("valueFrom") then . else {name, value: (.value // "")} end
                | select(IN($t[]) | not) | .name]
             | join(", ")' "${RUNNER_TEMP}/preview.json")
           if [ -n "${kept_env}" ]; then
