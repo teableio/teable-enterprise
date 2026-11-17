@@ -407,21 +407,30 @@ jobs:
           export PREVIEW_DATA_STORAGE_CLASS
           # The rendered manifest holds Secrets: write it to the runner, never print it.
           bash tooling/.github/scripts/render-preview-ack.sh > "${RUNNER_TEMP}/preview.yaml"
-          # Env set by hand (kubectl set env) is whatever differs from the last applied
-          # template; put it back after the apply. Unset a variable to get the template's value.
+          # Env set by hand on the app container (kubectl set env) survives a redeploy: the
+          # literal entries that differ from the template env recorded on the Deployment at
+          # the last deploy. They are merged into the rendered manifest, so the new image and
+          # the env land in one update. Unset a variable to get the template's value back.
           app="teable-${INSTANCE_NAME}"
-          manual_env=$(kubectl get deployment "$app" --ignore-not-found -o json | jq -r --arg app "$app" '
-            ([.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] // "{}" | fromjson
-              | .spec.template.spec.containers[]? | select(.name == $app) | .env[]?]) as $last
-            | .spec.template.spec.containers[] | select(.name == $app) | .env[]?
-            | select(has("value") and (IN($last[]) | not)) | "\(.name)=\(.value)"')
-          # Paused, the apply and the env put back roll out once, together.
-          if [ -n "$manual_env" ]; then kubectl rollout pause deployment "$app"; fi
-          kubectl apply -f "${RUNNER_TEMP}/preview.yaml"
-          if [ -n "$manual_env" ]; then
-            kubectl set env deployment "$app" -c "$app" - <<<"$manual_env"
-            kubectl rollout resume deployment "$app"
-          fi
+          kubectl get deployment "$app" --ignore-not-found -o json > "${RUNNER_TEMP}/live.json"
+          kubectl create --dry-run=client -o json -f "${RUNNER_TEMP}/preview.yaml" \
+            | jq --arg app "$app" --slurpfile live "${RUNNER_TEMP}/live.json" '
+                def norm: if has("valueFrom") then . else {name, value: (.value // "")} end;
+                def app_env: [.spec.template.spec.containers[]? | select(.name == $app) | .env[]? | norm];
+                if .kind == "Deployment" and .metadata.name == $app then
+                  ($live[0] // {}) as $d
+                  | ($d.metadata.annotations // {}) as $a
+                  | (if $a["teable.io/template-env"] then $a["teable.io/template-env"] | fromjson
+                     elif $a["kubectl.kubernetes.io/last-applied-configuration"]
+                     then $a["kubectl.kubernetes.io/last-applied-configuration"] | fromjson | app_env
+                     else [] end) as $base
+                  | [$d | app_env[] | select((has("valueFrom") | not) and (IN($base[]) | not))] as $manual
+                  | .metadata.annotations["teable.io/template-env"] = (app_env | tojson)
+                  | (.spec.template.spec.containers[] | select(.name == $app) | .env)
+                    |= ([.[]? | . as $e | (first($manual[] | select(.name == $e.name)) // $e)] as $kept
+                        | $kept + [$manual[] | select(.name as $n | all($kept[]; .name != $n))])
+                else . end' > "${RUNNER_TEMP}/preview.json"
+          kubectl apply -f "${RUNNER_TEMP}/preview.json"
           # The reaper removes previews idle for PREVIEW_MAX_IDLE_DAYS since this stamp.
           # Deployment metadata only, so it does not roll the pods.
           kubectl annotate deployment "teable-${INSTANCE_NAME}" --overwrite \
@@ -429,7 +438,7 @@ jobs:
           if [ "${ENABLE_TRACING}" != "true" ]; then
             kubectl delete deployment,service,ingress "teable-${INSTANCE_NAME}-jaeger" --ignore-not-found
           fi
-          rm -f "${RUNNER_TEMP}/preview.yaml"
+          rm -f "${RUNNER_TEMP}/preview.yaml" "${RUNNER_TEMP}/preview.json" "${RUNNER_TEMP}/live.json"
 
       - name: Rollout status
         env:
