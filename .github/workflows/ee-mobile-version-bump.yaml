@@ -5,11 +5,14 @@
 # Once App Store review approves a version, App Store Connect closes its train: uploads of that
 # version fail ("Invalid Pre-Release Train ... is closed for new build submissions") and none of
 # its builds can be submitted for external TestFlight testing. So every develop merge after an
-# approval would build for half an hour and fail at the upload. This sweep notices the approval
-# and opens a teable-ee PR moving enterprise/mobile/app.config.ts to the next patch version,
-# under a new issue in the team's issue table for the Check Issue IDs gate (a closed issue
-# cannot take a later PR, so each bump gets its own). Merging stays with a person: the version
-# is part of what ships.
+# approval would build for half an hour and fail at the upload. This sweep notices the approval,
+# opens a teable-ee PR moving enterprise/mobile/app.config.ts to the next patch version, under a
+# new issue in the team's issue table for the Check Issue IDs gate (a closed issue cannot take a
+# later PR, so each bump gets its own), and merges it at once. Merging without an approval needs
+# the teable-remote-ci App on develop's branch protection list of actors that may bypass
+# required pull requests; a reviewer approves the merged PR afterwards, as with any merge that
+# bypassed review. For a minor or major version, change app.config.ts in a PR of your own: the
+# sweep does nothing while develop's version is above every approved one.
 #
 # Public log: versions (public on the App Store anyway), the issue ID, the PR link and HTTP
 # status codes only.
@@ -21,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Only report what would be proposed'
+        description: 'Only report what would be proposed and merged'
         required: false
         type: boolean
         default: false
@@ -39,7 +42,7 @@ jobs:
     timeout-minutes: 5
     steps:
       # Remote-CI app, scoped to teable-ee: reads app.config.ts, pushes the bump
-      # branch and opens the PR. PRs opened with it still run CI.
+      # branch, opens the PR and merges it. PRs opened with it still run CI.
       - name: Mint teable-ee token
         id: app
         uses: actions/create-github-app-token@v2
@@ -51,7 +54,7 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
-      - name: Propose the next version after an approval
+      - name: Propose and merge the next version after an approval
         env:
           ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
@@ -145,8 +148,9 @@ jobs:
                   [DESCRIPTION]: [
                     `iOS ${approved} 已通过 App Store 审核，App Store Connect 随即关闭了 ${approved} 的 train：`,
                     `之后同版本号的 TestFlight 上传会失败（Invalid Pre-Release Train），也不能再提交外部测试。`,
-                    `需要把 enterprise/mobile/app.config.ts 的 version 升到 ${next}；PR 由 teable-enterprise 的`,
-                    'EE Mobile Version Bump 工作流自动开出，合并后 develop 的移动端构建恢复上传。',
+                    'teable-enterprise 的 EE Mobile Version Bump 工作流把 enterprise/mobile/app.config.ts 的',
+                    `version 升到 ${next}，自动开 PR 并直接合并进 develop，develop 的移动端构建随之恢复上传。`,
+                    '只改这一行版本号，不改代码、不涉及客户数据；要换别的版本号，另开 PR 改 version。',
                     '',
                     marker,
                   ].join('\n'),
@@ -173,6 +177,41 @@ jobs:
             const { data } = await github(`/repos/${REPO}/contents/${FILE}?ref=${encodeURIComponent(ref)}`);
             return { sha: data.sha, source: Buffer.from(data.content, 'base64').toString('utf8') };
           }
+          async function propose(approved, next, branch) {
+            const issue = await fileIssue(approved, next, branch);
+            console.log(`Issue: ${issue}`);
+            const { data: head } = await github(`/repos/${REPO}/git/ref/heads/develop`);
+            // 422: the branch is left over from an interrupted run; carry on with it.
+            await github(`/repos/${REPO}/git/refs`, 'POST', {
+              ref: `refs/heads/${branch}`, sha: head.object.sha,
+            }, [422]);
+            const onBranch = await readConfig(branch);
+            if (VERSION_LINE.exec(onBranch.source)?.[1] !== next) {
+              await github(`/repos/${REPO}/contents/${FILE}`, 'PUT', {
+                message: `chore(mobile): bump app version to ${next} ${issue}`,
+                content: Buffer.from(onBranch.source.replace(VERSION_LINE, `  version: '${next}',`)).toString('base64'),
+                sha: onBranch.sha,
+                branch,
+              });
+            }
+            const { data: pr } = await github(`/repos/${REPO}/pulls`, 'POST', {
+              title: `chore(mobile): bump app version to ${next} ${issue}`,
+              head: branch,
+              base: 'develop',
+              body: [
+                `App Store review approved iOS ${approved}, so App Store Connect closed its train:`,
+                'TestFlight uploads of that version now fail with "Invalid Pre-Release Train", and its builds',
+                'cannot be submitted for external testing. This moves `app.config.ts` to the next patch',
+                `version, ${next}, and is merged as soon as it is opened. For a minor or major version,`,
+                'change it in a PR of your own.',
+                '',
+                'Opened and merged by the EE Mobile Version Bump workflow in teable-enterprise',
+                '(source: `.github/enterprise-ci/ee-mobile-version-bump.yaml`).',
+              ].join('\n'),
+            });
+            console.log(`Opened ${pr.html_url}`);
+            return pr;
+          }
 
           (async () => {
             for (const name of ['ASC_KEY_P8', 'ASC_KEY_ID', 'ASC_ISSUER_ID', 'GH_TOKEN', 'TEABLE_API_TOKEN']) {
@@ -196,43 +235,21 @@ jobs:
 
             const next = `${approved[0]}.${approved[1]}.${approved[2] + 1}`;
             const branch = `chore/mobile-version-${next}`;
-            // Any PR for this version, open or closed: a person already decided on it.
+            // An open PR for this version is one an earlier sweep could not merge: merge it now. A
+            // closed one, merged or not, means a person already decided on this version.
             const { data: existing } = await github(
               `/repos/${REPO}/pulls?state=all&head=${encodeURIComponent(`teableio:${branch}`)}`,
             );
-            if (existing.length) return console.log(`Already proposed: ${existing[0].html_url}`);
-            if (process.env.DRY_RUN === 'true') return console.log(`Dry run: would propose ${next}`);
-
-            const issue = await fileIssue(approved.join('.'), next, branch);
-            console.log(`Issue: ${issue}`);
-            const { data: head } = await github(`/repos/${REPO}/git/ref/heads/develop`);
-            // 422: the branch is left over from an interrupted run; carry on with it.
-            await github(`/repos/${REPO}/git/refs`, 'POST', {
-              ref: `refs/heads/${branch}`, sha: head.object.sha,
-            }, [422]);
-            const onBranch = await readConfig(branch);
-            if (VERSION_LINE.exec(onBranch.source)?.[1] !== next) {
-              await github(`/repos/${REPO}/contents/${FILE}`, 'PUT', {
-                message: `chore(mobile): bump app version to ${next} ${issue}`,
-                content: Buffer.from(onBranch.source.replace(VERSION_LINE, `  version: '${next}',`)).toString('base64'),
-                sha: onBranch.sha,
-                branch,
-              });
+            const open = existing.find(pr => pr.state === 'open');
+            if (!open && existing.length) return console.log(`Already decided: ${existing[0].html_url}`);
+            if (process.env.DRY_RUN === 'true') {
+              return console.log(open ? `Dry run: would merge ${open.html_url}` : `Dry run: would propose and merge ${next}`);
             }
-            const { data: pr } = await github(`/repos/${REPO}/pulls`, 'POST', {
-              title: `chore(mobile): bump app version to ${next} ${issue}`,
-              head: branch,
-              base: 'develop',
-              body: [
-                `App Store review approved iOS ${approved.join('.')}, so App Store Connect closed its train:`,
-                'TestFlight uploads of that version now fail with "Invalid Pre-Release Train", and its builds',
-                'cannot be submitted for external testing. This moves `app.config.ts` to the next patch',
-                `version, ${next}. Change it to a minor or major version here if this release calls for one.`,
-                '',
-                'Opened by the EE Mobile Version Bump workflow in teable-enterprise',
-                '(source: `.github/enterprise-ci/ee-mobile-version-bump.yaml`).',
-              ].join('\n'),
+            const pr = open || await propose(approved.join('.'), next, branch);
+            // `sha` merges exactly the head read here: anything pushed since makes GitHub refuse.
+            await github(`/repos/${REPO}/pulls/${pr.number}/merge`, 'PUT', {
+              merge_method: 'squash', commit_title: `${pr.title} (#${pr.number})`, sha: pr.head.sha,
             });
-            console.log(`Opened ${pr.html_url}`);
+            console.log(`Merged ${pr.html_url}`);
           })().catch(error => { console.error(error.message); process.exitCode = 1; });
           NODE
