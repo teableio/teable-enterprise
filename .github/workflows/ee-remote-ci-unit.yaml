@@ -103,7 +103,10 @@ jobs:
           {
             echo "=== unit tests (${{ matrix.suite.name }}) ==="
             if [ "${{ matrix.suite.filter }}" = "community" ]; then
-              pnpm g:test-unit:community
+              pnpm g:test-unit:community &&
+              pnpm -F @teable/backend exec vitest run --config ./vitest.config.ts src/features/google-sheet-import/google-sheet-schema.spec.ts src/features/google-sheet-import/google-sheet-import-audit.spec.ts &&
+              pnpm -F @teable/v2-import test-unit &&
+              pnpm -F @teable/v2-adapter-csv-parser-papaparse test-unit
             else
               pnpm -r ${{ matrix.suite.filter }} --workspace-concurrency=1 test-unit-cover
             fi
