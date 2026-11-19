@@ -860,6 +860,7 @@ jobs:
       CI: 1
       TESTCONTAINERS_REUSE_ENABLE: 'false'
       TESTCONTAINERS_RYUK_DISABLED: 'true'
+      TEABLE_V2_TEST_SETUP_TIMING: '1'
 
     steps:
       - name: 🎫 Mint checkout token
@@ -896,7 +897,7 @@ jobs:
           status=0
           {
             echo "=== v2 e2e JSON formula cascade regression ==="
-            pnpm -C community/packages/v2/e2e exec vitest run --silent=true --bail 1 src/computed-json-formula-cascade.e2e.spec.ts
+            pnpm -C community/packages/v2/e2e exec vitest run --silent=false --bail 1 src/computed-json-formula-cascade.e2e.spec.ts
           } >> "$LOG_DIR/v2-e2e-json-formula-cascade.log" 2>&1 || status=$?
           echo "v2 e2e JSON formula cascade exit=$status ($(wc -l < "$LOG_DIR/v2-e2e-json-formula-cascade.log") log lines)"
           exit $status
