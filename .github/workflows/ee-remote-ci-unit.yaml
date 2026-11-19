@@ -53,6 +53,9 @@ jobs:
           - name: community packages
             filter: community
             shard: ''
+          - name: ai-agent-engine
+            filter: engine
+            shard: ''
 
     steps:
       - name: 🎫 Mint checkout token
@@ -81,6 +84,12 @@ jobs:
       - name: 📥 Monorepo install
         uses: ./.github/actions/pnpm-install
 
+      - name: Set up sandbox Bun runtime
+        if: matrix.suite.filter == 'engine'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
       - name: 🧩 Generate Prisma Client
         working-directory: packages/db-main-prisma
         run: |
@@ -107,6 +116,8 @@ jobs:
               pnpm -F @teable/backend exec vitest run --config ./vitest.config.ts src/features/google-sheet-import/google-sheet-schema.spec.ts src/features/google-sheet-import/google-sheet-import-audit.spec.ts &&
               pnpm -F @teable/v2-import test-unit &&
               pnpm -F @teable/v2-adapter-csv-parser-papaparse test-unit
+            elif [ "${{ matrix.suite.filter }}" = "engine" ]; then
+              pnpm --fail-if-no-match --filter @teable/ai-agent-engine test --passWithNoTests=false
             else
               pnpm -r ${{ matrix.suite.filter }} --workspace-concurrency=1 test-unit-cover
             fi
