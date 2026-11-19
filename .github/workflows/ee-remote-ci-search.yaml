@@ -227,6 +227,7 @@ jobs:
             pnpm --filter @teable/v2-adapter-table-query-ops-postgres exec vitest run \
               src/searchVector.integration.spec.ts \
               src/searchVector.lifecycle.db.spec.ts \
+              src/searchResidual.lifecycle.db.spec.ts \
               --bail 1
           } >> "$LOG_DIR/search-postgres.log" 2>&1 || status=$?
           echo "search postgres exit=$status ($(wc -l < "$LOG_DIR/search-postgres.log") log lines)"
