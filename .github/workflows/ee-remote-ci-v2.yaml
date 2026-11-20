@@ -511,6 +511,11 @@ jobs:
             fi
             echo "=== ${{ matrix.edition.script }}: inline query enabled (including real copied-App query execution) ==="
             V2_DATA_QUERY_ENABLED=1 V2_DATA_QUERY_EXECUTE_ENABLED=true pnpm --fail-if-no-match -F @teable/backend-ee "${{ matrix.edition.script }}" test/data-query.e2e-spec-edition.ts --passWithNoTests=false
+            QUERY_LIBRARY_ENABLED=1 V2_DATA_QUERY_ENABLED=1 pnpm --fail-if-no-match -F @teable/backend-ee "${{ matrix.edition.script }}" test/query-library.e2e-spec-edition.ts test/app-query-health.e2e-spec-edition.ts --passWithNoTests=false
+            QUERY_LIBRARY_ENABLED=0 V2_DATA_QUERY_ENABLED=1 pnpm --fail-if-no-match -F @teable/backend-ee "${{ matrix.edition.script }}" test/query-library.e2e-spec-edition.ts -t 'library disabled' --passWithNoTests=false
+            if [ "${{ matrix.edition.label }}" = "CLOUD" ]; then
+              QUERY_LIBRARY_ENABLED=1 V2_DATA_QUERY_ENABLED=1 pnpm --fail-if-no-match -F @teable/backend-ee "${{ matrix.edition.script }}" test/mcp-data-query.e2e-spec.ts test/query-chat-privacy.e2e-spec.ts --passWithNoTests=false
+            fi
             echo "=== ${{ matrix.edition.script }}: inline query disabled ==="
             V2_DATA_QUERY_ENABLED=false V2_DATA_QUERY_EXECUTE_ENABLED=false pnpm --fail-if-no-match -F @teable/backend-ee "${{ matrix.edition.script }}" test/data-query-disabled.e2e-spec-edition.ts --passWithNoTests=false
           ) >> "$LOG_FILE" 2>&1
