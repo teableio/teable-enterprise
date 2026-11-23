@@ -36,10 +36,12 @@ jobs:
       contains(fromJson(github.event.client_payload.filters), 'v2_adapter_repository_postgres') ||
       contains(fromJson(github.event.client_payload.filters), 'v2_adapter_table_query_ops_postgres') ||
       contains(fromJson(github.event.client_payload.filters), 'v2_adapter_table_repository_postgres') ||
+      contains(fromJson(github.event.client_payload.filters), 'v2_adapter_vcs_postgres') ||
       contains(fromJson(github.event.client_payload.filters), 'v2_core') ||
       contains(fromJson(github.event.client_payload.filters), 'v2_data_query') ||
       contains(fromJson(github.event.client_payload.filters), 'v2_formula_sql_pg') ||
-      contains(fromJson(github.event.client_payload.filters), 'v2_table_query_ops')
+      contains(fromJson(github.event.client_payload.filters), 'v2_table_query_ops') ||
+      contains(fromJson(github.event.client_payload.filters), 'v2_vcs')
     runs-on: ubuntu-latest
     name: V2 Unit Dependencies
     timeout-minutes: 15
@@ -104,6 +106,8 @@ jobs:
             --filter
             @teable/v2-adapter-table-repository-postgres...
             --filter
+            @teable/v2-adapter-vcs-postgres...
+            --filter
             @teable/v2-core...
             --filter
             @teable/core...
@@ -111,6 +115,8 @@ jobs:
             @teable/v2-formula-sql-pg...
             --filter
             @teable/v2-table-query-ops...
+            --filter
+            @teable/v2-vcs...
             --filter
             @teable/v2-contract-http-client...
             --filter
@@ -233,6 +239,12 @@ jobs:
           - label: '@teable/v2-table-query-ops'
             name: '@teable/v2-table-query-ops'
             gate: v2_table_query_ops
+          - label: '@teable/v2-adapter-vcs-postgres'
+            name: '@teable/v2-adapter-vcs-postgres'
+            gate: v2_adapter_vcs_postgres
+          - label: '@teable/v2-vcs'
+            name: '@teable/v2-vcs'
+            gate: v2_vcs
           - label: '@teable/v2-data-query'
             name: '@teable/v2-data-query'
             gate: v2_data_query

@@ -273,7 +273,10 @@ jobs:
           mkdir -p "$LOG_DIR"
           status=0
           {
-            pnpm --fail-if-no-match -r --filter-prod '@teable/app-platform-identity-adapter-prisma...' --sort run build
+            for pkg in identity identity-adapter-prisma; do
+              echo "=== build @teable/app-platform-$pkg ===" &&
+              pnpm --fail-if-no-match -F "@teable/app-platform-$pkg" build || exit $?
+            done
           } >> "$LOG_DIR/unit-app-platform.log" 2>&1 || status=$?
           echo "build exit=$status"
           exit $status
