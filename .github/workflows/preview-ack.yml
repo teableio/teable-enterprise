@@ -337,8 +337,8 @@ jobs:
           fi
 
       # Created once: redeploys must keep the database, Redis and MinIO credentials the
-      # data was written with. The app's signing secrets and the admin password live
-      # here too, random per preview.
+      # data was written with. The app's root secret, its signing secrets and the admin
+      # password live here too, random per preview.
       - name: Ensure the data Secret
         run: |
           set -euo pipefail
@@ -349,7 +349,11 @@ jobs:
             # A preview created before the signing secrets moved here gets them on its
             # next deploy, which signs its users out once. Its admin password is not
             # added: the account already exists with the password it was created with.
-            for key in BACKEND_JWT_SECRET BACKEND_SESSION_SECRET; do
+            # SECRET_KEY is added the same way: a later app version refuses to start
+            # without one. It signs nobody out, since the signing secrets have their own
+            # values, and the template's decrypt-only variables keep what the preview
+            # stored before readable (teable-ee preview-template.ack.yaml).
+            for key in SECRET_KEY BACKEND_JWT_SECRET BACKEND_SESSION_SECRET; do
               if [ -z "$(kubectl get secret "${name}" -o jsonpath="{.data.${key}}")" ]; then
                 kubectl patch secret "${name}" --type merge \
                   -p "{\"data\":{\"${key}\":\"$(b64 "$(openssl rand -hex 32)")\"}}"
@@ -370,6 +374,7 @@ jobs:
             REDIS_PASSWORD: $(b64 "$(openssl rand -hex 24)")
             MINIO_ROOT_USER: $(b64 teable)
             MINIO_ROOT_PASSWORD: $(b64 "$(openssl rand -hex 24)")
+            SECRET_KEY: $(b64 "$(openssl rand -hex 32)")
             BACKEND_JWT_SECRET: $(b64 "$(openssl rand -hex 32)")
             BACKEND_SESSION_SECRET: $(b64 "$(openssl rand -hex 32)")
             PREVIEW_ADMIN_PASSWORD: $(b64 "pv1$(openssl rand -hex 12)")
