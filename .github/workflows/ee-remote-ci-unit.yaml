@@ -119,6 +119,9 @@ jobs:
             elif [ "${{ matrix.suite.filter }}" = "engine" ]; then
               pnpm --fail-if-no-match --filter @teable/ai-agent-engine test --passWithNoTests=false
             else
+              if [ "${{ matrix.suite.name }}" = "packages" ]; then
+                pnpm --fail-if-no-match -F @teable/query-library test-unit || exit $?
+              fi
               pnpm -r ${{ matrix.suite.filter }} --workspace-concurrency=1 test-unit-cover
             fi
           } >> "$LOG_DIR/unit-$SLUG.log" 2>&1 || status=$?
