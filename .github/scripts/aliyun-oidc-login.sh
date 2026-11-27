@@ -11,8 +11,8 @@
 # Outputs (GITHUB_ENV): ALIBABA_CLOUD_ACCESS_KEY_ID / _SECRET / _SECURITY_TOKEN
 #
 # Every network call retries transient failures (connection errors, timeouts,
-# HTTP 408 / 429 / 5xx). A single GitHub 504 on the CLI download once stopped a
-# whole stable release; any other HTTP error still fails at once.
+# HTTP 408 / 429 / 5xx); any other HTTP error still fails at once. The logs of
+# this repository are public, so nothing here prints a token or a raw response.
 set -euo pipefail
 
 : "${ALIYUN_ROLE_ARN:?}" "${ALIYUN_OIDC_PROVIDER_ARN:?}"
@@ -59,6 +59,8 @@ for attempt in $(seq 1 "${STS_ATTEMPTS}"); do
     echo "::error::the GitHub OIDC token request returned no token" >&2
     exit 1
   fi
+  # It can be exchanged for credentials until it expires.
+  echo "::add-mask::${oidc_token}"
   code="$(assume_role "${sts_body}" "${oidc_token}")" || code=000
   case "${code}" in
     2??) break ;;
@@ -70,8 +72,10 @@ for attempt in $(seq 1 "${STS_ATTEMPTS}"); do
       fi
       ;;
   esac
-  # A failed call carries no credentials, so its body is safe to show.
-  echo "::error::AssumeRoleWithOIDC failed with HTTP ${code}: $(head -c 500 "${sts_body}" 2>/dev/null)" >&2
+  # Only the fields needed to diagnose; the raw body never reaches the log.
+  detail="$(jq -r '"\(.Code // "no error code"): \(.Message // "" | .[0:300]) (RequestId \(.RequestId // "n/a"))"' \
+    "${sts_body}" 2>/dev/null)" || detail="response is not JSON"
+  echo "::error::AssumeRoleWithOIDC failed with HTTP ${code}: ${detail}" >&2
   exit 1
 done
 resp="$(cat "${sts_body}")"
